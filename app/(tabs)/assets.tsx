@@ -18,7 +18,7 @@ import {
   liquidTotalEGP,
   totalAssetsEGP,
 } from '@/store/selectors';
-import type { Account, CurrencyCode, GoldKarat, Holding } from '@/store/types';
+import type { Account, CurrencyCode, GoldKarat, Holding, Location } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toEGP } from '@/utils/currency';
 import { confirmAction, showMessage } from '@/utils/dialogs';
@@ -39,6 +39,7 @@ interface FormState {
   weightGrams: string;
   karat: KaratOption;
   purchasePrice: string;
+  location: Location;
 }
 
 const INITIAL_FORM: FormState = {
@@ -49,6 +50,7 @@ const INITIAL_FORM: FormState = {
   weightGrams: '',
   karat: '24',
   purchasePrice: '',
+  location: 'EG',
 };
 
 const ACCOUNT_TYPE_LABELS: Record<Account['type'], string> = {
@@ -187,6 +189,7 @@ export default function AssetsScreen() {
               name,
               weightGrams: parseFloat(form.weightGrams) || 0,
               karat: Number(form.karat) as GoldKarat,
+              location: form.location,
               // Entered in the selected currency; holdings store cost in EGP.
               purchaseCostEGP: toEGP(
                 parseFloat(form.purchasePrice) || 0,
@@ -201,6 +204,7 @@ export default function AssetsScreen() {
               type,
               currency: form.currency,
               openingBalance: parseFloat(form.amount) || 0,
+              location: form.location,
             })
           );
 
@@ -328,6 +332,17 @@ export default function AssetsScreen() {
             />
           </>
         )}
+
+        {/* Location */}
+        <FieldLabel>المكان</FieldLabel>
+        <Segment<Location>
+          options={[
+            { label: 'مصر', value: 'EG' },
+            { label: 'السعودية', value: 'SA' },
+          ]}
+          value={form.location}
+          onChange={(v) => set('location', v)}
+        />
 
         {/* Currency */}
         <FieldLabel>العملة</FieldLabel>

@@ -12,12 +12,12 @@ import {
   fundRequiredMonthly,
   fundStatus,
 } from '@/store/selectors';
-import type { FinanceStateV2, Fund } from '@/store/types';
+import type { FinanceState, Fund } from '@/store/types';
 import { formatCurrency, formatDate } from '@/utils/formatters';
 
 interface FundCardProps {
   fund: Fund;
-  state: FinanceStateV2;
+  state: FinanceState;
   onPress: () => void;
 }
 

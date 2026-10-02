@@ -4,21 +4,33 @@
 
 export type CurrencyCode = 'EGP' | 'SAR' | 'USD';
 
+// Every synced entity carries the time it was last created or changed (ISO), so a future
+// server sync can resolve conflicts. Store operations set it; never edit it by hand.
+interface Synced {
+  updatedAt: string;
+}
+
+// Country the money or asset physically sits in.
+export type Location = 'EG' | 'SA';
+
 export type Bucket = 'essentials' | 'lifestyle' | 'giving' | 'income';
 export type ExpenseBucket = Exclude<Bucket, 'income'>;
 
-export interface Account {
+export interface Account extends Synced {
   id: string;
   name: string;
   type: 'cash' | 'bank' | 'wallet';
   currency: CurrencyCode;
   // Balance is derived (see accountBalance selector), never stored.
   openingBalance: number;
+  // The date openingBalance refers to.
+  openingDate?: string;
+  location: Location;
   createdAt: string;
   archived?: boolean;
 }
 
-export interface Category {
+export interface Category extends Synced {
   id: string;
   name: string;
   kind: 'income' | 'expense';
@@ -26,7 +38,7 @@ export interface Category {
   isDefault: boolean;
 }
 
-interface TransactionBase {
+interface TransactionBase extends Synced {
   id: string;
   amount: number;
   date: string;
@@ -44,6 +56,8 @@ export interface IncomeExpenseTransaction extends TransactionBase {
   categoryId: string;
   recurringRuleId?: string;
   liabilityId?: string;
+  // A one-off expense (e.g. furnishing): excluded from monthly averages.
+  oneTime?: boolean;
 }
 
 export interface TransferTransaction extends TransactionBase {
@@ -55,11 +69,21 @@ export interface TransferTransaction extends TransactionBase {
   toAmount: number;
 }
 
-export type Transaction = IncomeExpenseTransaction | TransferTransaction;
+// Cash turned into a holding (e.g. buying gold). Lowers the account balance but is not an
+// expense: it is excluded from spending, savings rate and averages.
+export interface AssetPurchaseTransaction extends TransactionBase {
+  type: 'asset_purchase';
+  accountId: string;
+  // Always equals the account's currency.
+  currency: CurrencyCode;
+  holdingId: string;
+}
+
+export type Transaction = IncomeExpenseTransaction | TransferTransaction | AssetPurchaseTransaction;
 
 export type SinkingFrequency = 'yearly' | 'semiannual' | 'quarterly';
 
-export interface Fund {
+export interface Fund extends Synced {
   id: string;
   name: string;
   type: 'emergency' | 'goal' | 'sinking';
@@ -79,7 +103,7 @@ export interface Fund {
   nextDueDate?: string;
 }
 
-export interface FundMovement {
+export interface FundMovement extends Synced {
   id: string;
   fundId: string;
   // In the fund's currency: positive = allocate, negative = withdraw.
@@ -90,7 +114,7 @@ export interface FundMovement {
 
 export type GoldKarat = 18 | 21 | 24;
 
-export interface GoldHolding {
+export interface GoldHolding extends Synced {
   id: string;
   type: 'gold';
   name: string;
@@ -98,9 +122,11 @@ export interface GoldHolding {
   karat: GoldKarat;
   purchaseCostEGP: number;
   purchaseDate?: string;
+  location?: Location; // treated as 'EG' when missing
+  note?: string;
 }
 
-export interface CurrencyHolding {
+export interface CurrencyHolding extends Synced {
   id: string;
   type: 'currency';
   name: string;
@@ -108,11 +134,13 @@ export interface CurrencyHolding {
   quantity: number;
   purchaseCostEGP: number;
   purchaseDate?: string;
+  location?: Location; // treated as 'EG' when missing
+  note?: string;
 }
 
 export type Holding = GoldHolding | CurrencyHolding;
 
-export interface Liability {
+export interface Liability extends Synced {
   id: string;
   name: string;
   principal: number;
@@ -122,7 +150,7 @@ export interface Liability {
   notes?: string;
 }
 
-export interface RecurringRule {
+export interface RecurringRule extends Synced {
   id: string;
   name: string;
   type: 'income' | 'expense';
@@ -135,7 +163,7 @@ export interface RecurringRule {
   active: boolean;
 }
 
-export interface MonthlyPlan {
+export interface MonthlyPlan extends Synced {
   month: string; // 'YYYY-MM'
   expectedIncomeEGP: number;
   bucketLimitsEGP: Partial<Record<Bucket, number>>;
@@ -158,12 +186,40 @@ export interface LastUsedSelection {
 export interface Settings {
   exchangeRates: ExchangeRates;
   goldPrice24kEGP: number;
+  // Market price of 21k, stored separately (it isn't exactly 24k × 21/24). 18k derives from 24k.
+  goldPrice21kEGP: number;
   goldPriceUpdatedAt: string;
+  // Cash-flow reporting (monthSummary) ignores transactions before this date.
+  trackingStartDate: string;
+  // Identifies this installation in backups and (later) sync. Created once.
+  deviceId: string;
+  lastBackupAt?: string;
+  // Require biometrics / device PIN to open the app.
+  appLockEnabled?: boolean;
   // Optional, so v2 data without it stays valid (no migration needed).
   lastUsed?: LastUsedSelection;
 }
 
-export interface FinanceStateV2 {
+export type SyncEntity =
+  | 'account'
+  | 'category'
+  | 'transaction'
+  | 'fund'
+  | 'fundMovement'
+  | 'holding'
+  | 'liability'
+  | 'recurringRule'
+  | 'monthlyPlan';
+
+// Log of deletions for a future server sync. Deleted data is really removed from its
+// collection; selectors never look at tombstones. Monthly plans use their month as id.
+export interface Tombstone {
+  entity: SyncEntity;
+  id: string;
+  deletedAt: string;
+}
+
+export interface FinanceState {
   accounts: Account[];
   categories: Category[];
   transactions: Transaction[];
@@ -174,4 +230,5 @@ export interface FinanceStateV2 {
   recurringRules: RecurringRule[];
   monthlyPlans: MonthlyPlan[];
   settings: Settings;
+  tombstones: Tombstone[];
 }

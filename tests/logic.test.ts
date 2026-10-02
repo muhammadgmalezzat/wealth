@@ -2,12 +2,33 @@
 // TypeScript 6 no longer auto-includes @types packages, so opt in to Node types here.
 /// <reference types="node" />
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
 import { FinanceValidationError } from '@/store/errors';
-import { migratePersistedState, type FinanceStateV1 } from '@/store/migrations';
+import {
+  BackupError,
+  backupFileName,
+  backupPreview,
+  createBackup,
+  openBackup,
+  parseBackup,
+  PBKDF2_ITERATIONS,
+  serializeBackup,
+  utf8Decode,
+  utf8Encode,
+  type BackupFile,
+  type EncryptedPayload,
+} from '@/store/backup';
+import {
+  CURRENT_VERSION,
+  migratePersistedState,
+  migrateV2toV3,
+  migrateV3toV4,
+  type FinanceStateV1,
+} from '@/store/migrations';
 import * as ops from '@/store/operations';
 import {
   accountBalance,
@@ -17,11 +38,14 @@ import {
   fundProgress,
   fundRequiredMonthly,
   fundStatus,
+  goldTotals,
   groupTransactionsByDay,
   holdingsTotalEGP,
   liabilitiesTotalEGP,
+  liquidByCurrency,
   liquidTotalEGP,
   monthSummary,
+  netWorthByLocation,
   netWorthEGP,
   openingBalanceForCurrentBalance,
   planCover,
@@ -34,7 +58,7 @@ import {
   unassignedEGP,
   unassignedEGPWithFundCash,
 } from '@/store/selectors';
-import type { FinanceStateV2, Fund } from '@/store/types';
+import type { FinanceState, Fund } from '@/store/types';
 import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
 import { formatDayLabel } from '@/utils/formatters';
@@ -44,14 +68,16 @@ import { parseAmount } from '@/utils/parseAmount';
 
 const RATES = { SAR_EGP: 12.5, USD_EGP: 50, lastUpdated: '2026-10-01T00:00:00.000Z' };
 const NOW = new Date(2026, 9, 15, 12); // 15 Oct 2026, local time
-const MIGRATION_CTX = { now: '2026-10-15T09:00:00.000Z' };
+const MIGRATION_CTX = { now: '2026-10-15T09:00:00.000Z', newId: () => 'migrated-device' };
+// updatedAt for hand-built fixtures.
+const T0 = '2026-01-01T00:00:00.000Z';
 
 function makeCtx(): ops.OpContext {
   let seq = 0;
   return { newId: () => `id-${++seq}`, now: () => NOW };
 }
 
-function emptyState(): FinanceStateV2 {
+function emptyState(): FinanceState {
   return {
     accounts: [],
     categories: DEFAULT_CATEGORIES,
@@ -62,11 +88,20 @@ function emptyState(): FinanceStateV2 {
     liabilities: [],
     recurringRules: [],
     monthlyPlans: [],
-    settings: { exchangeRates: RATES, goldPrice24kEGP: 6000, goldPriceUpdatedAt: '2026-10-01T00:00:00.000Z' },
+    settings: {
+      exchangeRates: RATES,
+      goldPrice24kEGP: 6000,
+      goldPrice21kEGP: 6000 * (21 / 24),
+      goldPriceUpdatedAt: '2026-10-01T00:00:00.000Z',
+      // Early enough that every fixture month counts.
+      trackingStartDate: '2026-01-01',
+      deviceId: 'test-device',
+    },
+    tombstones: [],
   };
 }
 
-const apply = (state: FinanceStateV2, patch: Partial<FinanceStateV2>): FinanceStateV2 => ({
+const apply = (state: FinanceState, patch: Partial<FinanceState>): FinanceState => ({
   ...state,
   ...patch,
 });
@@ -76,13 +111,20 @@ const approx = (actual: number | null, expected: number) => {
   assert.ok(Math.abs((actual as number) - expected) < 1e-6, `expected ${expected}, got ${actual}`);
 };
 
-const account = (id: string, currency: 'EGP' | 'SAR' | 'USD', openingBalance: number) => ({
+const account = (
+  id: string,
+  currency: 'EGP' | 'SAR' | 'USD',
+  openingBalance: number,
+  location: 'EG' | 'SA' = 'EG'
+) => ({
   id,
   name: id,
   type: 'bank' as const,
   currency,
   openingBalance,
+  location,
   createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: T0,
 });
 
 const fund = (overrides: Partial<Fund> & Pick<Fund, 'id'>): Fund => ({
@@ -93,6 +135,7 @@ const fund = (overrides: Partial<Fund> & Pick<Fund, 'id'>): Fund => ({
   priority: 1,
   linkedHoldingIds: [],
   createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: T0,
   ...overrides,
 });
 
@@ -211,9 +254,9 @@ describe('migration', () => {
     assert.equal(netWorthEGP(v2), 0);
   });
 
-  it('leaves v2 data untouched', () => {
+  it('leaves current-version data untouched', () => {
     const state = emptyState();
-    const result = migratePersistedState(state, 2, MIGRATION_CTX);
+    const result = migratePersistedState(state, CURRENT_VERSION, MIGRATION_CTX);
     assert.equal(result.state, state);
     assert.equal(result.clampedBy, 0);
   });
@@ -238,8 +281,8 @@ describe('netWorthEGP', () => {
     let s = emptyState();
     s.accounts = [account('egp', 'EGP', 10000), account('sar', 'SAR', 1000)];
     s.holdings = [
-      { id: 'gold', type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 50000 },
-      { id: 'usd', type: 'currency', name: 'USD', currency: 'USD', quantity: 100, purchaseCostEGP: 4800 },
+      { id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 50000 },
+      { id: 'usd', updatedAt: T0, type: 'currency', name: 'USD', currency: 'USD', quantity: 100, purchaseCostEGP: 4800 },
     ];
     s = apply(s, ops.addLiability(s, { name: 'Car', principal: 20000, currency: 'EGP', startDate: '2026-01-01' }, ctx));
     const liabilityId = s.liabilities[0].id;
@@ -270,9 +313,9 @@ describe('netWorthEGP', () => {
 // --- Funds ------------------------------------------------------------------
 
 describe('funds', () => {
-  const withGold = (): FinanceStateV2 => ({
+  const withGold = (): FinanceState => ({
     ...emptyState(),
-    holdings: [{ id: 'gold', type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 50000 }],
+    holdings: [{ id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 50000 }],
   });
 
   it('fundCurrent = cash movements + market value of linked gold (in fund currency)', () => {
@@ -282,8 +325,8 @@ describe('funds', () => {
       fund({ id: 'sar', currency: 'SAR', targetAmount: 10000, linkedHoldingIds: ['gold'] }),
     ];
     s.fundMovements = [
-      { id: 'm1', fundId: 'egp', amount: 10000, date: '2026-09-01' },
-      { id: 'm2', fundId: 'sar', amount: 200, date: '2026-09-01' },
+      { id: 'm1', updatedAt: T0, fundId: 'egp', amount: 10000, date: '2026-09-01' },
+      { id: 'm2', updatedAt: T0, fundId: 'sar', amount: 200, date: '2026-09-01' },
     ];
     approx(fundCurrent(s, 'egp'), 60000 + 10000);
     approx(fundProgress(s, 'egp'), 0.7);
@@ -297,7 +340,7 @@ describe('funds', () => {
       fund({ id: 'open' }),
       fund({ id: 'overdue', deadline: '2026-01-31' }),
     ];
-    s.fundMovements = [{ id: 'm1', fundId: 'dated', amount: 10000, date: '2026-09-01' }];
+    s.fundMovements = [{ id: 'm1', updatedAt: T0, fundId: 'dated', amount: 10000, date: '2026-09-01' }];
     approx(fundRequiredMonthly(s, 'dated', NOW), (100000 - 70000) / 3); // Oct, Nov, Dec
     assert.equal(fundRequiredMonthly(s, 'open', NOW), null);
     approx(fundRequiredMonthly(s, 'overdue', NOW), 100000); // everything due now
@@ -307,7 +350,7 @@ describe('funds', () => {
     const ctx = makeCtx();
     const base = withGold();
     base.funds = [fund({ id: 'f', deadline: '2026-12-31', linkedHoldingIds: ['gold'] }), fund({ id: 'open' })];
-    base.fundMovements = [{ id: 'm1', fundId: 'f', amount: 10000, date: '2026-09-01' }];
+    base.fundMovements = [{ id: 'm1', updatedAt: T0, fundId: 'f', amount: 10000, date: '2026-09-01' }];
     // At month start: 70,000 of 100,000 → 10,000/month required.
     const allocate = (amount: number) => apply(base, ops.allocateToFund(base, 'f', amount, undefined, ctx));
 
@@ -322,7 +365,7 @@ describe('funds', () => {
     const ctx = makeCtx();
     const s = withGold();
     s.funds = [fund({ id: 'f', linkedHoldingIds: ['gold'] })];
-    s.fundMovements = [{ id: 'm1', fundId: 'f', amount: 1000, date: '2026-09-01' }];
+    s.fundMovements = [{ id: 'm1', updatedAt: T0, fundId: 'f', amount: 1000, date: '2026-09-01' }];
     assert.throws(() => ops.withdrawFromFund(s, 'f', 1500, undefined, ctx), ops.FinanceValidationError);
     const after = apply(s, ops.withdrawFromFund(s, 'f', 400, 'repair', ctx));
     approx(fundCurrent(after, 'f'), 60000 + 600);
@@ -333,11 +376,11 @@ describe('unassignedEGP', () => {
   it('= liquid − cash allocated to funds (linked holdings excluded)', () => {
     const s = emptyState();
     s.accounts = [account('egp', 'EGP', 50000), account('sar', 'SAR', 2000)];
-    s.holdings = [{ id: 'gold', type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 0 }];
+    s.holdings = [{ id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 0 }];
     s.funds = [fund({ id: 'egp-fund', linkedHoldingIds: ['gold'] }), fund({ id: 'sar-fund', currency: 'SAR' })];
     s.fundMovements = [
-      { id: 'm1', fundId: 'egp-fund', amount: 30000, date: '2026-09-01' },
-      { id: 'm2', fundId: 'sar-fund', amount: 400, date: '2026-09-01' },
+      { id: 'm1', updatedAt: T0, fundId: 'egp-fund', amount: 30000, date: '2026-09-01' },
+      { id: 'm2', updatedAt: T0, fundId: 'sar-fund', amount: 400, date: '2026-09-01' },
     ];
     approx(unassignedEGP(s), 50000 + 2000 * 12.5 - 30000 - 400 * 12.5);
   });
@@ -375,7 +418,7 @@ describe('monthSummary', () => {
     approx(summary.savingsRate, (120000 - 22300) / 120000);
     assert.equal(monthSummary(s, '2026-08').savingsRate, null);
 
-    s = apply(s, ops.setMonthlyPlan(s, { month: '2026-10', expectedIncomeEGP: 120000, bucketLimitsEGP: { lifestyle: 5000 } }));
+    s = apply(s, ops.setMonthlyPlan(s, { month: '2026-10', expectedIncomeEGP: 120000, bucketLimitsEGP: { lifestyle: 5000 } }, makeCtx()));
     approx(safeToSpend(s, '2026-10'), 5000 - 1300);
     assert.equal(safeToSpend(s, '2026-11'), null);
   });
@@ -395,7 +438,7 @@ describe('monthSummary', () => {
 // --- Transfers & validation -------------------------------------------------
 
 describe('transfers', () => {
-  const twoAccounts = (): FinanceStateV2 => ({
+  const twoAccounts = (): FinanceState => ({
     ...emptyState(),
     accounts: [account('sar', 'SAR', 1000), account('egp', 'EGP', 0)],
   });
@@ -431,7 +474,7 @@ describe('transfers', () => {
 
 describe('action validation', () => {
   it('rejects bad amounts and unknown or mismatched references', () => {
-    const s: FinanceStateV2 = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
+    const s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
     const ctx = makeCtx();
     const expense = (input: Partial<ops.NewIncomeExpense>) =>
       ops.addTransaction(
@@ -450,9 +493,9 @@ describe('action validation', () => {
 
   it('refuses to delete an account that has transactions', () => {
     const ctx = makeCtx();
-    let s: FinanceStateV2 = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
+    let s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
     s = apply(s, ops.addTransaction(s, { type: 'income', amount: 10, currency: 'EGP', accountId: 'egp', categoryId: 'cat-income-salary', date: '2026-10-01' }, ctx));
-    assert.throws(() => ops.deleteAccount(s, 'egp'), { code: 'ACCOUNT_IN_USE' });
+    assert.throws(() => ops.deleteAccount(s, 'egp', makeCtx()), { code: 'ACCOUNT_IN_USE' });
   });
 
   it('maps every error to an Arabic message', () => {
@@ -467,11 +510,11 @@ describe('action validation', () => {
 // --- Follow-up rules --------------------------------------------------------
 
 describe('one fund per holding', () => {
-  const state = (): FinanceStateV2 => ({
+  const state = (): FinanceState => ({
     ...emptyState(),
     holdings: [
-      { id: 'gold', type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 0 },
-      { id: 'usd', type: 'currency', name: 'USD', currency: 'USD', quantity: 100, purchaseCostEGP: 0 },
+      { id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 0 },
+      { id: 'usd', updatedAt: T0, type: 'currency', name: 'USD', currency: 'USD', quantity: 100, purchaseCostEGP: 0 },
     ],
     funds: [fund({ id: 'a', linkedHoldingIds: ['gold'] })],
   });
@@ -483,21 +526,21 @@ describe('one fund per holding', () => {
       code: 'HOLDING_ALREADY_LINKED',
     });
     assert.doesNotThrow(() => ops.addFund(s, { ...input, linkedHoldingIds: ['usd'] }, makeCtx()));
-    assert.throws(() => ops.updateFund(s, { ...s.funds[0], linkedHoldingIds: ['usd', 'usd'] }), {
+    assert.throws(() => ops.updateFund(s, { ...s.funds[0], linkedHoldingIds: ['usd', 'usd'] }, makeCtx()), {
       code: 'HOLDING_ALREADY_LINKED',
     });
   });
 
   it('lets a fund keep its own links when it is updated', () => {
     const s = state();
-    assert.doesNotThrow(() => ops.updateFund(s, { ...s.funds[0], name: 'Renamed', linkedHoldingIds: ['gold', 'usd'] }));
+    assert.doesNotThrow(() => ops.updateFund(s, { ...s.funds[0], name: 'Renamed', linkedHoldingIds: ['gold', 'usd'] }, makeCtx()));
   });
 });
 
 describe('set current balance', () => {
   it('solves openingBalance so the derived balance equals the entered one', () => {
     const ctx = makeCtx();
-    let s: FinanceStateV2 = { ...emptyState(), accounts: [account('egp', 'EGP', 1000), account('sar', 'SAR', 0)] };
+    let s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 1000), account('sar', 'SAR', 0)] };
     s = apply(s, ops.addTransaction(s, { type: 'income', amount: 500, currency: 'EGP', accountId: 'egp', categoryId: 'cat-income-salary', date: '2026-10-01' }, ctx));
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 200, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-10-02' }, ctx));
     s = apply(s, ops.addTransfer(s, { fromAccountId: 'egp', toAccountId: 'sar', amount: 100, date: '2026-10-03' }, ctx));
@@ -506,7 +549,7 @@ describe('set current balance', () => {
     const egp = s.accounts[0];
     s = apply(
       s,
-      ops.updateAccount(s, { ...egp, name: 'Main', openingBalance: openingBalanceForCurrentBalance(s, 'egp', 5000) })
+      ops.updateAccount(s, { ...egp, name: 'Main', openingBalance: openingBalanceForCurrentBalance(s, 'egp', 5000) }, makeCtx())
     );
     approx(accountBalance(s, 'egp'), 5000);
     assert.equal(s.accounts[0].openingBalance, 4800);
@@ -516,11 +559,11 @@ describe('set current balance', () => {
 
 describe('editFund', () => {
   // 50,000 liquid; 30,000 already allocated → 20,000 unassigned.
-  const state = (): FinanceStateV2 => ({
+  const state = (): FinanceState => ({
     ...emptyState(),
     accounts: [account('egp', 'EGP', 50000)],
     funds: [fund({ id: 'f', deadline: '2026-12-31' })],
-    fundMovements: [{ id: 'm1', fundId: 'f', amount: 30000, date: '2026-09-01' }],
+    fundMovements: [{ id: 'm1', updatedAt: T0, fundId: 'f', amount: 30000, date: '2026-09-01' }],
   });
   const edit = (cashAllocation: number): ops.FundEdit => ({
     name: ' Wedding ',
@@ -548,7 +591,7 @@ describe('editFund', () => {
   });
 
   it('always allows reducing an allocation, even when unassigned is already negative', () => {
-    const s: FinanceStateV2 = { ...state(), accounts: [account('egp', 'EGP', 10000)] }; // unassigned −20,000
+    const s: FinanceState = { ...state(), accounts: [account('egp', 'EGP', 10000)] }; // unassigned −20,000
     const after = apply(s, ops.editFund(s, 'f', edit(25000), makeCtx()));
     approx(unassignedEGP(after), -15000);
   });
@@ -587,7 +630,7 @@ describe('transaction lists', () => {
   // Two accounts, a mix of types, currencies and days.
   const build = () => {
     const ctx = makeCtx();
-    let s: FinanceStateV2 = { ...emptyState(), accounts: [account('egp', 'EGP', 0), account('sar', 'SAR', 1000)] };
+    let s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0), account('sar', 'SAR', 1000)] };
     const add = (input: ops.NewIncomeExpense) => {
       s = apply(s, ops.addTransaction(s, input, ctx));
     };
@@ -634,7 +677,7 @@ describe('transaction lists', () => {
 
 describe('editing transactions', () => {
   const setup = () => {
-    let s: FinanceStateV2 = {
+    let s: FinanceState = {
       ...emptyState(),
       accounts: [account('sar', 'SAR', 0), account('sar2', 'SAR', 0), account('egp', 'EGP', 0)],
     };
@@ -646,7 +689,7 @@ describe('editing transactions', () => {
     return apply(s, ops.updateRates(s, { ...RATES, SAR_EGP: 14 }));
   };
 
-  const expenseOf = (s: FinanceStateV2) => {
+  const expenseOf = (s: FinanceState) => {
     const tx = s.transactions[0];
     if (tx.type !== 'expense') throw new Error('expected an expense');
     return tx;
@@ -657,7 +700,7 @@ describe('editing transactions', () => {
     const tx = expenseOf(s);
     const after = apply(
       s,
-      ops.updateTransaction(s, { ...tx, amount: 150, accountId: 'sar2', rateToEGP: 999, createdAt: 'tampered' })
+      ops.updateTransaction(s, { ...tx, amount: 150, accountId: 'sar2', rateToEGP: 999, createdAt: 'tampered' }, makeCtx())
     );
     const updated = after.transactions[0];
     assert.equal(updated.amount, 150);
@@ -668,10 +711,10 @@ describe('editing transactions', () => {
   it('re-snapshots the rate when moved to an account in another currency', () => {
     const s = setup();
     const tx = expenseOf(s);
-    const after = apply(s, ops.updateTransaction(s, { ...tx, accountId: 'egp', currency: 'EGP', amount: 1500 }));
+    const after = apply(s, ops.updateTransaction(s, { ...tx, accountId: 'egp', currency: 'EGP', amount: 1500 }, makeCtx()));
     assert.equal(after.transactions[0].rateToEGP, 1);
     // ...and still validates the currency against the account, like add does.
-    assert.throws(() => ops.updateTransaction(s, { ...tx, accountId: 'egp' }), { code: 'CURRENCY_MISMATCH' });
+    assert.throws(() => ops.updateTransaction(s, { ...tx, accountId: 'egp' }, makeCtx()), { code: 'CURRENCY_MISMATCH' });
   });
 
   it('can turn an expense into a transfer', () => {
@@ -689,7 +732,7 @@ describe('editing transactions', () => {
         date: tx.date,
         rateToEGP: tx.rateToEGP,
         createdAt: tx.createdAt,
-      })
+      }, makeCtx())
     );
     approx(accountBalance(after, 'egp'), 1400);
     approx(accountBalance(after, 'sar'), -100);
@@ -699,9 +742,9 @@ describe('editing transactions', () => {
   it('deleting a transaction restores the account balance', () => {
     const s = setup();
     approx(accountBalance(s, 'sar'), -100);
-    const after = apply(s, ops.deleteTransaction(s, s.transactions[0].id));
+    const after = apply(s, ops.deleteTransaction(s, s.transactions[0].id, makeCtx()));
     approx(accountBalance(after, 'sar'), 0);
-    assert.throws(() => ops.deleteTransaction(after, 'missing'), { code: 'NOT_FOUND' });
+    assert.throws(() => ops.deleteTransaction(after, 'missing', makeCtx()), { code: 'NOT_FOUND' });
   });
 });
 
@@ -717,7 +760,7 @@ describe('formatDayLabel', () => {
 
 describe('fund allocation', () => {
   // 100,000 EGP liquid; F already holds 900 cash → 99,100 unassigned.
-  const state = (): FinanceStateV2 => ({
+  const state = (): FinanceState => ({
     ...emptyState(),
     accounts: [account('egp', 'EGP', 100000)],
     funds: [
@@ -727,7 +770,7 @@ describe('fund allocation', () => {
       fund({ id: 'D', priority: 4, targetAmount: 50000 }), // no deadline, no plan → nothing suggested
       fund({ id: 'F', priority: 5, targetAmount: 1000, monthlyContribution: 500 }), // only 100 left to reach
     ],
-    fundMovements: [{ id: 'm1', fundId: 'F', amount: 900, date: '2026-09-01' }],
+    fundMovements: [{ id: 'm1', updatedAt: T0, fundId: 'F', amount: 900, date: '2026-09-01' }],
   });
 
   it('suggestAllocation follows priority and caps each fund', () => {
@@ -786,14 +829,14 @@ describe('fund allocation', () => {
 
 describe('covering overspent fund money', () => {
   // 10,000 liquid, 9,000 allocated; then a 5,000 expense → unassigned −4,000.
-  const state = (): FinanceStateV2 => {
-    let s: FinanceStateV2 = {
+  const state = (): FinanceState => {
+    let s: FinanceState = {
       ...emptyState(),
       accounts: [account('egp', 'EGP', 10000)],
       funds: [fund({ id: 'A', priority: 1 }), fund({ id: 'B', priority: 2 })],
       fundMovements: [
-        { id: 'm1', fundId: 'A', amount: 6000, date: '2026-09-01' },
-        { id: 'm2', fundId: 'B', amount: 3000, date: '2026-09-01' },
+        { id: 'm1', updatedAt: T0, fundId: 'A', amount: 6000, date: '2026-09-01' },
+        { id: 'm2', updatedAt: T0, fundId: 'B', amount: 3000, date: '2026-09-01' },
       ],
     };
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 5000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-bills', date: '2026-10-10' }, makeCtx()));
@@ -833,21 +876,21 @@ describe('covering overspent fund money', () => {
 
   it('deleting a fund returns its cash to unassigned money', () => {
     const s = state();
-    const after = apply(s, ops.deleteFund(s, 'A'));
+    const after = apply(s, ops.deleteFund(s, 'A', makeCtx()));
     approx(unassignedEGP(after), unassignedEGP(s) + 6000);
     assert.equal(after.fundMovements.some((m) => m.fundId === 'A'), false);
   });
 });
 
 describe('paySinkingFund', () => {
-  const state = (): FinanceStateV2 => ({
+  const state = (): FinanceState => ({
     ...emptyState(),
     accounts: [account('egp', 'EGP', 10000), account('sar', 'SAR', 1000)],
     funds: [
       fund({ id: 'S', type: 'sinking', targetAmount: 2400, frequency: 'yearly', nextDueDate: '2026-10-20' }),
       fund({ id: 'G', priority: 2 }),
     ],
-    fundMovements: [{ id: 'm1', fundId: 'S', amount: 2000, date: '2026-09-01' }],
+    fundMovements: [{ id: 'm1', updatedAt: T0, fundId: 'S', amount: 2000, date: '2026-09-01' }],
   });
   const payment = (overrides: Partial<ops.SinkingPayment> = {}): ops.SinkingPayment => ({
     fundId: 'S',
@@ -899,7 +942,7 @@ describe('paySinkingFund', () => {
 
 describe('emergency fund suggestion', () => {
   it('is null without essentials history', () => {
-    const s: FinanceStateV2 = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
+    const s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
     assert.equal(suggestedEmergencyTarget(s, 3, NOW), null);
     // Spending this month (not a full month yet) doesn't count.
     const after = apply(s, ops.addTransaction(s, { type: 'expense', amount: 9000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-10-05' }, makeCtx()));
@@ -907,7 +950,7 @@ describe('emergency fund suggestion', () => {
   });
 
   it('averages only the months that have essentials', () => {
-    let s: FinanceStateV2 = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
+    let s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 8000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-09-05' }, makeCtx()));
     approx(suggestedEmergencyTarget(s, 3, NOW), 24000);
     approx(suggestedEmergencyTarget(s, 6, NOW), 48000);
@@ -920,5 +963,591 @@ describe('addMonthsToDate', () => {
     assert.equal(addMonthsToDate('2027-01-31', 1), '2027-02-28');
     assert.equal(addMonthsToDate('2026-11-30', 3), '2027-02-28');
     assert.equal(addMonthsToDate('2027-08-31', 6), '2028-02-29');
+  });
+});
+
+// --- v3: opening position, gold purchases, locations ------------------------
+
+// The personal seed is git-ignored; its tests are skipped where it doesn't exist.
+const LOCAL_SEED: FinanceState | undefined = (() => {
+  try {
+    return require('../store/seed.local').SEED_STATE as FinanceState;
+  } catch {
+    return undefined;
+  }
+})();
+const noSeed = LOCAL_SEED ? false : 'store/seed.local.ts not present';
+
+describe('opening data import', { skip: noSeed }, () => {
+  const imported = () => {
+    const current = emptyState(); // SAR 12.5 — the importer keeps current rates
+    return apply(current, ops.replaceWithSeed(current, LOCAL_SEED!, makeCtx()));
+  };
+  const balanceOf = (s: FinanceState, name: string) => {
+    const acct = s.accounts.find((a) => a.name === name);
+    assert.ok(acct, `account ${name}`);
+    return accountBalance(s, acct.id);
+  };
+  const seedRate = () => LOCAL_SEED!.transactions[0].rateToEGP;
+
+  it('ends with the expected account balances', () => {
+    const s = imported();
+    approx(balanceOf(s, 'كاش السعودية'), 8000);
+    approx(balanceOf(s, 'كاش مصر - ريال'), 12000);
+    approx(balanceOf(s, 'كاش مصر - جنيه'), 14000);
+    assert.deepEqual(liquidByCurrency(s), { EGP: 14000, SAR: 20000, USD: 0 });
+  });
+
+  it('holds 50g of gold costing 305,900', () => {
+    const totals = goldTotals(imported());
+    assert.equal(totals.totalGrams, 50);
+    assert.deepEqual(totals.gramsByKarat, { 18: 0, 21: 30, 24: 20 });
+    approx(totals.totalCostEGP, 305900);
+    assert.equal(imported().transactions.some((t) => t.type === 'asset_purchase'), false);
+  });
+
+  it('keeps current market inputs but takes the seed tracking start', () => {
+    const s = imported();
+    assert.deepEqual(s.settings.exchangeRates, RATES);
+    assert.equal(s.settings.trackingStartDate, '2026-08-05');
+    assert.equal(s.settings.lastUsed, undefined);
+  });
+
+  it('summarises August and September', () => {
+    const s = imported();
+    const r = seedRate();
+    const aug = monthSummary(s, '2026-08');
+    approx(aug.incomeEGP, 2700 * r);
+    approx(aug.expenseEGP, 1595 * r);
+    approx(aug.expenseByBucket.essentials, 1505 * r);
+    approx(aug.expenseByBucket.lifestyle, 90 * r);
+    const sep = monthSummary(s, '2026-09');
+    approx(sep.incomeEGP, 3800 * r);
+    approx(sep.expenseEGP, 1105 * r);
+    approx(sep.expenseByBucket.essentials, 975 * r);
+    approx(sep.expenseByBucket.lifestyle, 130 * r);
+    approx(sep.savingsRate, (3800 - 1105) / 3800);
+  });
+
+  it('leaves one-time expenses out of the emergency average', () => {
+    // Aug essentials 1,505 − one-time 310 (home setup 160 + health 150) = 1,195; Sep 975.
+    const r = seedRate();
+    approx(suggestedEmergencyTarget(imported(), 3, NOW), ((1195 + 975) / 2) * r * 3);
+  });
+
+  it('splits net worth by location', () => {
+    const s = imported();
+    const byLocation = netWorthByLocation(s);
+    approx(byLocation.SA, 8000 * 12.5);
+    approx(byLocation.EG + byLocation.SA, netWorthEGP(s));
+  });
+});
+
+describe('buyGold', () => {
+  const setup = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 100000), account('sar', 'SAR', 5000, 'SA')],
+    funds: [fund({ id: 'f' })],
+  });
+  const purchase = (overrides: Partial<ops.GoldPurchase> = {}): ops.GoldPurchase => ({
+    accountId: 'egp',
+    amount: 60000,
+    date: '2026-10-10',
+    holding: { name: 'Bar 10g', weightGrams: 10, karat: 24, location: 'EG' },
+    ...overrides,
+  });
+
+  it('moves cash into gold at cost without changing net worth', () => {
+    const s = setup();
+    const after = apply(s, ops.buyGold(s, purchase(), makeCtx()));
+    approx(accountBalance(after, 'egp'), 40000);
+    const holding = after.holdings[0];
+    assert.equal(holding.type, 'gold');
+    approx(holding.purchaseCostEGP, 60000);
+    assert.equal(holding.purchaseDate, '2026-10-10');
+    // Bought at the market price (10g × 6,000), so net worth is unchanged.
+    approx(netWorthEGP(after), netWorthEGP(s));
+    // Not spending.
+    const october = monthSummary(after, '2026-10');
+    assert.equal(october.expenseEGP, 0);
+    assert.equal(october.savingsRate, null);
+    assert.equal(transactionsForMonth(after, '2026-10', 'asset_purchase').length, 1);
+  });
+
+  it('costs SAR purchases at the snapshotted rate', () => {
+    const s = setup();
+    const after = apply(s, ops.buyGold(s, purchase({ accountId: 'sar', amount: 4000 }), makeCtx()));
+    approx(after.holdings[0].purchaseCostEGP, 4000 * 12.5);
+    approx(accountBalance(after, 'sar'), 1000);
+  });
+
+  it('rejects bad input without changing anything', () => {
+    const s = setup();
+    assert.throws(() => ops.buyGold(s, purchase({ amount: 0 }), makeCtx()), { code: 'NOT_POSITIVE' });
+    assert.throws(
+      () => ops.buyGold(s, purchase({ holding: { name: 'x', weightGrams: 0, karat: 24 } }), makeCtx()),
+      { code: 'NOT_POSITIVE', details: { field: 'weightGrams' } }
+    );
+    assert.throws(() => ops.buyGold(s, purchase({ accountId: 'nope' }), makeCtx()), { code: 'NOT_FOUND' });
+  });
+
+  it('deleting the purchase also removes the holding (and its fund link), atomically', () => {
+    let s = setup();
+    s = apply(s, ops.buyGold(s, purchase(), makeCtx()));
+    const holdingId = s.holdings[0].id;
+    s = apply(s, ops.updateFund(s, { ...s.funds[0], linkedHoldingIds: [holdingId] }, makeCtx()));
+    const txId = s.transactions[0].id;
+
+    assert.throws(() => ops.deleteHolding(s, holdingId, makeCtx()), { code: 'HOLDING_HAS_PURCHASE' });
+    const after = apply(s, ops.deleteTransaction(s, txId, makeCtx()));
+    assert.equal(after.holdings.length, 0);
+    assert.equal(after.transactions.length, 0);
+    assert.deepEqual(after.funds[0].linkedHoldingIds, []);
+    approx(accountBalance(after, 'egp'), 100000);
+  });
+
+  it('editing a purchase keeps the holding cost in sync and the type locked', () => {
+    let s = setup();
+    s = apply(s, ops.buyGold(s, purchase(), makeCtx()));
+    const tx = s.transactions[0];
+    s = apply(
+      s,
+      ops.updateGoldPurchase(s, tx.id, purchase({ amount: 61000, holding: { name: 'Bar', weightGrams: 10, karat: 21 } }), makeCtx())
+    );
+    const holding = s.holdings[0];
+    approx(holding.purchaseCostEGP, 61000);
+    assert.equal(holding.type === 'gold' && holding.karat, 21);
+    approx(accountBalance(s, 'egp'), 39000);
+    assert.throws(
+      () =>
+        ops.updateTransaction(s, {
+          id: tx.id,
+          type: 'expense',
+          amount: 1,
+          currency: 'EGP',
+          accountId: 'egp',
+          categoryId: 'cat-essentials-rent',
+          date: tx.date,
+          rateToEGP: 1,
+          createdAt: tx.createdAt,
+        }, makeCtx()),
+      { code: 'ASSET_PURCHASE_TYPE_LOCKED' }
+    );
+  });
+});
+
+describe('cash-flow rules', () => {
+  it('monthSummary ignores transactions before trackingStartDate', () => {
+    let s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
+    const add = (date: string, amount: number) => {
+      s = apply(s, ops.addTransaction(s, { type: 'expense', amount, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date }, makeCtx()));
+    };
+    add('2026-08-04', 999);
+    add('2026-08-05', 100);
+    s = apply(s, ops.updateSettings(s, { trackingStartDate: '2026-08-05' }, makeCtx()));
+    approx(monthSummary(s, '2026-08').expenseEGP, 100);
+    // Balances still include everything.
+    approx(accountBalance(s, 'egp'), -1099);
+  });
+
+  it('one-time expenses count as spending but not in averages', () => {
+    let s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 1000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-09-02' }, makeCtx()));
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 5000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-home-setup', date: '2026-09-03', oneTime: true }, makeCtx()));
+    approx(monthSummary(s, '2026-09').expenseEGP, 6000);
+    approx(monthSummary(s, '2026-09', { excludeOneTime: true }).expenseEGP, 1000);
+    approx(suggestedEmergencyTarget(s, 3, NOW), 3000);
+  });
+});
+
+describe('settings & gold prices', () => {
+  it('values each karat at its own price (18k from 24k)', () => {
+    const s = emptyState();
+    s.settings = { ...s.settings, goldPrice24kEGP: 6000, goldPrice21kEGP: 5300 };
+    s.holdings = [
+      { id: 'a', updatedAt: T0, type: 'gold', name: 'a', weightGrams: 1, karat: 24, purchaseCostEGP: 0 },
+      { id: 'b', updatedAt: T0, type: 'gold', name: 'b', weightGrams: 1, karat: 21, purchaseCostEGP: 0 },
+      { id: 'c', updatedAt: T0, type: 'gold', name: 'c', weightGrams: 1, karat: 18, purchaseCostEGP: 0, location: 'SA' },
+    ];
+    approx(holdingsTotalEGP(s), 6000 + 5300 + 4500);
+    approx(netWorthByLocation(s).SA, 4500);
+  });
+
+  it('updateSettings validates and stamps changed market inputs', () => {
+    const s = emptyState();
+    const after = apply(
+      s,
+      ops.updateSettings(s, { exchangeRates: { SAR_EGP: 13, USD_EGP: 50 }, goldPrice21kEGP: 5400 }, makeCtx())
+    );
+    assert.equal(after.settings.exchangeRates.SAR_EGP, 13);
+    assert.equal(after.settings.exchangeRates.lastUpdated, NOW.toISOString());
+    assert.equal(after.settings.goldPrice21kEGP, 5400);
+    assert.equal(after.settings.goldPriceUpdatedAt, NOW.toISOString());
+    assert.throws(() => ops.updateSettings(s, { goldPrice24kEGP: 0 }, makeCtx()), { code: 'NOT_POSITIVE' });
+    assert.throws(() => ops.updateSettings(s, { trackingStartDate: '5 Aug' }, makeCtx()), { code: 'INVALID_DATE' });
+  });
+});
+
+describe('migration v2 → v3', () => {
+  // A v2 payload: no account location, no 21k price or tracking start, old category list
+  // (with one default the user renamed).
+  const v2 = () => {
+    const base = emptyState();
+    const { goldPrice21kEGP: _p21, trackingStartDate: _start, ...settingsV2 } = base.settings;
+    return {
+      ...base,
+      accounts: [{ id: 'a', name: 'Bank', type: 'bank', currency: 'EGP', openingBalance: 10, createdAt: 'x' }],
+      categories: [
+        ...DEFAULT_CATEGORIES.filter((c) => !['cat-essentials-health', 'cat-lifestyle-misc'].includes(c.id) && c.id !== 'cat-essentials-rent'),
+        { id: 'cat-essentials-rent', name: 'سكن', kind: 'expense', bucket: 'essentials', isDefault: true },
+      ],
+      settings: settingsV2,
+    };
+  };
+
+  it('fills new fields with defaults and adds missing categories', () => {
+    const { state } = migratePersistedState(v2(), 2, MIGRATION_CTX);
+    assert.equal(state.accounts[0].location, 'EG');
+    approx(state.settings.goldPrice21kEGP, 6000 * (21 / 24));
+    assert.equal(state.settings.trackingStartDate, '2026-08-05');
+    const ids = state.categories.map((c) => c.id);
+    for (const id of ['cat-essentials-health', 'cat-essentials-household', 'cat-essentials-home-setup', 'cat-lifestyle-misc']) {
+      assert.ok(ids.includes(id), id);
+    }
+    assert.equal(new Set(ids).size, ids.length); // no duplicates
+    assert.equal(state.categories.find((c) => c.id === 'cat-essentials-rent')?.name, 'سكن'); // renamed default kept
+  });
+
+  it('is idempotent', () => {
+    const once = migrateV2toV3(v2());
+    assert.deepEqual(migrateV2toV3(once), once);
+  });
+
+  it('chains all the way from v0', () => {
+    const { state } = migratePersistedState(LEGACY_V1, 0, MIGRATION_CTX);
+    assert.ok(state.accounts.every((a) => a.location === 'EG'));
+    assert.equal(state.settings.trackingStartDate, '2026-08-05');
+  });
+});
+
+// --- v4: sync bookkeeping, backups ------------------------------------------
+
+// A context whose clock can be moved forward, to tell creates and updates apart.
+function makeClock(start = new Date('2026-10-15T09:00:00.000Z')) {
+  let current = start;
+  let seq = 0;
+  const ctx: ops.OpContext = { newId: () => `c-${++seq}`, now: () => current };
+  return { ctx, advance: (minutes = 1) => (current = new Date(current.getTime() + minutes * 60_000)), iso: () => current.toISOString() };
+}
+
+const nodeCrypto = { randomBytes: (n: number) => new Uint8Array(randomBytes(n)) };
+
+// A small but varied v4 state: accounts, categories, a transfer, a gold purchase linked to a
+// fund with cash, and one deletion (so the tombstone log isn't empty).
+function richState(): FinanceState {
+  const clock = makeClock();
+  let s: FinanceState = {
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 100000), account('sar', 'SAR', 5000, 'SA')],
+  };
+  const step = (patch: Partial<FinanceState>) => {
+    s = apply(s, patch);
+    clock.advance();
+  };
+  step(ops.addTransaction(s, { type: 'expense', amount: 250, currency: 'SAR', accountId: 'sar', categoryId: 'cat-essentials-rent', date: '2026-10-02', note: 'إيجار ✓' }, clock.ctx));
+  step(ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100, date: '2026-10-03' }, clock.ctx));
+  step(ops.buyGold(s, { accountId: 'egp', amount: 6000, date: '2026-10-04', holding: { name: 'سبيكة 1 جم', weightGrams: 1, karat: 24 } }, clock.ctx));
+  step(ops.addFund(s, { name: 'Wedding', type: 'goal', targetAmount: 50000, currency: 'EGP', priority: 1, linkedHoldingIds: [s.holdings[0].id] }, clock.ctx));
+  step(ops.allocateToFund(s, s.funds[0].id, 1000, 'first', clock.ctx));
+  step(ops.addTransaction(s, { type: 'income', amount: 10, currency: 'EGP', accountId: 'egp', categoryId: 'cat-income-other', date: '2026-10-05' }, clock.ctx));
+  step(ops.deleteTransaction(s, s.transactions[0].id, clock.ctx));
+  return s;
+}
+
+describe('sync bookkeeping', () => {
+  it('every create and update sets updatedAt to now', () => {
+    const { ctx, advance, iso } = makeClock();
+    let s: FinanceState = emptyState();
+    s = apply(s, ops.addAccount(s, { name: 'Bank', type: 'bank', currency: 'EGP', openingBalance: 100, location: 'EG' }, ctx));
+    const created = iso();
+    assert.equal(s.accounts[0].updatedAt, created);
+    assert.equal(s.accounts[0].createdAt, created);
+
+    advance(5);
+    s = apply(s, ops.updateAccount(s, { ...s.accounts[0], name: 'Main bank' }, ctx));
+    assert.equal(s.accounts[0].updatedAt, iso());
+    assert.equal(s.accounts[0].createdAt, created);
+
+    advance();
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 10, currency: 'EGP', accountId: s.accounts[0].id, categoryId: 'cat-essentials-rent', date: '2026-10-01' }, ctx));
+    const tx = s.transactions[0];
+    advance();
+    s = apply(s, ops.updateTransaction(s, { ...tx, amount: 20, updatedAt: 'ignored' }, ctx));
+    assert.equal(s.transactions[0].updatedAt, iso());
+
+    advance();
+    s = apply(s, ops.setMonthlyPlan(s, { month: '2026-10', expectedIncomeEGP: 1, bucketLimitsEGP: {} }, ctx));
+    assert.equal(s.monthlyPlans[0].updatedAt, iso());
+
+    advance();
+    s = apply(s, ops.addFund(s, { name: 'F', type: 'goal', targetAmount: 100, currency: 'EGP', priority: 1 }, ctx));
+    advance();
+    s = apply(s, ops.allocateToFund(s, s.funds[0].id, 50, undefined, ctx));
+    assert.equal(s.fundMovements[0].updatedAt, iso());
+    advance();
+    s = apply(s, ops.editFund(s, s.funds[0].id, { name: 'F2', targetAmount: 200, cashAllocation: 50 }, ctx));
+    assert.equal(s.funds[0].updatedAt, iso());
+  });
+
+  it('every delete, including cascades, logs a tombstone', () => {
+    const { ctx, iso } = makeClock();
+    let s = richState();
+    const before = s.tombstones.length;
+    const fundId = s.funds[0].id;
+    const movementIds = s.fundMovements.map((m) => m.id);
+
+    // Fund + its movements.
+    s = apply(s, ops.deleteFund(s, fundId, ctx));
+    assert.deepEqual(
+      s.tombstones.slice(before).map((t) => [t.entity, t.id]),
+      [['fund', fundId], ...movementIds.map((id) => ['fundMovement', id])]
+    );
+    assert.ok(s.tombstones.slice(before).every((t) => t.deletedAt === iso()));
+
+    // Gold purchase → transaction + holding.
+    const purchase = s.transactions.find((t) => t.type === 'asset_purchase')!;
+    const holdingId = purchase.type === 'asset_purchase' ? purchase.holdingId : '';
+    const mark = s.tombstones.length;
+    s = apply(s, ops.deleteTransaction(s, purchase.id, ctx));
+    assert.deepEqual(
+      s.tombstones.slice(mark).map((t) => [t.entity, t.id]).sort(),
+      [['holding', holdingId], ['transaction', purchase.id]].sort()
+    );
+
+    // Monthly plans are keyed by month.
+    s = apply(s, ops.setMonthlyPlan(s, { month: '2026-11', expectedIncomeEGP: 0, bucketLimitsEGP: {} }, ctx));
+    s = apply(s, ops.deleteMonthlyPlan(s, '2026-11', ctx));
+    assert.deepEqual(s.tombstones.at(-1), { entity: 'monthlyPlan', id: '2026-11', deletedAt: iso() });
+    // Deleting a month without a plan logs nothing.
+    assert.equal(ops.deleteMonthlyPlan(s, '2030-01', ctx).tombstones, undefined);
+
+    // Selectors ignore the log: data is really gone.
+    assert.equal(s.funds.length, 0);
+    assert.equal(s.holdings.length, 0);
+  });
+
+  it('cascaded edits bump updatedAt on the entities they touch', () => {
+    const clock = makeClock();
+    let s = richState();
+    const fund = s.funds[0];
+    const purchase = s.transactions.find((t) => t.type === 'asset_purchase')!;
+    clock.advance(60);
+    // Deleting the purchase unlinks its holding from the fund → the fund changed too.
+    s = apply(s, ops.deleteTransaction(s, purchase.id, clock.ctx));
+    const after = s.funds.find((f) => f.id === fund.id)!;
+    assert.deepEqual(after.linkedHoldingIds, []);
+    assert.equal(after.updatedAt, clock.iso());
+  });
+});
+
+describe('migration v3 → v4', () => {
+  // v3 data: no updatedAt, no tombstones, no device id.
+  const v3 = () => {
+    const s = richState();
+    const strip = <T extends object>(items: T[]) => items.map(({ updatedAt: _u, ...rest }: any) => rest);
+    const { deviceId: _d, ...settings } = s.settings;
+    return {
+      accounts: strip(s.accounts),
+      categories: strip(s.categories),
+      transactions: strip(s.transactions),
+      funds: strip(s.funds),
+      fundMovements: strip(s.fundMovements),
+      holdings: strip(s.holdings),
+      liabilities: [],
+      recurringRules: [],
+      monthlyPlans: [],
+      settings,
+    };
+  };
+
+  it('stamps updatedAt from createdAt (or now), starts the log and creates the device id', () => {
+    const migrated = migrateV3toV4(v3(), MIGRATION_CTX);
+    const source = v3();
+    migrated.accounts.forEach((a, i) => assert.equal(a.updatedAt, source.accounts[i].createdAt));
+    migrated.transactions.forEach((t, i) => assert.equal(t.updatedAt, source.transactions[i].createdAt));
+    // No createdAt on movements/holdings/categories → migration time.
+    assert.ok(migrated.fundMovements.every((m) => m.updatedAt === MIGRATION_CTX.now));
+    assert.ok(migrated.holdings.every((h) => h.updatedAt === MIGRATION_CTX.now));
+    assert.ok(migrated.categories.every((c) => c.updatedAt === MIGRATION_CTX.now));
+    assert.deepEqual(migrated.tombstones, []);
+    assert.equal(migrated.settings.deviceId, 'migrated-device');
+  });
+
+  it('is idempotent', () => {
+    const once = migrateV3toV4(v3(), MIGRATION_CTX);
+    const twice = migrateV3toV4(once, { now: '2030-01-01T00:00:00.000Z', newId: () => 'other-device' });
+    assert.deepEqual(twice, once);
+  });
+});
+
+describe('backup export / import', () => {
+  const NOW_EXPORT = new Date('2026-10-20T08:30:00.000Z');
+  const open = (file: BackupFile, password?: string) =>
+    openBackup(parseBackup(serializeBackup(file)), { password, now: NOW, newId: () => 'unused' });
+
+  it('round-trips a plain backup to identical state', async () => {
+    const state = richState();
+    const file = await createBackup(state, { now: NOW_EXPORT, crypto: nodeCrypto });
+    assert.equal(file.encrypted, false);
+    assert.equal(file.schemaVersion, CURRENT_VERSION);
+    assert.equal(file.deviceId, 'test-device');
+    const opened = await open(file);
+    assert.deepEqual(opened.state, state);
+    assert.equal(opened.exportedAt, NOW_EXPORT.toISOString());
+  });
+
+  it('round-trips an encrypted backup (real 200k-iteration key) to identical state', async () => {
+    const state = richState();
+    const file = await createBackup(state, { password: 'كلمة سر 123', now: NOW_EXPORT, crypto: nodeCrypto });
+    assert.equal(file.encrypted, true);
+    const payload = file.payload as EncryptedPayload;
+    assert.equal(payload.iterations, PBKDF2_ITERATIONS);
+    assert.equal(payload.salt.length, 32); // 16 bytes
+    assert.equal(payload.nonce.length, 24); // 12 bytes
+    const text = serializeBackup(file);
+    assert.ok(!text.includes('Wedding') && !text.includes('إيجار'), 'no plaintext in the file');
+    assert.ok(!text.includes('كلمة سر'), 'password not stored');
+
+    const opened = await open(file, 'كلمة سر 123');
+    assert.deepEqual(opened.state, state);
+  });
+
+  it('a wrong password fails without changing state', async () => {
+    const current = richState();
+    const snapshot = JSON.stringify(current);
+    const file = await createBackup(emptyState(), { password: 'right-pass', now: NOW_EXPORT, crypto: { ...nodeCrypto, iterations: 1000 } });
+    await assert.rejects(open(file, 'wrong-pass'), (e: unknown) => e instanceof BackupError && e.code === 'WRONG_PASSWORD');
+    await assert.rejects(open(file), (e: unknown) => e instanceof BackupError && e.code === 'PASSWORD_REQUIRED');
+    assert.equal(JSON.stringify(current), snapshot);
+    assert.equal(errorMessage(new BackupError('WRONG_PASSWORD')), 'كلمة السر غلط');
+  });
+
+  it('detects tampering with the ciphertext or the header', async () => {
+    const file = await createBackup(emptyState(), { password: 'pw-123456', now: NOW_EXPORT, crypto: { ...nodeCrypto, iterations: 1000 } });
+    const payload = file.payload as EncryptedPayload;
+    const flipped = payload.ciphertext.replace(/^./, (c) => (c === '0' ? '1' : '0'));
+    await assert.rejects(open({ ...file, payload: { ...payload, ciphertext: flipped } }, 'pw-123456'), { code: 'WRONG_PASSWORD' });
+    await assert.rejects(open({ ...file, exportedAt: '2020-01-01T00:00:00.000Z' }, 'pw-123456'), { code: 'WRONG_PASSWORD' });
+  });
+
+  it('rejects files that are not Wealth backups', () => {
+    assert.throws(() => parseBackup('not json'), { code: 'INVALID_FILE' });
+    assert.throws(() => parseBackup(JSON.stringify({ app: 'other', schemaVersion: 4 })), { code: 'INVALID_FILE' });
+    assert.throws(
+      () => parseBackup(JSON.stringify({ app: 'wealth', schemaVersion: 99, exportedAt: 'x', encrypted: false, payload: {} })),
+      { code: 'UNSUPPORTED_VERSION' }
+    );
+    assert.throws(
+      () => parseBackup(JSON.stringify({ app: 'wealth', schemaVersion: 4, exportedAt: 'x', encrypted: true, payload: { kdf: 'none' } })),
+      { code: 'INVALID_FILE' }
+    );
+  });
+
+  it('migrates v1, v2 and v3 exports to v4', async () => {
+    const legacyFile = (schemaVersion: number, payload: unknown): BackupFile => ({
+      app: 'wealth',
+      schemaVersion,
+      exportedAt: NOW_EXPORT.toISOString(),
+      deviceId: 'old-phone',
+      encrypted: false,
+      payload,
+    });
+    const isV4 = (s: FinanceState) => {
+      assert.ok(Array.isArray(s.tombstones));
+      assert.ok(s.settings.deviceId);
+      assert.ok(s.accounts.every((a) => a.location && a.updatedAt));
+      assert.ok(s.categories.some((c) => c.id === 'cat-lifestyle-misc'));
+    };
+
+    const fromV1 = await open(legacyFile(1, LEGACY_V1));
+    isV4(fromV1.state);
+    assert.equal(fromV1.state.accounts.length, 3);
+
+    const v3Payload = (() => {
+      const { state } = migratePersistedState(LEGACY_V1, 1, MIGRATION_CTX);
+      const strip = <T extends object>(items: T[]) => items.map(({ updatedAt: _u, ...rest }: any) => rest);
+      const { deviceId: _d, ...settings } = state.settings;
+      return { ...state, accounts: strip(state.accounts), transactions: strip(state.transactions), settings, tombstones: undefined };
+    })();
+    const fromV3 = await open(legacyFile(3, v3Payload));
+    isV4(fromV3.state);
+
+    const { goldPrice21kEGP: _p, trackingStartDate: _t, ...settingsV2 } = v3Payload.settings;
+    const v2Payload = { ...v3Payload, accounts: v3Payload.accounts.map(({ location: _l, ...a }: any) => a), settings: settingsV2 };
+    const fromV2 = await open(legacyFile(2, v2Payload));
+    isV4(fromV2.state);
+    assert.equal(fromV2.state.settings.trackingStartDate, '2026-08-05');
+
+    // Same data whichever version it was exported from.
+    assert.deepEqual(fromV2.state.accounts.map((a) => a.id), fromV1.state.accounts.map((a) => a.id));
+  });
+
+  it('builds a preview and file name', async () => {
+    const state = richState();
+    const opened = await open(await createBackup(state, { now: NOW_EXPORT, crypto: nodeCrypto }));
+    const preview = backupPreview(opened);
+    assert.deepEqual(
+      [preview.accounts, preview.transactions, preview.holdings, preview.funds],
+      [state.accounts.length, state.transactions.length, state.holdings.length, state.funds.length]
+    );
+    approx(preview.netWorthEGP, netWorthEGP(state));
+    assert.equal(backupFileName(new Date(2026, 9, 3, 23, 59)), 'wealth-backup-2026-10-03.json');
+  });
+
+  it('UTF-8 codec round-trips Arabic, emoji and ASCII', () => {
+    const text = 'ج.م 1,250 — صدقة 🤲 abc';
+    assert.equal(utf8Decode(utf8Encode(text)), text);
+    assert.deepEqual(Array.from(utf8Encode('é')), [0xc3, 0xa9]);
+  });
+});
+
+describe('restoring a backup', () => {
+  it('replaces the data, keeps this device settings, and logs removed entities', async () => {
+    const { ctx } = makeClock(new Date('2026-11-01T00:00:00.000Z'));
+    const backupState = richState();
+    const file = await createBackup(backupState, { now: NOW, crypto: nodeCrypto });
+    const opened = await openBackup(file, { now: NOW, newId: () => 'unused' });
+
+    let current: FinanceState = {
+      ...emptyState(),
+      accounts: [account('only-here', 'EGP', 1)],
+      settings: { ...emptyState().settings, deviceId: 'this-phone', appLockEnabled: true, lastBackupAt: '2026-10-30T00:00:00.000Z' },
+    };
+    current = apply(current, ops.restoreFromBackup(current, opened.state, ctx));
+
+    assert.deepEqual(current.transactions, backupState.transactions);
+    assert.deepEqual(current.accounts, backupState.accounts);
+    assert.equal(current.settings.deviceId, 'this-phone');
+    assert.equal(current.settings.appLockEnabled, true);
+    assert.equal(current.settings.lastBackupAt, '2026-10-30T00:00:00.000Z');
+    assert.ok(current.tombstones.some((t) => t.entity === 'account' && t.id === 'only-here'));
+    // The backup's own deletion log is kept.
+    for (const t of backupState.tombstones) assert.ok(current.tombstones.some((x) => x.id === t.id));
+  });
+
+  it('drops tombstones for entities that come back', () => {
+    const { ctx } = makeClock();
+    const base = emptyState();
+    const current: FinanceState = { ...base, tombstones: [{ entity: 'account', id: 'egp', deletedAt: T0 }] };
+    const next: FinanceState = { ...base, accounts: [account('egp', 'EGP', 1)] };
+    const after = apply(current, ops.restoreFromBackup(current, next, ctx));
+    assert.deepEqual(after.tombstones, []);
+  });
+
+  it('ensureDeviceId only fills a missing id', () => {
+    const { ctx } = makeClock();
+    const fresh = { ...emptyState(), settings: { ...emptyState().settings, deviceId: '' } };
+    assert.equal(apply(fresh, ops.ensureDeviceId(fresh, ctx)).settings.deviceId, 'c-1');
+    assert.deepEqual(ops.ensureDeviceId(emptyState(), ctx), {});
   });
 });

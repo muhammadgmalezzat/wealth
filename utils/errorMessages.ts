@@ -1,3 +1,4 @@
+import { BackupError, type BackupErrorCode } from '@/store/backup';
 import {
   FinanceValidationError,
   type FinanceEntity,
@@ -74,9 +75,19 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   NOTHING_SELECTED: () => 'أدخل مبلغاً لصندوق واحد على الأقل',
   SINKING_SCHEDULE_REQUIRED: () => 'حدد التكرار وتاريخ الاستحقاق القادم',
   NOT_A_SINKING_FUND: () => 'هذا الصندوق ليس صندوق مصاريف دورية',
+  ASSET_PURCHASE_TYPE_LOCKED: () => 'لا يمكن تغيير نوع معاملة شراء الذهب',
+  HOLDING_HAS_PURCHASE: () => 'الذهب ده مسجل بمعاملة شراء؛ احذف معاملة الشراء بدلاً منه',
+};
+
+const BACKUP_MESSAGES: Record<BackupErrorCode, string> = {
+  INVALID_FILE: 'الملف ده مش نسخة احتياطية سليمة من Wealth',
+  UNSUPPORTED_VERSION: 'النسخة الاحتياطية دي من إصدار أحدث من التطبيق؛ حدّث التطبيق الأول',
+  PASSWORD_REQUIRED: 'النسخة الاحتياطية دي محمية بكلمة سر',
+  WRONG_PASSWORD: 'كلمة السر غلط',
 };
 
 export function errorMessage(error: unknown): string {
   if (error instanceof FinanceValidationError) return MESSAGES[error.code](error.details);
+  if (error instanceof BackupError) return BACKUP_MESSAGES[error.code];
   return 'حدث خطأ غير متوقع، حاول مرة أخرى';
 }

@@ -2,12 +2,15 @@ import { fromEGP, toEGP } from '@/utils/currency';
 import { monthOf, monthsUntil, shiftMonth, toMonthKey } from '@/utils/dates';
 import type {
   Account,
+  CurrencyCode,
   ExpenseBucket,
-  FinanceStateV2,
+  FinanceState,
   Fund,
+  GoldKarat,
   Holding,
   IncomeExpenseTransaction,
   Liability,
+  Location,
   SinkingFrequency,
   Transaction,
 } from './types';
@@ -16,13 +19,13 @@ import type {
 // Balances and holdings are valued at CURRENT rates/prices (what they're worth now);
 // transaction flows use each transaction's snapshotted rateToEGP (what they were worth then).
 
-type State = FinanceStateV2;
+type State = FinanceState;
 
 const sum = (values: number[]) => values.reduce((total, v) => total + v, 0);
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-const isIncomeExpense = (tx: State['transactions'][number]): tx is IncomeExpenseTransaction =>
-  tx.type !== 'transfer';
+const isIncomeExpense = (tx: Transaction): tx is IncomeExpenseTransaction =>
+  tx.type === 'income' || tx.type === 'expense';
 
 // --- Accounts ---------------------------------------------------------------
 
@@ -36,6 +39,7 @@ export function accountNetFlow(state: Pick<State, 'transactions'>, accountId: st
       if (tx.fromAccountId === accountId) flow -= tx.amount;
       if (tx.toAccountId === accountId) flow += tx.toAmount;
     } else if (tx.accountId === accountId) {
+      // Expenses and asset purchases both take money out of the account.
       flow += tx.type === 'income' ? tx.amount : -tx.amount;
     }
   }
@@ -69,10 +73,16 @@ export function liquidTotalEGP(state: LiquidState): number {
 
 // --- Holdings ---------------------------------------------------------------
 
+// EGP per gram for a karat: 24k and 21k have their own market prices; 18k derives from 24k.
+export function goldPricePerGram(settings: State['settings'], karat: GoldKarat): number {
+  if (karat === 24) return settings.goldPrice24kEGP;
+  if (karat === 21) return settings.goldPrice21kEGP;
+  return settings.goldPrice24kEGP * 0.75;
+}
+
 export function holdingValueEGP(state: Pick<State, 'settings'>, holding: Holding): number {
   if (holding.type === 'gold') {
-    const purity = holding.karat / 24;
-    return holding.weightGrams * purity * state.settings.goldPrice24kEGP;
+    return holding.weightGrams * goldPricePerGram(state.settings, holding.karat);
   }
   return toEGP(holding.quantity, holding.currency, state.settings.exchangeRates);
 }
@@ -113,6 +123,40 @@ export function liabilitiesTotalEGP(state: State): number {
 
 export function netWorthEGP(state: State): number {
   return liquidTotalEGP(state) + holdingsTotalEGP(state) - liabilitiesTotalEGP(state);
+}
+
+// Net worth split by where things are. Holdings without a location count as Egypt, and so
+// do liabilities (they have no location), so EG + SA always equals netWorthEGP.
+export function netWorthByLocation(state: State): Record<Location, number> {
+  const result: Record<Location, number> = { EG: 0, SA: 0 };
+  for (const account of state.accounts) result[account.location] += accountBalanceEGP(state, account);
+  for (const holding of state.holdings) result[holding.location ?? 'EG'] += holdingValueEGP(state, holding);
+  result.EG -= liabilitiesTotalEGP(state);
+  return result;
+}
+
+// Account balances summed per currency, in that currency (no conversion).
+export function liquidByCurrency(state: LiquidState): Record<CurrencyCode, number> {
+  const result: Record<CurrencyCode, number> = { EGP: 0, SAR: 0, USD: 0 };
+  for (const account of state.accounts) result[account.currency] += accountBalance(state, account.id);
+  return result;
+}
+
+export interface GoldTotals {
+  totalGrams: number;
+  gramsByKarat: Record<GoldKarat, number>;
+  totalCostEGP: number;
+}
+
+export function goldTotals(state: Pick<State, 'holdings'>): GoldTotals {
+  const totals: GoldTotals = { totalGrams: 0, gramsByKarat: { 18: 0, 21: 0, 24: 0 }, totalCostEGP: 0 };
+  for (const h of state.holdings) {
+    if (h.type !== 'gold') continue;
+    totals.totalGrams += h.weightGrams;
+    totals.gramsByKarat[h.karat] += h.weightGrams;
+    totals.totalCostEGP += h.purchaseCostEGP;
+  }
+  return totals;
 }
 
 // --- Funds ------------------------------------------------------------------
@@ -347,9 +391,10 @@ export function transactionsForMonth(
     .sort(compareNewestFirst);
 }
 
-// Signed EGP effect on net cash flow at the snapshotted rate; transfers are neutral.
+// Signed EGP effect on net cash flow at the snapshotted rate; transfers and asset purchases
+// (money changing form, not leaving) are neutral.
 export function transactionNetEGP(tx: Transaction): number {
-  if (tx.type === 'transfer') return 0;
+  if (!isIncomeExpense(tx)) return 0;
   const amountEGP = tx.amount * tx.rateToEGP;
   return tx.type === 'income' ? amountEGP : -amountEGP;
 }
@@ -384,8 +429,14 @@ export interface MonthSummary {
   savingsRate: number | null;
 }
 
-// Transfers move money between own accounts and are excluded.
-export function monthSummary(state: State, month: string): MonthSummary {
+export interface MonthSummaryOptions {
+  // Leave out one-time expenses (used for averages such as the emergency target).
+  excludeOneTime?: boolean;
+}
+
+// Income and expenses only: transfers move money between own accounts and asset purchases
+// turn cash into holdings, so neither counts. Transactions before trackingStartDate are ignored.
+export function monthSummary(state: State, month: string, options: MonthSummaryOptions = {}): MonthSummary {
   const categoryBucket = new Map(state.categories.map((c) => [c.id, c.bucket]));
   const summary: MonthSummary = {
     incomeEGP: 0,
@@ -396,7 +447,8 @@ export function monthSummary(state: State, month: string): MonthSummary {
   };
 
   for (const tx of state.transactions.filter(isIncomeExpense)) {
-    if (monthOf(tx.date) !== month) continue;
+    if (monthOf(tx.date) !== month || tx.date < state.settings.trackingStartDate) continue;
+    if (options.excludeOneTime && tx.oneTime) continue;
     const amountEGP = tx.amount * tx.rateToEGP;
     if (tx.type === 'income') {
       summary.incomeEGP += amountEGP;
@@ -419,7 +471,8 @@ export function safeToSpend(state: State, month: string): number | null {
   return limit - monthSummary(state, month).expenseByBucket.lifestyle;
 }
 
-// Average monthly essentials over the 3 full months before `now`, times `months`. Only
+// Average monthly essentials (one-time expenses excluded) over the 3 full months before
+// `now`, times `months`. Only
 // months with recorded essentials count toward the average; null when none of the three
 // has any (not enough history to suggest a number).
 export function suggestedEmergencyTarget(
@@ -430,7 +483,7 @@ export function suggestedEmergencyTarget(
   const current = toMonthKey(now);
   const lastThree = [1, 2, 3].map((n) => shiftMonth(current, -n));
   const recorded = lastThree
-    .map((m) => monthSummary(state, m).expenseByBucket.essentials)
+    .map((m) => monthSummary(state, m, { excludeOneTime: true }).expenseByBucket.essentials)
     .filter((essentials) => essentials > 0);
   if (recorded.length === 0) return null;
   return (sum(recorded) / recorded.length) * months;

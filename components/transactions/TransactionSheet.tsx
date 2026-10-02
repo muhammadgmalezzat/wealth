@@ -6,7 +6,7 @@ import { PastDateField } from '@/components/ui/DateFields';
 import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { Segment } from '@/components/ui/Segment';
 import { Colors, FinanceColors } from '@/constants/theme';
-import type { Category, ExpenseBucket, Transaction } from '@/store/types';
+import type { Category, ExpenseBucket, GoldKarat, Location, Transaction } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { fromEGP, toEGP } from '@/utils/currency';
 import { toDateKey } from '@/utils/dates';
@@ -16,7 +16,8 @@ import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
 type TxType = Transaction['type'];
-type FlowType = Exclude<TxType, 'transfer'>;
+type FlowType = 'income' | 'expense';
+type KaratOption = `${GoldKarat}`;
 
 const BUCKET_LABELS: Record<ExpenseBucket, string> = {
   essentials: 'أساسيات',
@@ -32,11 +33,17 @@ interface TransactionSheetProps {
   onClose: () => void;
 }
 
-// Add / edit sheet for income, expense and transfer transactions. Mount it only while open:
+// Add / edit sheet for income, expense, transfer and gold-purchase transactions. A gold
+// purchase stays a gold purchase when edited (it owns a holding). Mount it only while open:
 // its form state is initialised from `transaction` (or the remembered defaults) on mount.
 export function TransactionSheet({ transaction, onClose }: TransactionSheetProps) {
   const state = useFinanceStore();
   const lastUsed = state.settings.lastUsed ?? {};
+  const editedHolding =
+    transaction?.type === 'asset_purchase'
+      ? state.holdings.find((h) => h.id === transaction.holdingId)
+      : undefined;
+  const editedGold = editedHolding?.type === 'gold' ? editedHolding : undefined;
 
   // Archived accounts are hidden unless the edited transaction already uses them.
   const involvedIds = new Set(
@@ -64,9 +71,11 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
   };
 
   const initialFlow =
-    transaction && transaction.type !== 'transfer'
+    transaction?.type === 'income' || transaction?.type === 'expense'
       ? { accountId: transaction.accountId, categoryId: transaction.categoryId }
-      : flowDefaults('expense');
+      : transaction?.type === 'asset_purchase'
+        ? { accountId: transaction.accountId, categoryId: '' }
+        : flowDefaults('expense');
   const initialTransfer =
     transaction?.type === 'transfer'
       ? { from: transaction.fromAccountId, to: transaction.toAccountId }
@@ -84,8 +93,15 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
   );
   const [date, setDate] = useState(transaction?.date ?? toDateKey(new Date()));
   const [note, setNote] = useState(transaction?.note ?? '');
+  const [oneTime, setOneTime] = useState(transaction?.type === 'expense' && !!transaction.oneTime);
+  // Gold purchase fields.
+  const [weightText, setWeightText] = useState(editedGold ? String(editedGold.weightGrams) : '');
+  const [karat, setKarat] = useState<KaratOption>(editedGold ? `${editedGold.karat}` : '21');
+  const [goldLocation, setGoldLocation] = useState<Location>(editedGold?.location ?? 'EG');
+  const [holdingName, setHoldingName] = useState(editedGold?.name ?? '');
 
   const isTransfer = type === 'transfer';
+  const isGold = type === 'asset_purchase';
   const fromAccount = accountById(fromAccountId);
   const toAccount = accountById(toAccountId);
   const flowAccount = accountById(accountId);
@@ -104,9 +120,13 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
     if (next === type) return;
     setType(next);
     if (next === 'transfer') return;
+    if (next === 'asset_purchase') {
+      setAccountId(validAccount(accountId) ?? accounts[0]?.id ?? '');
+      return;
+    }
     // Categories differ per kind: restore the original when switching back while editing,
     // otherwise fall back to the remembered defaults.
-    if (transaction && transaction.type === next) {
+    if (transaction && (transaction.type === 'income' || transaction.type === 'expense') && transaction.type === next) {
       setAccountId(transaction.accountId);
       setCategoryId(transaction.categoryId);
     } else {
@@ -146,6 +166,30 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
       showMessage('تنبيه', 'اختر الحساب');
       return;
     }
+
+    if (isGold) {
+      const karatValue = Number(karat) as GoldKarat;
+      const purchase = {
+        accountId,
+        amount: value,
+        date,
+        ...noteField,
+        holding: {
+          name: holdingName.trim() || `ذهب ${weightText.trim()} جم عيار ${karatValue}`,
+          weightGrams: parseAmount(weightText) ?? NaN,
+          karat: karatValue,
+          location: goldLocation,
+          ...(editedGold?.note ? { note: editedGold.note } : {}),
+        },
+      };
+      const saved = runAction('تعذّر الحفظ', () =>
+        transaction ? state.updateGoldPurchase(transaction.id, purchase) : state.buyGold(purchase)
+      );
+      if (saved) onClose();
+      return;
+    }
+    if (type !== 'income' && type !== 'expense') return;
+
     if (!categoryId) {
       showMessage('تنبيه', 'اختر التصنيف');
       return;
@@ -158,6 +202,7 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
       categoryId,
       date,
       ...noteField,
+      ...(type === 'expense' && oneTime ? { oneTime: true } : {}),
     };
     const saved = runAction('تعذّر الحفظ', () => {
       if (!transaction) {
@@ -166,7 +211,7 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
       }
       // Keep links that the form doesn't edit (recurring rule, liability payment).
       const links =
-        transaction.type !== 'transfer'
+        transaction.type === 'income' || transaction.type === 'expense'
           ? {
               ...(transaction.recurringRuleId ? { recurringRuleId: transaction.recurringRuleId } : {}),
               ...(transaction.liabilityId && type === 'expense' ? { liabilityId: transaction.liabilityId } : {}),
@@ -188,7 +233,10 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
     if (!transaction) return;
     confirmAction({
       title: 'حذف المعاملة',
-      message: 'هل تريد حذف هذه المعاملة؟',
+      message:
+        transaction.type === 'asset_purchase'
+          ? 'هيتحذف الذهب المرتبط بالمعاملة كمان، والفلوس هترجع للحساب.'
+          : 'هل تريد حذف هذه المعاملة؟',
       confirmText: 'حذف',
       cancelText: 'إلغاء',
       onConfirm: () => {
@@ -219,7 +267,17 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
     </ChipRow>
   );
 
-  const kindCategories = isTransfer ? [] : state.categories.filter((c) => c.kind === type);
+  const kindCategories = state.categories.filter((c) => c.kind === type);
+  // A gold purchase can't become another type (and vice versa) once saved.
+  const typeOptions: { label: string; value: TxType }[] =
+    transaction?.type === 'asset_purchase'
+      ? []
+      : [
+          { label: 'مصروف', value: 'expense' },
+          { label: 'دخل', value: 'income' },
+          { label: 'تحويل', value: 'transfer' },
+          ...(transaction ? [] : [{ label: 'شراء ذهب', value: 'asset_purchase' as const }]),
+        ];
 
   return (
     <FormSheet
@@ -227,15 +285,11 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
       title={transaction ? 'تعديل المعاملة' : 'معاملة جديدة'}
       onCancel={onClose}
       onSave={handleSave}>
-      <Segment<TxType>
-        options={[
-          { label: 'مصروف', value: 'expense' },
-          { label: 'دخل', value: 'income' },
-          { label: 'تحويل', value: 'transfer' },
-        ]}
-        value={type}
-        onChange={changeType}
-      />
+      {typeOptions.length > 0 ? (
+        <Segment<TxType> options={typeOptions} value={type} onChange={changeType} />
+      ) : (
+        <Text style={styles.fixedType}>شراء ذهب</Text>
+      )}
 
       {/* Amount */}
       <FieldLabel>المبلغ</FieldLabel>
@@ -274,6 +328,43 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
             </>
           )}
         </>
+      ) : isGold ? (
+        <>
+          <FieldLabel>دفعت من حساب</FieldLabel>
+          {accountChips(accountId, setAccountId)}
+
+          <FieldLabel>الوزن (جرام)</FieldLabel>
+          <FormInput value={weightText} onChangeText={setWeightText} placeholder="0" keyboardType="decimal-pad" />
+
+          <FieldLabel>العيار</FieldLabel>
+          <Segment<KaratOption>
+            options={[
+              { label: '24k', value: '24' },
+              { label: '21k', value: '21' },
+              { label: '18k', value: '18' },
+            ]}
+            value={karat}
+            onChange={setKarat}
+          />
+
+          <FieldLabel>مكانه</FieldLabel>
+          <Segment<Location>
+            options={[
+              { label: 'مصر', value: 'EG' },
+              { label: 'السعودية', value: 'SA' },
+            ]}
+            value={goldLocation}
+            onChange={setGoldLocation}
+          />
+
+          <FieldLabel>الاسم (اختياري)</FieldLabel>
+          <FormInput
+            value={holdingName}
+            onChangeText={setHoldingName}
+            placeholder={`ذهب ${weightText.trim() || '…'} جم عيار ${karat}`}
+          />
+          <Text style={styles.hint}>شراء الذهب مش مصروف: الفلوس بتتحول من الحساب لذهب بنفس التكلفة</Text>
+        </>
       ) : (
         <>
           <FieldLabel>الحساب</FieldLabel>
@@ -288,6 +379,15 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
                 </View>
               ))
             : categoryChips(kindCategories)}
+
+          {type === 'expense' && (
+            <View style={styles.oneTime}>
+              <ChipRow>
+                <Chip label="مصروف لمرة واحدة" selected={oneTime} onPress={() => setOneTime((v) => !v)} />
+              </ChipRow>
+              <Text style={styles.hint}>مش بيدخل في متوسط المصروفات الشهري (زي تجهيز البيت)</Text>
+            </View>
+          )}
         </>
       )}
 
@@ -324,6 +424,15 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: Colors.light.icon,
+  },
+  fixedType: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: FinanceColors.gold,
+    textAlign: 'right',
+  },
+  oneTime: {
+    marginTop: 12,
   },
   bucket: {
     marginBottom: 10,

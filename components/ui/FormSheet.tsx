@@ -21,10 +21,22 @@ interface FormSheetProps {
   title: string;
   onCancel: () => void;
   onSave: () => void;
+  // Defaults to "حفظ".
+  saveLabel?: string;
+  // Greys out and ignores the save button (e.g. while working).
+  saveDisabled?: boolean;
   children: ReactNode;
 }
 
-export function FormSheet({ visible, title, onCancel, onSave, children }: FormSheetProps) {
+export function FormSheet({
+  visible,
+  title,
+  onCancel,
+  onSave,
+  saveLabel = 'حفظ',
+  saveDisabled = false,
+  children,
+}: FormSheetProps) {
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onCancel}>
       <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
@@ -33,8 +45,8 @@ export function FormSheet({ visible, title, onCancel, onSave, children }: FormSh
             <Text style={styles.cancel}>إلغاء</Text>
           </TouchableOpacity>
           <Text style={styles.title}>{title}</Text>
-          <TouchableOpacity onPress={onSave} hitSlop={8}>
-            <Text style={styles.save}>حفظ</Text>
+          <TouchableOpacity onPress={onSave} disabled={saveDisabled} hitSlop={8}>
+            <Text style={[styles.save, saveDisabled && styles.saveDisabled]}>{saveLabel}</Text>
           </TouchableOpacity>
         </View>
         <ScrollView
@@ -90,6 +102,9 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     color: Colors.light.tint,
+  },
+  saveDisabled: {
+    opacity: 0.4,
   },
   scroll: {
     flex: 1,

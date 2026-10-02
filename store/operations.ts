@@ -17,26 +17,34 @@ import {
 } from './selectors';
 import type {
   Account,
+  AssetPurchaseTransaction,
   Category,
   CurrencyCode,
   ExchangeRates,
-  FinanceStateV2,
+  FinanceState,
   Fund,
   FundMovement,
+  GoldHolding,
+  GoldKarat,
   Holding,
   IncomeExpenseTransaction,
   LastUsedSelection,
   Liability,
+  Location,
   MonthlyPlan,
   RecurringRule,
   Settings,
   SinkingFrequency,
+  SyncEntity,
+  Tombstone,
   Transaction,
   TransferTransaction,
 } from './types';
 
 // Pure, validated state transitions. Each returns a patch to merge into the state, or throws
 // FinanceValidationError with a typed code. The Zustand store wraps these; tests call them directly.
+// Sync bookkeeping: every created or changed entity gets updatedAt = now, and every removed
+// entity (including cascades) is logged as a tombstone.
 
 export { FinanceValidationError };
 
@@ -45,29 +53,31 @@ export interface OpContext {
   now: () => Date;
 }
 
-type State = FinanceStateV2;
-type Patch = Partial<FinanceStateV2>;
+type State = FinanceState;
+type Patch = Partial<FinanceState>;
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+// Update inputs: updatedAt is optional because the operation always sets it.
+export type Editable<T> = T extends unknown ? Omit<T, 'updatedAt'> & { updatedAt?: string } : never;
 
-export type NewAccount = Omit<Account, 'id' | 'createdAt'>;
-export type NewCategory = Omit<Category, 'id' | 'isDefault'>;
-export type NewIncomeExpense = Omit<IncomeExpenseTransaction, 'id' | 'createdAt' | 'rateToEGP'> & {
+export type NewAccount = Omit<Account, 'id' | 'createdAt' | 'updatedAt'>;
+export type NewCategory = Omit<Category, 'id' | 'isDefault' | 'updatedAt'>;
+export type NewIncomeExpense = Omit<IncomeExpenseTransaction, 'id' | 'createdAt' | 'updatedAt' | 'rateToEGP'> & {
   rateToEGP?: number;
 };
 export type NewTransfer = Omit<
   TransferTransaction,
-  'id' | 'type' | 'createdAt' | 'rateToEGP' | 'toAmount'
+  'id' | 'type' | 'createdAt' | 'updatedAt' | 'rateToEGP' | 'toAmount'
 > & {
   // Defaults to `amount` converted at current rates.
   toAmount?: number;
   rateToEGP?: number;
 };
-export type NewFund = Omit<Fund, 'id' | 'createdAt' | 'linkedHoldingIds'> & {
+export type NewFund = Omit<Fund, 'id' | 'createdAt' | 'updatedAt' | 'linkedHoldingIds'> & {
   linkedHoldingIds?: string[];
 };
-export type NewHolding = DistributiveOmit<Holding, 'id'>;
-export type NewLiability = Omit<Liability, 'id'>;
-export type NewRecurringRule = Omit<RecurringRule, 'id'>;
+export type NewHolding = DistributiveOmit<Holding, 'id' | 'updatedAt'>;
+export type NewLiability = Omit<Liability, 'id' | 'updatedAt'>;
+export type NewRecurringRule = Omit<RecurringRule, 'id' | 'updatedAt'>;
 
 export interface FundEdit {
   name: string;
@@ -121,7 +131,23 @@ function replaceById<T extends { id: string }>(list: T[], item: T, entity: Finan
   return list.map((existing) => (existing.id === item.id ? item : existing));
 }
 
-const isIncomeExpense = (tx: Transaction): tx is IncomeExpenseTransaction => tx.type !== 'transfer';
+const isIncomeExpense = (tx: Transaction): tx is IncomeExpenseTransaction =>
+  tx.type === 'income' || tx.type === 'expense';
+
+// --- Sync bookkeeping -------------------------------------------------------
+
+function stamp<T extends object>(entity: T, ctx: OpContext): T & { updatedAt: string } {
+  return { ...entity, updatedAt: ctx.now().toISOString() };
+}
+
+function tombstone(entity: SyncEntity, id: string, ctx: OpContext): Tombstone {
+  return { entity, id, deletedAt: ctx.now().toISOString() };
+}
+
+// state.tombstones plus one entry per removed id.
+function logDeletes(state: State, entity: SyncEntity, ids: string[], ctx: OpContext): Tombstone[] {
+  return [...state.tombstones, ...ids.map((id) => tombstone(entity, id, ctx))];
+}
 
 // --- Accounts ---------------------------------------------------------------
 
@@ -142,23 +168,26 @@ function validateAccount(account: NewAccount) {
 
 export function addAccount(state: State, input: NewAccount, ctx: OpContext): Patch {
   validateAccount(input);
-  const account: Account = { ...input, id: ctx.newId(), createdAt: ctx.now().toISOString() };
+  const account: Account = stamp({ ...input, id: ctx.newId(), createdAt: ctx.now().toISOString() }, ctx);
   return { accounts: [...state.accounts, account] };
 }
 
-export function updateAccount(state: State, account: Account): Patch {
+export function updateAccount(state: State, account: Editable<Account>, ctx: OpContext): Patch {
   validateAccount(account);
   const existing = requireById(state.accounts, account.id, 'account');
   if (existing.currency !== account.currency && accountInUse(state, account.id)) {
     fail('ACCOUNT_CURRENCY_LOCKED', { id: account.id });
   }
-  return { accounts: replaceById(state.accounts, account, 'account') };
+  return { accounts: replaceById(state.accounts, stamp(account, ctx), 'account') };
 }
 
-export function deleteAccount(state: State, id: string): Patch {
+export function deleteAccount(state: State, id: string, ctx: OpContext): Patch {
   requireById(state.accounts, id, 'account');
   if (accountInUse(state, id)) fail('ACCOUNT_IN_USE', { id });
-  return { accounts: state.accounts.filter((a) => a.id !== id) };
+  return {
+    accounts: state.accounts.filter((a) => a.id !== id),
+    tombstones: logDeletes(state, 'account', [id], ctx),
+  };
 }
 
 // --- Categories -------------------------------------------------------------
@@ -172,21 +201,24 @@ function validateCategory(category: NewCategory) {
 
 export function addCategory(state: State, input: NewCategory, ctx: OpContext): Patch {
   validateCategory(input);
-  return { categories: [...state.categories, { ...input, id: ctx.newId(), isDefault: false }] };
+  return { categories: [...state.categories, stamp({ ...input, id: ctx.newId(), isDefault: false }, ctx)] };
 }
 
-export function updateCategory(state: State, category: Category): Patch {
+export function updateCategory(state: State, category: Editable<Category>, ctx: OpContext): Patch {
   validateCategory(category);
-  return { categories: replaceById(state.categories, category, 'category') };
+  return { categories: replaceById(state.categories, stamp(category, ctx), 'category') };
 }
 
-export function deleteCategory(state: State, id: string): Patch {
+export function deleteCategory(state: State, id: string, ctx: OpContext): Patch {
   requireById(state.categories, id, 'category');
   const inUse =
     state.transactions.some((tx) => isIncomeExpense(tx) && tx.categoryId === id) ||
     state.recurringRules.some((r) => r.categoryId === id);
   if (inUse) fail('CATEGORY_IN_USE', { id });
-  return { categories: state.categories.filter((c) => c.id !== id) };
+  return {
+    categories: state.categories.filter((c) => c.id !== id),
+    tombstones: logDeletes(state, 'category', [id], ctx),
+  };
 }
 
 // --- Transactions -----------------------------------------------------------
@@ -223,12 +255,15 @@ function rememberSelection(state: State, selection: LastUsedSelection): Settings
 }
 
 export function addTransaction(state: State, input: NewIncomeExpense, ctx: OpContext): Patch {
-  const tx: IncomeExpenseTransaction = {
-    ...input,
-    id: ctx.newId(),
-    createdAt: ctx.now().toISOString(),
-    rateToEGP: input.rateToEGP ?? rateToEGP(input.currency, state.settings.exchangeRates),
-  };
+  const tx: IncomeExpenseTransaction = stamp(
+    {
+      ...input,
+      id: ctx.newId(),
+      createdAt: ctx.now().toISOString(),
+      rateToEGP: input.rateToEGP ?? rateToEGP(input.currency, state.settings.exchangeRates),
+    },
+    ctx
+  );
   validateIncomeExpense(state, tx);
   return {
     transactions: [tx, ...state.transactions],
@@ -242,15 +277,18 @@ export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): P
   const rates = state.settings.exchangeRates;
   const from = requireById(state.accounts, input.fromAccountId, 'account');
   const to = requireById(state.accounts, input.toAccountId, 'account');
-  const tx: TransferTransaction = {
-    ...input,
-    type: 'transfer',
-    id: ctx.newId(),
-    createdAt: ctx.now().toISOString(),
-    toAmount:
-      input.toAmount ?? fromEGP(toEGP(input.amount, from.currency, rates), to.currency, rates),
-    rateToEGP: input.rateToEGP ?? rateToEGP(from.currency, rates),
-  };
+  const tx: TransferTransaction = stamp(
+    {
+      ...input,
+      type: 'transfer' as const,
+      id: ctx.newId(),
+      createdAt: ctx.now().toISOString(),
+      toAmount:
+        input.toAmount ?? fromEGP(toEGP(input.amount, from.currency, rates), to.currency, rates),
+      rateToEGP: input.rateToEGP ?? rateToEGP(from.currency, rates),
+    },
+    ctx
+  );
   validateTransfer(state, tx);
   return {
     transactions: [tx, ...state.transactions],
@@ -261,34 +299,173 @@ export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): P
 }
 
 // Currency that rateToEGP refers to: the transaction's own, or the source account's for transfers.
-function transactionCurrency(state: State, tx: Transaction): CurrencyCode | undefined {
+function transactionCurrency(state: State, tx: Editable<Transaction>): CurrencyCode | undefined {
   if (tx.type !== 'transfer') return tx.currency;
   return state.accounts.find((a) => a.id === tx.fromAccountId)?.currency;
 }
 
-// Replaces a transaction (its type may change). createdAt and the snapshotted rateToEGP are
-// kept from the original; the rate is re-snapshotted only when the currency changes, e.g.
-// when the transaction moves to an account in another currency.
-export function updateTransaction(state: State, tx: Transaction): Patch {
-  const existing = requireById(state.transactions, tx.id, 'transaction');
-  const currency = transactionCurrency(state, tx);
-  const sameCurrency = currency === transactionCurrency(state, existing);
-  const updated: Transaction = {
-    ...tx,
-    createdAt: existing.createdAt,
-    rateToEGP:
-      sameCurrency || !currency
-        ? existing.rateToEGP
-        : rateToEGP(currency, state.settings.exchangeRates),
-  };
-  if (updated.type === 'transfer') validateTransfer(state, updated);
-  else validateIncomeExpense(state, updated);
-  return { transactions: replaceById(state.transactions, updated, 'transaction') };
+function validateAssetPurchase(state: State, tx: AssetPurchaseTransaction) {
+  assertPositive(tx.amount, 'amount');
+  assertPositive(tx.rateToEGP, 'rateToEGP');
+  assertDate(tx.date, 'date');
+  const account = requireById(state.accounts, tx.accountId, 'account');
+  if (tx.currency !== account.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
+  requireById(state.holdings, tx.holdingId, 'holding');
 }
 
-export function deleteTransaction(state: State, id: string): Patch {
-  requireById(state.transactions, id, 'transaction');
-  return { transactions: state.transactions.filter((t) => t.id !== id) };
+function validateTransaction(state: State, tx: Transaction) {
+  if (tx.type === 'transfer') validateTransfer(state, tx);
+  else if (tx.type === 'asset_purchase') validateAssetPurchase(state, tx);
+  else validateIncomeExpense(state, tx);
+}
+
+// The holding's cost basis always mirrors its purchase: amount × the snapshotted rate.
+function syncPurchaseCost(holdings: Holding[], tx: AssetPurchaseTransaction, ctx: OpContext): Holding[] {
+  return holdings.map((h) =>
+    h.id === tx.holdingId ? stamp({ ...h, purchaseCostEGP: tx.amount * tx.rateToEGP }, ctx) : h
+  );
+}
+
+// Replaces a transaction. Income/expense/transfer may change into each other, but a gold
+// purchase stays a gold purchase (it owns a holding). createdAt and the snapshotted rateToEGP
+// are kept from the original; the rate is re-snapshotted only when the currency changes,
+// e.g. when the transaction moves to an account in another currency.
+export function updateTransaction(state: State, tx: Editable<Transaction>, ctx: OpContext): Patch {
+  const existing = requireById(state.transactions, tx.id, 'transaction');
+  if ((existing.type === 'asset_purchase') !== (tx.type === 'asset_purchase')) {
+    fail('ASSET_PURCHASE_TYPE_LOCKED', { id: tx.id });
+  }
+  const currency = transactionCurrency(state, tx);
+  const sameCurrency = currency === transactionCurrency(state, existing);
+  const updated = stamp(
+    {
+      ...tx,
+      createdAt: existing.createdAt,
+      rateToEGP:
+        sameCurrency || !currency
+          ? existing.rateToEGP
+          : rateToEGP(currency, state.settings.exchangeRates),
+    },
+    ctx
+  ) as Transaction;
+  validateTransaction(state, updated);
+  return {
+    transactions: replaceById(state.transactions, updated, 'transaction'),
+    ...(updated.type === 'asset_purchase'
+      ? { holdings: syncPurchaseCost(state.holdings, updated, ctx) }
+      : {}),
+  };
+}
+
+// Deleting a gold purchase also deletes its holding (and unlinks it from funds), atomically:
+// otherwise the money would be counted twice, as cash and as gold.
+export function deleteTransaction(state: State, id: string, ctx: OpContext): Patch {
+  const tx = requireById(state.transactions, id, 'transaction');
+  const transactions = state.transactions.filter((t) => t.id !== id);
+  if (tx.type !== 'asset_purchase') {
+    return { transactions, tombstones: logDeletes(state, 'transaction', [id], ctx) };
+  }
+  const removed = removeHolding(state, tx.holdingId, ctx);
+  return { transactions, ...removed, tombstones: [...removed.tombstones, tombstone('transaction', id, ctx)] };
+}
+
+export interface GoldPurchase {
+  accountId: string;
+  // Paid, in the account's currency.
+  amount: number;
+  date: string;
+  note?: string;
+  holding: {
+    name: string;
+    weightGrams: number;
+    karat: GoldKarat;
+    location?: Location;
+    // Defaults to `date`.
+    purchaseDate?: string;
+    note?: string;
+  };
+}
+
+function goldHoldingFor(
+  input: GoldPurchase,
+  id: string,
+  purchaseCostEGP: number,
+  ctx: OpContext
+): GoldHolding {
+  const { holding } = input;
+  return {
+    updatedAt: ctx.now().toISOString(),
+    id,
+    type: 'gold',
+    name: holding.name.trim(),
+    weightGrams: holding.weightGrams,
+    karat: holding.karat,
+    purchaseCostEGP,
+    purchaseDate: holding.purchaseDate ?? input.date,
+    ...(holding.location ? { location: holding.location } : {}),
+    ...(holding.note?.trim() ? { note: holding.note.trim() } : {}),
+  };
+}
+
+// Buys gold with cash in one atomic step: a gold holding whose cost is what was paid
+// (amount × rateToEGP) and an asset_purchase transaction that takes it out of the account.
+// At cost, net worth is unchanged: cash goes down by exactly what the gold goes up.
+export function buyGold(state: State, input: GoldPurchase, ctx: OpContext): Patch {
+  const account = requireById(state.accounts, input.accountId, 'account');
+  assertPositive(input.amount, 'amount');
+  const rate = rateToEGP(account.currency, state.settings.exchangeRates);
+  const holding = goldHoldingFor(input, ctx.newId(), input.amount * rate, ctx);
+  validateHolding(holding);
+
+  const tx: AssetPurchaseTransaction = {
+    updatedAt: ctx.now().toISOString(),
+    id: ctx.newId(),
+    type: 'asset_purchase',
+    accountId: account.id,
+    amount: input.amount,
+    currency: account.currency,
+    holdingId: holding.id,
+    date: input.date,
+    ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+    rateToEGP: rate,
+    createdAt: ctx.now().toISOString(),
+  };
+  const holdings = [...state.holdings, holding];
+  validateAssetPurchase({ ...state, holdings }, tx);
+  return { holdings, transactions: [tx, ...state.transactions] };
+}
+
+// Edits a gold purchase and its holding together. The rate snapshot is kept unless the
+// paying account's currency changes; the holding's cost follows the (new) amount.
+export function updateGoldPurchase(state: State, txId: string, input: GoldPurchase, ctx: OpContext): Patch {
+  const existing = requireById(state.transactions, txId, 'transaction');
+  if (existing.type !== 'asset_purchase') fail('ASSET_PURCHASE_TYPE_LOCKED', { id: txId });
+  const previousHolding = requireById(state.holdings, existing.holdingId, 'holding');
+  const account = requireById(state.accounts, input.accountId, 'account');
+  assertPositive(input.amount, 'amount');
+  const rate =
+    account.currency === existing.currency
+      ? existing.rateToEGP
+      : rateToEGP(account.currency, state.settings.exchangeRates);
+  const holding: GoldHolding = {
+    ...goldHoldingFor(input, previousHolding.id, input.amount * rate, ctx),
+  };
+  validateHolding(holding);
+
+  const { note: _previousNote, ...rest } = existing;
+  const tx: AssetPurchaseTransaction = {
+    ...rest,
+    accountId: account.id,
+    amount: input.amount,
+    currency: account.currency,
+    date: input.date,
+    ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+    rateToEGP: rate,
+    updatedAt: ctx.now().toISOString(),
+  };
+  const holdings = replaceById(state.holdings, holding, 'holding');
+  validateAssetPurchase({ ...state, holdings }, tx);
+  return { holdings, transactions: replaceById(state.transactions, tx, 'transaction') };
 }
 
 // --- Funds & movements ------------------------------------------------------
@@ -337,32 +514,41 @@ function validateFund(state: State, fund: NewFund, fundId?: string) {
 export function addFund(state: State, input: NewFund, ctx: OpContext): Patch {
   const normalized = normalizeFundShape(input);
   validateFund(state, normalized);
-  const fund: Fund = {
-    ...normalized,
-    linkedHoldingIds: normalized.linkedHoldingIds ?? [],
-    id: ctx.newId(),
-    createdAt: ctx.now().toISOString(),
-  };
+  const fund: Fund = stamp(
+    {
+      ...normalized,
+      linkedHoldingIds: normalized.linkedHoldingIds ?? [],
+      id: ctx.newId(),
+      createdAt: ctx.now().toISOString(),
+    },
+    ctx
+  );
   return { funds: [...state.funds, fund] };
 }
 
-export function updateFund(state: State, fund: Fund): Patch {
-  const normalized = normalizeFundShape(fund);
+export function updateFund(state: State, fund: Editable<Fund>, ctx: OpContext): Patch {
+  const normalized = normalizeFundShape(stamp(fund, ctx) as Fund);
   validateFund(state, normalized, fund.id);
   return { funds: replaceById(state.funds, normalized, 'fund') };
 }
 
 // Deleting a fund releases its allocations back to unassigned money.
-export function deleteFund(state: State, id: string): Patch {
+export function deleteFund(state: State, id: string, ctx: OpContext): Patch {
   requireById(state.funds, id, 'fund');
+  const movementIds = state.fundMovements.filter((m) => m.fundId === id).map((m) => m.id);
   return {
     funds: state.funds.filter((f) => f.id !== id),
     fundMovements: state.fundMovements.filter((m) => m.fundId !== id),
+    tombstones: [
+      ...logDeletes(state, 'fund', [id], ctx),
+      ...movementIds.map((movementId) => tombstone('fundMovement', movementId, ctx)),
+    ],
   };
 }
 
 function newMovement(fundId: string, amount: number, note: string | undefined, ctx: OpContext): FundMovement {
   return {
+    updatedAt: ctx.now().toISOString(),
     id: ctx.newId(),
     fundId,
     amount,
@@ -452,6 +638,7 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
   const { deadline: _previousDeadline, frequency, nextDueDate, ...rest } = fund;
   const updated = normalizeFundShape<Fund>({
     ...rest,
+    updatedAt: ctx.now().toISOString(),
     name: edit.name.trim(),
     targetAmount: edit.targetAmount,
     type: edit.type ?? fund.type,
@@ -527,7 +714,9 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
   if (take > 0.005) apply(withdrawFromFund(draft, fund.id, take, `اتدفعت: ${fund.name}`, ctx));
 
   const nextDue = addMonthsToDate(fund.nextDueDate, SINKING_CYCLE_MONTHS[fund.frequency]);
-  apply({ funds: draft.funds.map((f) => (f.id === fund.id ? { ...f, nextDueDate: nextDue } : f)) });
+  apply({
+    funds: draft.funds.map((f) => (f.id === fund.id ? stamp({ ...f, nextDueDate: nextDue }, ctx) : f)),
+  });
 
   return {
     transactions: draft.transactions,
@@ -537,17 +726,20 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
   };
 }
 
-export function updateFundMovement(state: State, movement: FundMovement): Patch {
+export function updateFundMovement(state: State, movement: Editable<FundMovement>, ctx: OpContext): Patch {
   requireById(state.funds, movement.fundId, 'fund');
   assertNumber(movement.amount, 'amount');
   if (movement.amount === 0) fail('NOT_POSITIVE', { field: 'amount' });
   assertDate(movement.date, 'date');
-  return { fundMovements: replaceById(state.fundMovements, movement, 'fundMovement') };
+  return { fundMovements: replaceById(state.fundMovements, stamp(movement, ctx), 'fundMovement') };
 }
 
-export function deleteFundMovement(state: State, id: string): Patch {
+export function deleteFundMovement(state: State, id: string, ctx: OpContext): Patch {
   requireById(state.fundMovements, id, 'fundMovement');
-  return { fundMovements: state.fundMovements.filter((m) => m.id !== id) };
+  return {
+    fundMovements: state.fundMovements.filter((m) => m.id !== id),
+    tombstones: logDeletes(state, 'fundMovement', [id], ctx),
+  };
 }
 
 // --- Holdings ---------------------------------------------------------------
@@ -566,26 +758,40 @@ function validateHolding(holding: NewHolding) {
 
 export function addHolding(state: State, input: NewHolding, ctx: OpContext): Patch {
   validateHolding(input);
-  const holding = { ...input, id: ctx.newId() } as Holding;
+  const holding = stamp({ ...input, id: ctx.newId() }, ctx) as Holding;
   return { holdings: [...state.holdings, holding] };
 }
 
-export function updateHolding(state: State, holding: Holding): Patch {
+export function updateHolding(state: State, holding: Editable<Holding>, ctx: OpContext): Patch {
   validateHolding(holding);
-  return { holdings: replaceById(state.holdings, holding, 'holding') };
+  return { holdings: replaceById(state.holdings, stamp(holding, ctx) as Holding, 'holding') };
 }
 
-// Also unlinks the holding from any fund.
-export function deleteHolding(state: State, id: string): Patch {
-  requireById(state.holdings, id, 'holding');
+// Removes a holding (logging a tombstone) and unlinks it from any fund.
+function removeHolding(
+  state: State,
+  id: string,
+  ctx: OpContext
+): Pick<State, 'holdings' | 'funds' | 'tombstones'> {
   return {
     holdings: state.holdings.filter((h) => h.id !== id),
     funds: state.funds.map((f) =>
       f.linkedHoldingIds.includes(id)
-        ? { ...f, linkedHoldingIds: f.linkedHoldingIds.filter((h) => h !== id) }
+        ? stamp({ ...f, linkedHoldingIds: f.linkedHoldingIds.filter((h) => h !== id) }, ctx)
         : f
     ),
+    tombstones: logDeletes(state, 'holding', [id], ctx),
   };
+}
+
+// Holdings bought through a purchase transaction are removed by deleting that transaction,
+// which also restores the cash; deleting only the holding would make the money vanish.
+export function deleteHolding(state: State, id: string, ctx: OpContext): Patch {
+  requireById(state.holdings, id, 'holding');
+  if (state.transactions.some((tx) => tx.type === 'asset_purchase' && tx.holdingId === id)) {
+    fail('HOLDING_HAS_PURCHASE', { id });
+  }
+  return removeHolding(state, id, ctx);
 }
 
 // --- Liabilities ------------------------------------------------------------
@@ -599,25 +805,28 @@ function validateLiability(liability: NewLiability) {
 
 export function addLiability(state: State, input: NewLiability, ctx: OpContext): Patch {
   validateLiability(input);
-  return { liabilities: [...state.liabilities, { ...input, id: ctx.newId() }] };
+  return { liabilities: [...state.liabilities, stamp({ ...input, id: ctx.newId() }, ctx)] };
 }
 
-export function updateLiability(state: State, liability: Liability): Patch {
+export function updateLiability(state: State, liability: Editable<Liability>, ctx: OpContext): Patch {
   validateLiability(liability);
   const existing = requireById(state.liabilities, liability.id, 'liability');
   const hasPayments = state.transactions.some((tx) => isIncomeExpense(tx) && tx.liabilityId === liability.id);
   if (existing.currency !== liability.currency && hasPayments) {
     fail('LIABILITY_CURRENCY_LOCKED', { id: liability.id });
   }
-  return { liabilities: replaceById(state.liabilities, liability, 'liability') };
+  return { liabilities: replaceById(state.liabilities, stamp(liability, ctx), 'liability') };
 }
 
-export function deleteLiability(state: State, id: string): Patch {
+export function deleteLiability(state: State, id: string, ctx: OpContext): Patch {
   requireById(state.liabilities, id, 'liability');
   if (state.transactions.some((tx) => isIncomeExpense(tx) && tx.liabilityId === id)) {
     fail('LIABILITY_IN_USE', { id });
   }
-  return { liabilities: state.liabilities.filter((l) => l.id !== id) };
+  return {
+    liabilities: state.liabilities.filter((l) => l.id !== id),
+    tombstones: logDeletes(state, 'liability', [id], ctx),
+  };
 }
 
 // --- Recurring rules --------------------------------------------------------
@@ -635,43 +844,48 @@ function validateRecurringRule(state: State, rule: NewRecurringRule) {
 
 export function addRecurringRule(state: State, input: NewRecurringRule, ctx: OpContext): Patch {
   validateRecurringRule(state, input);
-  return { recurringRules: [...state.recurringRules, { ...input, id: ctx.newId() }] };
+  return { recurringRules: [...state.recurringRules, stamp({ ...input, id: ctx.newId() }, ctx)] };
 }
 
-export function updateRecurringRule(state: State, rule: RecurringRule): Patch {
+export function updateRecurringRule(state: State, rule: Editable<RecurringRule>, ctx: OpContext): Patch {
   validateRecurringRule(state, rule);
-  return { recurringRules: replaceById(state.recurringRules, rule, 'recurringRule') };
+  return { recurringRules: replaceById(state.recurringRules, stamp(rule, ctx), 'recurringRule') };
 }
 
-// Past transactions created by the rule are kept but unlinked.
-export function deleteRecurringRule(state: State, id: string): Patch {
+// Past transactions created by the rule are kept but unlinked (and so count as changed).
+export function deleteRecurringRule(state: State, id: string, ctx: OpContext): Patch {
   requireById(state.recurringRules, id, 'recurringRule');
   return {
     recurringRules: state.recurringRules.filter((r) => r.id !== id),
     transactions: state.transactions.map((tx) => {
       if (!isIncomeExpense(tx) || tx.recurringRuleId !== id) return tx;
       const { recurringRuleId: _removed, ...rest } = tx;
-      return rest;
+      return stamp(rest, ctx);
     }),
+    tombstones: logDeletes(state, 'recurringRule', [id], ctx),
   };
 }
 
 // --- Monthly plans ----------------------------------------------------------
 
 // Inserts or replaces the plan for `plan.month`.
-export function setMonthlyPlan(state: State, plan: MonthlyPlan): Patch {
+export function setMonthlyPlan(state: State, plan: Editable<MonthlyPlan>, ctx: OpContext): Patch {
   if (!isMonthKey(plan.month)) fail('INVALID_MONTH');
   assertNonNegative(plan.expectedIncomeEGP, 'expectedIncomeEGP');
   for (const limit of Object.values(plan.bucketLimitsEGP)) {
     assertNonNegative(limit ?? 0, 'bucketLimit');
   }
   return {
-    monthlyPlans: [...state.monthlyPlans.filter((p) => p.month !== plan.month), plan],
+    monthlyPlans: [...state.monthlyPlans.filter((p) => p.month !== plan.month), stamp(plan, ctx)],
   };
 }
 
-export function deleteMonthlyPlan(state: State, month: string): Patch {
-  return { monthlyPlans: state.monthlyPlans.filter((p) => p.month !== month) };
+export function deleteMonthlyPlan(state: State, month: string, ctx: OpContext): Patch {
+  const existed = state.monthlyPlans.some((p) => p.month === month);
+  return {
+    monthlyPlans: state.monthlyPlans.filter((p) => p.month !== month),
+    ...(existed ? { tombstones: logDeletes(state, 'monthlyPlan', [month], ctx) } : {}),
+  };
 }
 
 // --- Settings ---------------------------------------------------------------
@@ -682,9 +896,127 @@ export function updateRates(state: State, rates: ExchangeRates): Patch {
   return { settings: { ...state.settings, exchangeRates: rates } };
 }
 
-export function updateGoldPrice(state: State, price: number, ctx: OpContext): Patch {
-  assertPositive(price, 'goldPrice');
+export interface SettingsUpdate {
+  exchangeRates?: { SAR_EGP: number; USD_EGP: number };
+  goldPrice24kEGP?: number;
+  goldPrice21kEGP?: number;
+  trackingStartDate?: string;
+}
+
+// Updates any of the market inputs and the tracking start date in one step. Changed rates or
+// gold prices get a fresh "last updated" timestamp.
+export function updateSettings(state: State, update: SettingsUpdate, ctx: OpContext): Patch {
+  const now = ctx.now().toISOString();
+  const settings = { ...state.settings };
+  if (update.exchangeRates) {
+    assertPositive(update.exchangeRates.SAR_EGP, 'exchangeRate');
+    assertPositive(update.exchangeRates.USD_EGP, 'exchangeRate');
+    const { SAR_EGP, USD_EGP } = settings.exchangeRates;
+    if (update.exchangeRates.SAR_EGP !== SAR_EGP || update.exchangeRates.USD_EGP !== USD_EGP) {
+      settings.exchangeRates = { ...update.exchangeRates, lastUpdated: now };
+    }
+  }
+  const p24 = update.goldPrice24kEGP ?? settings.goldPrice24kEGP;
+  const p21 = update.goldPrice21kEGP ?? settings.goldPrice21kEGP;
+  assertPositive(p24, 'goldPrice');
+  assertPositive(p21, 'goldPrice');
+  if (p24 !== settings.goldPrice24kEGP || p21 !== settings.goldPrice21kEGP) {
+    Object.assign(settings, { goldPrice24kEGP: p24, goldPrice21kEGP: p21, goldPriceUpdatedAt: now });
+  }
+  if (update.trackingStartDate !== undefined) {
+    assertDate(update.trackingStartDate, 'date');
+    settings.trackingStartDate = update.trackingStartDate;
+  }
+  return { settings };
+}
+
+// Settings that belong to this installation rather than to the data set.
+function deviceSettings(state: State): Pick<Settings, 'deviceId' | 'lastBackupAt' | 'appLockEnabled'> {
+  const { deviceId, lastBackupAt, appLockEnabled } = state.settings;
   return {
-    settings: { ...state.settings, goldPrice24kEGP: price, goldPriceUpdatedAt: ctx.now().toISOString() },
+    deviceId,
+    ...(lastBackupAt ? { lastBackupAt } : {}),
+    ...(appLockEnabled !== undefined ? { appLockEnabled } : {}),
   };
+}
+
+const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones'>; entity: SyncEntity }[] = [
+  { key: 'accounts', entity: 'account' },
+  { key: 'categories', entity: 'category' },
+  { key: 'transactions', entity: 'transaction' },
+  { key: 'funds', entity: 'fund' },
+  { key: 'fundMovements', entity: 'fundMovement' },
+  { key: 'holdings', entity: 'holding' },
+  { key: 'liabilities', entity: 'liability' },
+  { key: 'recurringRules', entity: 'recurringRule' },
+  { key: 'monthlyPlans', entity: 'monthlyPlan' },
+];
+
+const syncKey = (item: object) =>
+  'id' in item ? String(item.id) : String((item as { month: string }).month);
+
+// Replaces every collection with `next`'s. Entities that disappear get tombstones; entities
+// that exist (again) lose theirs. Both sides' tombstone logs are kept, newest per entity.
+function replaceAllData(state: State, next: State, settings: Settings, ctx: OpContext): Patch {
+  const deletedAt = ctx.now().toISOString();
+  const present = new Set<string>();
+  const log = new Map<string, Tombstone>();
+  const record = (t: Tombstone) => {
+    const key = `${t.entity}:${t.id}`;
+    const existing = log.get(key);
+    if (!existing || existing.deletedAt < t.deletedAt) log.set(key, t);
+  };
+  [...state.tombstones, ...next.tombstones].forEach(record);
+
+  const patch: Patch = { settings };
+  for (const { key, entity } of COLLECTIONS) {
+    const incoming = next[key] as object[];
+    const incomingIds = new Set(incoming.map(syncKey));
+    incomingIds.forEach((id) => present.add(`${entity}:${id}`));
+    for (const item of state[key] as object[]) {
+      const id = syncKey(item);
+      if (!incomingIds.has(id)) record({ entity, id, deletedAt });
+    }
+    Object.assign(patch, { [key]: incoming });
+  }
+  patch.tombstones = [...log.entries()].filter(([key]) => !present.has(key)).map(([, t]) => t);
+  return patch;
+}
+
+// "استيراد البيانات الافتتاحية": replaces all data with `seed`, keeping the current exchange
+// rates and gold prices (market inputs the user maintains) but the seed's tracking start date.
+export function replaceWithSeed(state: State, seed: State, ctx: OpContext): Patch {
+  const { lastUsed: _seedLastUsed, ...seedSettings } = seed.settings;
+  return replaceAllData(
+    state,
+    seed,
+    {
+      ...seedSettings,
+      exchangeRates: state.settings.exchangeRates,
+      goldPrice24kEGP: state.settings.goldPrice24kEGP,
+      goldPrice21kEGP: state.settings.goldPrice21kEGP,
+      goldPriceUpdatedAt: state.settings.goldPriceUpdatedAt,
+      ...deviceSettings(state),
+    },
+    ctx
+  );
+}
+
+// "استعادة من نسخة احتياطية": replaces all data with a restored backup. This device keeps its
+// own id, lock setting and last-backup date.
+export function restoreFromBackup(state: State, restored: State, ctx: OpContext): Patch {
+  return replaceAllData(state, restored, { ...restored.settings, ...deviceSettings(state) }, ctx);
+}
+
+export function markBackedUp(state: State, at: string): Patch {
+  return { settings: { ...state.settings, lastBackupAt: at } };
+}
+
+export function setAppLock(state: State, enabled: boolean): Patch {
+  return { settings: { ...state.settings, appLockEnabled: enabled } };
+}
+
+// Gives the installation its id the first time it runs.
+export function ensureDeviceId(state: State, ctx: OpContext): Patch {
+  return state.settings.deviceId ? {} : { settings: { ...state.settings, deviceId: ctx.newId() } };
 }

@@ -6,12 +6,12 @@ import { CoverSheet } from '@/components/funds/CoverSheet';
 import { Card } from '@/components/ui/Card';
 import { Colors, FinanceColors } from '@/constants/theme';
 import { unassignedEGP } from '@/store/selectors';
-import type { FinanceStateV2 } from '@/store/types';
+import type { FinanceState } from '@/store/types';
 import { formatCurrency } from '@/utils/formatters';
 
 // "فلوس بدون وظيفة" card with its actions: distribute a surplus (وزّعها) or cover a
 // shortfall (غطّيها). Owns the sheets it opens.
-export function UnassignedPanel({ state }: { state: FinanceStateV2 }) {
+export function UnassignedPanel({ state }: { state: FinanceState }) {
   const [sheet, setSheet] = useState<'assign' | 'cover' | null>(null);
   const amount = unassignedEGP(state);
   const negative = amount < -0.005;

@@ -6,7 +6,11 @@ export const CATEGORY_IDS = {
   groceries: 'cat-essentials-groceries',
 } as const;
 
+// Fixed so default categories are identical on every device (until the user edits them).
+const DEFAULTS_UPDATED_AT = '2026-01-01T00:00:00.000Z';
+
 const income = (id: string, name: string): Category => ({
+  updatedAt: DEFAULTS_UPDATED_AT,
   id,
   name,
   kind: 'income',
@@ -15,6 +19,7 @@ const income = (id: string, name: string): Category => ({
 });
 
 const expense = (id: string, name: string, bucket: Category['bucket']): Category => ({
+  updatedAt: DEFAULTS_UPDATED_AT,
   id,
   name,
   kind: 'expense',
@@ -32,12 +37,16 @@ export const DEFAULT_CATEGORIES: Category[] = [
   expense('cat-essentials-transport', 'مواصلات', 'essentials'),
   expense('cat-essentials-telecom', 'إنترنت وموبايل', 'essentials'),
   expense('cat-essentials-bills', 'فواتير', 'essentials'),
+  expense('cat-essentials-health', 'صحة', 'essentials'),
+  expense('cat-essentials-household', 'مستلزمات البيت', 'essentials'),
+  expense('cat-essentials-home-setup', 'تجهيز البيت', 'essentials'),
 
   expense('cat-lifestyle-dining', 'مطاعم وقهوة', 'lifestyle'),
   expense('cat-lifestyle-clothing', 'ملابس', 'lifestyle'),
   expense('cat-lifestyle-entertainment', 'ترفيه', 'lifestyle'),
   expense('cat-lifestyle-personal-care', 'عناية شخصية', 'lifestyle'),
   expense('cat-lifestyle-gadgets', 'أجهزة وأدوات', 'lifestyle'),
+  expense('cat-lifestyle-misc', 'متفرقات', 'lifestyle'),
 
   expense('cat-giving-sadaqah', 'صدقة', 'giving'),
   expense('cat-giving-family', 'مساعدة الأهل', 'giving'),

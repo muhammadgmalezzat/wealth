@@ -24,6 +24,7 @@ const FILTERS: { label: string; value: TransactionFilter }[] = [
   { label: 'مصروف', value: 'expense' },
   { label: 'دخل', value: 'income' },
   { label: 'تحويل', value: 'transfer' },
+  { label: 'ذهب', value: 'asset_purchase' },
 ];
 
 // 'add' opens an empty sheet; a transaction id opens it for editing.

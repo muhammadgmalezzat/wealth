@@ -26,7 +26,9 @@ export type FinanceErrorCode =
   | 'INSUFFICIENT_UNASSIGNED'
   | 'NOTHING_SELECTED'
   | 'SINKING_SCHEDULE_REQUIRED'
-  | 'NOT_A_SINKING_FUND';
+  | 'NOT_A_SINKING_FUND'
+  | 'HOLDING_HAS_PURCHASE'
+  | 'ASSET_PURCHASE_TYPE_LOCKED';
 
 export type FinanceEntity =
   | 'account'

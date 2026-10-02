@@ -11,7 +11,7 @@ import type {
   Account,
   Category,
   ExchangeRates,
-  FinanceStateV2,
+  FinanceState,
   Fund,
   FundMovement,
   Holding,
@@ -23,14 +23,16 @@ import type {
 
 const STORAGE_KEY = '@wealth_finance_state';
 const BACKUP_KEY_PREFIX = '@wealth_finance_state_backup_v';
+const IMPORT_BACKUP_KEY = '@wealth_finance_state_backup_before_import';
+const RESTORE_BACKUP_KEY = '@wealth_finance_state_backup_before_restore';
 
 // Prefer the git-ignored personal seed; fall back to the committed example.
 // Expo's Metro config enables optional dependencies, so a missing file is fine here.
-function loadSeed(): FinanceStateV2 {
+function loadSeed(): FinanceState {
   try {
-    return require('./seed.local').SEED_STATE as FinanceStateV2;
+    return require('./seed.local').SEED_STATE as FinanceState;
   } catch {
-    return require('./seed.example').SEED_STATE as FinanceStateV2;
+    return require('./seed.example').SEED_STATE as FinanceState;
   }
 }
 
@@ -38,23 +40,49 @@ const SEED_STATE = loadSeed();
 
 const ctx: ops.OpContext = { newId, now: () => new Date() };
 
+// The persisted part of the store: data only, never actions or hydration flags. Also what a
+// backup contains.
+export function dataOf(s: FinanceState): FinanceState {
+  return {
+    accounts: s.accounts,
+    categories: s.categories,
+    transactions: s.transactions,
+    funds: s.funds,
+    fundMovements: s.fundMovements,
+    holdings: s.holdings,
+    liabilities: s.liabilities,
+    recurringRules: s.recurringRules,
+    monthlyPlans: s.monthlyPlans,
+    settings: s.settings,
+    tombstones: s.tombstones,
+  };
+}
+
+// Saves the current data under `key` before a destructive replace, so it can be recovered.
+async function saveSnapshot(key: string, state: FinanceState) {
+  await AsyncStorage.setItem(
+    key,
+    JSON.stringify({ state: dataOf(state), version: CURRENT_VERSION, savedAt: new Date().toISOString() })
+  );
+}
+
 // Every action validates its input and throws FinanceValidationError on bad data.
 interface FinanceActions {
   addAccount: (input: ops.NewAccount) => void;
-  updateAccount: (account: Account) => void;
+  updateAccount: (account: ops.Editable<Account>) => void;
   deleteAccount: (id: string) => void;
 
   addCategory: (input: ops.NewCategory) => void;
-  updateCategory: (category: Category) => void;
+  updateCategory: (category: ops.Editable<Category>) => void;
   deleteCategory: (id: string) => void;
 
   addTransaction: (input: ops.NewIncomeExpense) => void;
   addTransfer: (input: ops.NewTransfer) => void;
-  updateTransaction: (tx: Transaction) => void;
+  updateTransaction: (tx: ops.Editable<Transaction>) => void;
   deleteTransaction: (id: string) => void;
 
   addFund: (input: ops.NewFund) => void;
-  updateFund: (fund: Fund) => void;
+  updateFund: (fund: ops.Editable<Fund>) => void;
   deleteFund: (id: string) => void;
   editFund: (fundId: string, edit: ops.FundEdit) => void;
   allocateMany: (allocations: FundAmount[], note?: string) => void;
@@ -62,29 +90,39 @@ interface FinanceActions {
   paySinkingFund: (payment: ops.SinkingPayment) => void;
   allocateToFund: (fundId: string, amount: number, note?: string) => void;
   withdrawFromFund: (fundId: string, amount: number, note?: string) => void;
-  updateFundMovement: (movement: FundMovement) => void;
+  updateFundMovement: (movement: ops.Editable<FundMovement>) => void;
   deleteFundMovement: (id: string) => void;
 
   addHolding: (input: ops.NewHolding) => void;
-  updateHolding: (holding: Holding) => void;
+  updateHolding: (holding: ops.Editable<Holding>) => void;
   deleteHolding: (id: string) => void;
 
   addLiability: (input: ops.NewLiability) => void;
-  updateLiability: (liability: Liability) => void;
+  updateLiability: (liability: ops.Editable<Liability>) => void;
   deleteLiability: (id: string) => void;
 
   addRecurringRule: (input: ops.NewRecurringRule) => void;
-  updateRecurringRule: (rule: RecurringRule) => void;
+  updateRecurringRule: (rule: ops.Editable<RecurringRule>) => void;
   deleteRecurringRule: (id: string) => void;
 
-  setMonthlyPlan: (plan: MonthlyPlan) => void;
+  setMonthlyPlan: (plan: ops.Editable<MonthlyPlan>) => void;
   deleteMonthlyPlan: (month: string) => void;
 
   updateRates: (rates: ExchangeRates) => void;
-  updateGoldPrice: (price: number) => void;
+  updateSettings: (update: ops.SettingsUpdate) => void;
+
+  buyGold: (purchase: ops.GoldPurchase) => void;
+  updateGoldPurchase: (txId: string, purchase: ops.GoldPurchase) => void;
+
+  // Backs up the current data, then replaces it with the opening seed.
+  importOpeningData: () => Promise<void>;
+  // Backs up the current data, then replaces it with a decrypted, migrated backup.
+  restoreBackup: (restored: FinanceState) => Promise<void>;
+  markBackedUp: (at: string) => void;
+  setAppLock: (enabled: boolean) => void;
 }
 
-export type FinanceStore = FinanceStateV2 &
+export type FinanceStore = FinanceState &
   FinanceActions & {
     // True once persisted state has been read from storage (successfully or not).
     hasHydrated: boolean;
@@ -128,21 +166,21 @@ export const useFinanceStore = create<FinanceStore>()(
       hasHydrated: false,
 
       addAccount: (input) => set(ops.addAccount(get(), input, ctx)),
-      updateAccount: (account) => set(ops.updateAccount(get(), account)),
-      deleteAccount: (id) => set(ops.deleteAccount(get(), id)),
+      updateAccount: (account) => set(ops.updateAccount(get(), account, ctx)),
+      deleteAccount: (id) => set(ops.deleteAccount(get(), id, ctx)),
 
       addCategory: (input) => set(ops.addCategory(get(), input, ctx)),
-      updateCategory: (category) => set(ops.updateCategory(get(), category)),
-      deleteCategory: (id) => set(ops.deleteCategory(get(), id)),
+      updateCategory: (category) => set(ops.updateCategory(get(), category, ctx)),
+      deleteCategory: (id) => set(ops.deleteCategory(get(), id, ctx)),
 
       addTransaction: (input) => set(ops.addTransaction(get(), input, ctx)),
       addTransfer: (input) => set(ops.addTransfer(get(), input, ctx)),
-      updateTransaction: (tx) => set(ops.updateTransaction(get(), tx)),
-      deleteTransaction: (id) => set(ops.deleteTransaction(get(), id)),
+      updateTransaction: (tx) => set(ops.updateTransaction(get(), tx, ctx)),
+      deleteTransaction: (id) => set(ops.deleteTransaction(get(), id, ctx)),
 
       addFund: (input) => set(ops.addFund(get(), input, ctx)),
-      updateFund: (fund) => set(ops.updateFund(get(), fund)),
-      deleteFund: (id) => set(ops.deleteFund(get(), id)),
+      updateFund: (fund) => set(ops.updateFund(get(), fund, ctx)),
+      deleteFund: (id) => set(ops.deleteFund(get(), id, ctx)),
       editFund: (fundId, edit) => set(ops.editFund(get(), fundId, edit, ctx)),
       allocateMany: (allocations, note) => set(ops.allocateMany(get(), allocations, note, ctx)),
       withdrawMany: (withdrawals, note) => set(ops.withdrawMany(get(), withdrawals, note, ctx)),
@@ -151,26 +189,42 @@ export const useFinanceStore = create<FinanceStore>()(
         set(ops.allocateToFund(get(), fundId, amount, note, ctx)),
       withdrawFromFund: (fundId, amount, note) =>
         set(ops.withdrawFromFund(get(), fundId, amount, note, ctx)),
-      updateFundMovement: (movement) => set(ops.updateFundMovement(get(), movement)),
-      deleteFundMovement: (id) => set(ops.deleteFundMovement(get(), id)),
+      updateFundMovement: (movement) => set(ops.updateFundMovement(get(), movement, ctx)),
+      deleteFundMovement: (id) => set(ops.deleteFundMovement(get(), id, ctx)),
 
       addHolding: (input) => set(ops.addHolding(get(), input, ctx)),
-      updateHolding: (holding) => set(ops.updateHolding(get(), holding)),
-      deleteHolding: (id) => set(ops.deleteHolding(get(), id)),
+      updateHolding: (holding) => set(ops.updateHolding(get(), holding, ctx)),
+      deleteHolding: (id) => set(ops.deleteHolding(get(), id, ctx)),
 
       addLiability: (input) => set(ops.addLiability(get(), input, ctx)),
-      updateLiability: (liability) => set(ops.updateLiability(get(), liability)),
-      deleteLiability: (id) => set(ops.deleteLiability(get(), id)),
+      updateLiability: (liability) => set(ops.updateLiability(get(), liability, ctx)),
+      deleteLiability: (id) => set(ops.deleteLiability(get(), id, ctx)),
 
       addRecurringRule: (input) => set(ops.addRecurringRule(get(), input, ctx)),
-      updateRecurringRule: (rule) => set(ops.updateRecurringRule(get(), rule)),
-      deleteRecurringRule: (id) => set(ops.deleteRecurringRule(get(), id)),
+      updateRecurringRule: (rule) => set(ops.updateRecurringRule(get(), rule, ctx)),
+      deleteRecurringRule: (id) => set(ops.deleteRecurringRule(get(), id, ctx)),
 
-      setMonthlyPlan: (plan) => set(ops.setMonthlyPlan(get(), plan)),
-      deleteMonthlyPlan: (month) => set(ops.deleteMonthlyPlan(get(), month)),
+      setMonthlyPlan: (plan) => set(ops.setMonthlyPlan(get(), plan, ctx)),
+      deleteMonthlyPlan: (month) => set(ops.deleteMonthlyPlan(get(), month, ctx)),
 
       updateRates: (rates) => set(ops.updateRates(get(), rates)),
-      updateGoldPrice: (price) => set(ops.updateGoldPrice(get(), price, ctx)),
+      updateSettings: (update) => set(ops.updateSettings(get(), update, ctx)),
+
+      buyGold: (purchase) => set(ops.buyGold(get(), purchase, ctx)),
+      updateGoldPurchase: (txId, purchase) => set(ops.updateGoldPurchase(get(), txId, purchase, ctx)),
+
+      // Snapshots are written before anything changes, so a mistaken import or restore can
+      // always be undone by hand.
+      importOpeningData: async () => {
+        await saveSnapshot(IMPORT_BACKUP_KEY, get());
+        set(ops.replaceWithSeed(get(), SEED_STATE, ctx));
+      },
+      restoreBackup: async (restored) => {
+        await saveSnapshot(RESTORE_BACKUP_KEY, get());
+        set(ops.restoreFromBackup(get(), restored, ctx));
+      },
+      markBackedUp: (at) => set(ops.markBackedUp(get(), at)),
+      setAppLock: (enabled) => set(ops.setAppLock(get(), enabled)),
     }),
     {
       name: STORAGE_KEY,
@@ -181,18 +235,7 @@ export const useFinanceStore = create<FinanceStore>()(
       // server renders the loading state, matching the client's first render.
       skipHydration: isServer,
       // Persist data only — never actions or hydration flags.
-      partialize: (s): FinanceStateV2 => ({
-        accounts: s.accounts,
-        categories: s.categories,
-        transactions: s.transactions,
-        funds: s.funds,
-        fundMovements: s.fundMovements,
-        holdings: s.holdings,
-        liabilities: s.liabilities,
-        recurringRules: s.recurringRules,
-        monthlyPlans: s.monthlyPlans,
-        settings: s.settings,
-      }),
+      partialize: (s: FinanceStore) => dataOf(s),
       migrate: async (persisted, version) => {
         // Keep the untouched pre-migration payload so a failed or wrong migration never
         // loses data. It is written before the migrated state can overwrite the main key.
@@ -202,6 +245,7 @@ export const useFinanceStore = create<FinanceStore>()(
         );
         const { state: migrated, clampedBy } = migratePersistedState(persisted, version, {
           now: new Date().toISOString(),
+          newId,
         });
         if (__DEV__) {
           console.log(`[wealth] migrated persisted state v${version} → v${CURRENT_VERSION}`, {
@@ -212,7 +256,9 @@ export const useFinanceStore = create<FinanceStore>()(
         return migrated;
       },
       onRehydrateStorage: () => () => {
-        useFinanceStore.setState({ hasHydrated: true });
+        // A fresh install starts from the seed, which has no device id yet.
+        const state = useFinanceStore.getState();
+        useFinanceStore.setState({ ...ops.ensureDeviceId(state, ctx), hasHydrated: true });
       },
     }
   )

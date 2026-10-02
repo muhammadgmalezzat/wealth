@@ -1,8 +1,10 @@
-﻿import { useState } from 'react';
+﻿import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 
+import { BackupReminder } from '@/components/dashboard/BackupReminder';
 import { NetWorthCard } from '@/components/dashboard/NetWorthCard';
 import { FundCard } from '@/components/funds/FundCard';
 import { UnassignedPanel } from '@/components/funds/UnassignedPanel';
@@ -17,11 +19,13 @@ import {
   holdingsTotalEGP,
   liquidTotalEGP,
   monthSummary,
+  netWorthByLocation,
   netWorthEGP,
   recentTransactions,
 } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toMonthKey } from '@/utils/dates';
+import { formatCurrency } from '@/utils/formatters';
 
 // 'add' opens an empty transaction sheet; an id opens it for editing.
 type TxSheetTarget = 'add' | { id: string } | null;
@@ -41,6 +45,7 @@ export default function DashboardScreen() {
   const monthNetEGP = monthSummary(state, toMonthKey(new Date())).netCashFlow;
 
   const recentTx = recentTransactions(state, 5);
+  const byLocation = netWorthByLocation(state);
   const editingTx =
     txSheet && txSheet !== 'add' ? state.transactions.find((t) => t.id === txSheet.id) : undefined;
 
@@ -62,12 +67,25 @@ export default function DashboardScreen() {
             <Text style={styles.appTitle}>Wealth</Text>
             <Text style={styles.greeting}>مرحباً</Text>
           </View>
-          <Text style={styles.dateText}>{todayArabic}</Text>
+          <View style={styles.headerRight}>
+            <TouchableOpacity
+              onPress={() => router.push('/settings')}
+              hitSlop={10}
+              accessibilityLabel="الإعدادات">
+              <MaterialIcons name="settings" size={24} color={Colors.light.icon} />
+            </TouchableOpacity>
+            <Text style={styles.dateText}>{todayArabic}</Text>
+          </View>
         </View>
+
+        <BackupReminder lastBackupAt={state.settings.lastBackupAt} />
 
         {/* ── Net Worth ──────────────────────────────────────────── */}
         <View style={styles.section}>
           <NetWorthCard totalEGP={netWorthEGP(state)} />
+          <Text style={styles.locationSplit}>
+            مصر {formatCurrency(byLocation.EG, 'EGP')} · السعودية {formatCurrency(byLocation.SA, 'EGP')}
+          </Text>
           <Text style={styles.netWorthLabel}>إجمالي الثروة</Text>
         </View>
 
@@ -148,6 +166,16 @@ const styles = StyleSheet.create({
   },
 
   // Header
+  headerRight: {
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  locationSplit: {
+    fontSize: 12,
+    color: Colors.light.icon,
+    textAlign: 'center',
+    marginTop: 8,
+  },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',

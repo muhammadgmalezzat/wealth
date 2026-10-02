@@ -1,12 +1,12 @@
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { Colors, FinanceColors } from '@/constants/theme';
-import type { CurrencyCode, FinanceStateV2, Transaction } from '@/store/types';
+import type { CurrencyCode, FinanceState, Transaction } from '@/store/types';
 import { formatCurrency, formatDate } from '@/utils/formatters';
 
 interface TransactionRowProps {
   tx: Transaction;
-  state: Pick<FinanceStateV2, 'accounts' | 'categories'>;
+  state: Pick<FinanceState, 'accounts' | 'categories' | 'holdings'>;
   onPress: () => void;
   showDate?: boolean;
   isLast?: boolean;
@@ -31,6 +31,14 @@ function describe(state: TransactionRowProps['state'], tx: Transaction): Descrip
       currency: from?.currency ?? 'EGP',
     };
   }
+  if (tx.type === 'asset_purchase') {
+    const holding = state.holdings.find((h) => h.id === tx.holdingId);
+    return {
+      title: 'شراء ذهب',
+      subtitle: holding ? `${accountName(tx.accountId)} · ${holding.name}` : accountName(tx.accountId),
+      currency: tx.currency,
+    };
+  }
   return {
     title: state.categories.find((c) => c.id === tx.categoryId)?.name ?? '—',
     subtitle: accountName(tx.accountId),
@@ -41,12 +49,16 @@ function describe(state: TransactionRowProps['state'], tx: Transaction): Descrip
 export function TransactionRow({ tx, state, onPress, showDate = false, isLast = true }: TransactionRowProps) {
   const { title, subtitle, currency } = describe(state, tx);
   const sign = tx.type === 'income' ? '+' : tx.type === 'expense' ? '−' : '';
+  // Purchases aren't spending: no minus sign, shown in gold.
   const color =
     tx.type === 'income'
       ? FinanceColors.income
       : tx.type === 'expense'
         ? FinanceColors.expense
-        : Colors.light.text;
+        : tx.type === 'asset_purchase'
+          ? FinanceColors.gold
+          : Colors.light.text;
+  const oneTime = tx.type === 'expense' && tx.oneTime;
 
   return (
     <TouchableOpacity
@@ -65,7 +77,14 @@ export function TransactionRow({ tx, state, onPress, showDate = false, isLast = 
       </View>
       {/* Right: category, account, note */}
       <View style={styles.details}>
-        <Text style={styles.title}>{title}</Text>
+        <View style={styles.titleRow}>
+          {oneTime && (
+            <View style={styles.badge}>
+              <Text style={styles.badgeText}>مرة واحدة</Text>
+            </View>
+          )}
+          <Text style={styles.title}>{title}</Text>
+        </View>
         <Text style={styles.muted} numberOfLines={1}>
           {showDate ? `${subtitle} · ${formatDate(tx.date)}` : subtitle}
         </Text>
@@ -103,6 +122,22 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'flex-end',
     gap: 2,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  badge: {
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    backgroundColor: Colors.light.icon + '22',
+  },
+  badgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: Colors.light.icon,
   },
   title: {
     fontSize: 15,
