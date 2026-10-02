@@ -11,15 +11,18 @@ import { fundAllocated, unassignedEGPWithFundCash } from './selectors';
 import type {
   Account,
   Category,
+  CurrencyCode,
   ExchangeRates,
   FinanceStateV2,
   Fund,
   FundMovement,
   Holding,
   IncomeExpenseTransaction,
+  LastUsedSelection,
   Liability,
   MonthlyPlan,
   RecurringRule,
+  Settings,
   Transaction,
   TransferTransaction,
 } from './types';
@@ -199,6 +202,11 @@ function validateTransfer(state: State, tx: TransferTransaction) {
   if (tx.fromAccountId === tx.toAccountId) fail('SAME_ACCOUNT_TRANSFER');
 }
 
+// Settings with `selection` merged into the remembered form defaults.
+function rememberSelection(state: State, selection: LastUsedSelection): Settings {
+  return { ...state.settings, lastUsed: { ...state.settings.lastUsed, ...selection } };
+}
+
 export function addTransaction(state: State, input: NewIncomeExpense, ctx: OpContext): Patch {
   const tx: IncomeExpenseTransaction = {
     ...input,
@@ -207,7 +215,12 @@ export function addTransaction(state: State, input: NewIncomeExpense, ctx: OpCon
     rateToEGP: input.rateToEGP ?? rateToEGP(input.currency, state.settings.exchangeRates),
   };
   validateIncomeExpense(state, tx);
-  return { transactions: [tx, ...state.transactions] };
+  return {
+    transactions: [tx, ...state.transactions],
+    settings: rememberSelection(state, {
+      [tx.type]: { accountId: tx.accountId, categoryId: tx.categoryId },
+    }),
+  };
 }
 
 export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): Patch {
@@ -224,13 +237,38 @@ export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): P
     rateToEGP: input.rateToEGP ?? rateToEGP(from.currency, rates),
   };
   validateTransfer(state, tx);
-  return { transactions: [tx, ...state.transactions] };
+  return {
+    transactions: [tx, ...state.transactions],
+    settings: rememberSelection(state, {
+      transfer: { fromAccountId: tx.fromAccountId, toAccountId: tx.toAccountId },
+    }),
+  };
 }
 
+// Currency that rateToEGP refers to: the transaction's own, or the source account's for transfers.
+function transactionCurrency(state: State, tx: Transaction): CurrencyCode | undefined {
+  if (tx.type !== 'transfer') return tx.currency;
+  return state.accounts.find((a) => a.id === tx.fromAccountId)?.currency;
+}
+
+// Replaces a transaction (its type may change). createdAt and the snapshotted rateToEGP are
+// kept from the original; the rate is re-snapshotted only when the currency changes, e.g.
+// when the transaction moves to an account in another currency.
 export function updateTransaction(state: State, tx: Transaction): Patch {
-  if (tx.type === 'transfer') validateTransfer(state, tx);
-  else validateIncomeExpense(state, tx);
-  return { transactions: replaceById(state.transactions, tx, 'transaction') };
+  const existing = requireById(state.transactions, tx.id, 'transaction');
+  const currency = transactionCurrency(state, tx);
+  const sameCurrency = currency === transactionCurrency(state, existing);
+  const updated: Transaction = {
+    ...tx,
+    createdAt: existing.createdAt,
+    rateToEGP:
+      sameCurrency || !currency
+        ? existing.rateToEGP
+        : rateToEGP(currency, state.settings.exchangeRates),
+  };
+  if (updated.type === 'transfer') validateTransfer(state, updated);
+  else validateIncomeExpense(state, updated);
+  return { transactions: replaceById(state.transactions, updated, 'transaction') };
 }
 
 export function deleteTransaction(state: State, id: string): Patch {

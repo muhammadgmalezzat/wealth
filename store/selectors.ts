@@ -8,6 +8,7 @@ import type {
   Holding,
   IncomeExpenseTransaction,
   Liability,
+  Transaction,
 } from './types';
 
 // Single source of truth for every derived financial figure. All functions are pure.
@@ -201,6 +202,56 @@ export function unassignedEGPWithFundCash(
   if (!fund) return unassignedEGP(state);
   const change = cashAllocation - fundAllocated(state, fundId);
   return unassignedEGP(state) - toEGP(change, fund.currency, state.settings.exchangeRates);
+}
+
+// --- Transaction lists ------------------------------------------------------
+
+export type TransactionFilter = 'all' | Transaction['type'];
+
+// Newest first: by date, then by creation time within the same day.
+export function compareNewestFirst(a: Transaction, b: Transaction): number {
+  if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+  return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0;
+}
+
+export function recentTransactions(state: Pick<State, 'transactions'>, count: number): Transaction[] {
+  return [...state.transactions].sort(compareNewestFirst).slice(0, count);
+}
+
+export function transactionsForMonth(
+  state: Pick<State, 'transactions'>,
+  month: string,
+  filter: TransactionFilter = 'all'
+): Transaction[] {
+  return state.transactions
+    .filter((tx) => monthOf(tx.date) === month && (filter === 'all' || tx.type === filter))
+    .sort(compareNewestFirst);
+}
+
+// Signed EGP effect on net cash flow at the snapshotted rate; transfers are neutral.
+export function transactionNetEGP(tx: Transaction): number {
+  if (tx.type === 'transfer') return 0;
+  const amountEGP = tx.amount * tx.rateToEGP;
+  return tx.type === 'income' ? amountEGP : -amountEGP;
+}
+
+export interface DayGroup {
+  date: string;
+  netEGP: number;
+  transactions: Transaction[];
+}
+
+// Groups by calendar day, newest day first and newest transaction first within a day.
+export function groupTransactionsByDay(transactions: Transaction[]): DayGroup[] {
+  const groups = new Map<string, DayGroup>();
+  for (const tx of [...transactions].sort(compareNewestFirst)) {
+    const day = tx.date.slice(0, 10);
+    const group = groups.get(day) ?? { date: day, netEGP: 0, transactions: [] };
+    group.netEGP += transactionNetEGP(tx);
+    group.transactions.push(tx);
+    groups.set(day, group);
+  }
+  return [...groups.values()];
 }
 
 // --- Monthly cash flow ------------------------------------------------------

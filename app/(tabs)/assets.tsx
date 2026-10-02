@@ -7,6 +7,7 @@ import { EditAccountSheet } from '@/components/assets/EditAccountSheet';
 import { Card } from '@/components/ui/Card';
 import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { Segment } from '@/components/ui/Segment';
 import { StatCard } from '@/components/ui/StatCard';
 import { Colors, FinanceColors } from '@/constants/theme';
 import {
@@ -136,39 +137,6 @@ function HoldingRow({ holding, pnlEGP, onDelete }: HoldingRowProps) {
       <TouchableOpacity onPress={onDelete} style={styles.deleteBtn} hitSlop={8}>
         <MaterialIcons name="delete-outline" size={20} color={FinanceColors.expense} />
       </TouchableOpacity>
-    </View>
-  );
-}
-
-// Generic segmented control
-interface SegmentOption<T extends string> {
-  label: string;
-  value: T;
-}
-
-interface SegmentProps<T extends string> {
-  options: SegmentOption<T>[];
-  value: T;
-  onChange: (v: T) => void;
-}
-
-function Segment<T extends string>({ options, value, onChange }: SegmentProps<T>) {
-  return (
-    <View style={styles.segment}>
-      {options.map((opt) => {
-        const active = opt.value === value;
-        return (
-          <TouchableOpacity
-            key={opt.value}
-            style={[styles.segmentItem, active && styles.segmentItemActive]}
-            onPress={() => onChange(opt.value)}
-            activeOpacity={0.75}>
-            <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
-              {opt.label}
-            </Text>
-          </TouchableOpacity>
-        );
-      })}
     </View>
   );
 }
@@ -532,38 +500,5 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 8,
     elevation: 6,
-  },
-
-  // Segmented control
-  segment: {
-    flexDirection: 'row',
-    backgroundColor: FinanceColors.cardBackground,
-    borderRadius: 10,
-    padding: 3,
-    borderWidth: 1,
-    borderColor: FinanceColors.progressTrack,
-  },
-  segmentItem: {
-    flex: 1,
-    paddingVertical: 8,
-    alignItems: 'center',
-    borderRadius: 8,
-  },
-  segmentItemActive: {
-    backgroundColor: Colors.light.background,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 2,
-    elevation: 1,
-  },
-  segmentText: {
-    fontSize: 14,
-    color: Colors.light.icon,
-    fontWeight: '500',
-  },
-  segmentTextActive: {
-    color: Colors.light.tint,
-    fontWeight: '700',
   },
 });

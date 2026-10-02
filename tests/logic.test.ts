@@ -16,6 +16,7 @@ import {
   fundProgress,
   fundRequiredMonthly,
   fundStatus,
+  groupTransactionsByDay,
   holdingsTotalEGP,
   liabilitiesTotalEGP,
   liquidTotalEGP,
@@ -25,11 +26,14 @@ import {
   safeToSpend,
   stateSummary,
   suggestedEmergencyTarget,
+  transactionsForMonth,
   unassignedEGP,
   unassignedEGPWithFundCash,
 } from '@/store/selectors';
 import type { FinanceStateV2, Fund } from '@/store/types';
 import { errorMessage } from '@/utils/errorMessages';
+import { formatDayLabel } from '@/utils/formatters';
+import { parseAmount } from '@/utils/parseAmount';
 
 // --- Fixtures ---------------------------------------------------------------
 
@@ -547,5 +551,159 @@ describe('editFund', () => {
   it('adds no movement when the allocation is unchanged', () => {
     const s = apply(state(), ops.editFund(state(), 'f', edit(30000), makeCtx()));
     assert.equal(s.fundMovements.length, 1);
+  });
+});
+
+// --- Transactions feature ---------------------------------------------------
+
+describe('parseAmount', () => {
+  it('accepts Western/Arabic digits, thousands separators and decimals', () => {
+    assert.equal(parseAmount('1,250.5'), 1250.5);
+    assert.equal(parseAmount('١٢٥٠'), 1250);
+    assert.equal(parseAmount('٣٥٠٠٫٧٥'), 3500.75);
+    assert.equal(parseAmount('١٬٢٥٠'), 1250);
+    assert.equal(parseAmount(' 42 '), 42);
+    assert.equal(parseAmount('.5'), 0.5);
+  });
+
+  it('rejects empty, non-numeric, zero and negative input', () => {
+    assert.equal(parseAmount(''), null);
+    assert.equal(parseAmount('   '), null);
+    assert.equal(parseAmount('abc'), null);
+    assert.equal(parseAmount('12abc'), null);
+    assert.equal(parseAmount('1.2.3'), null);
+    assert.equal(parseAmount('0'), null);
+    assert.equal(parseAmount('-5'), null);
+    assert.equal(parseAmount('−5'), null);
+  });
+});
+
+describe('transaction lists', () => {
+  // Two accounts, a mix of types, currencies and days.
+  const build = () => {
+    const ctx = makeCtx();
+    let s: FinanceStateV2 = { ...emptyState(), accounts: [account('egp', 'EGP', 0), account('sar', 'SAR', 1000)] };
+    const add = (input: ops.NewIncomeExpense) => {
+      s = apply(s, ops.addTransaction(s, input, ctx));
+    };
+    add({ type: 'income', amount: 1000, currency: 'SAR', accountId: 'sar', categoryId: 'cat-income-salary', date: '2026-10-01', rateToEGP: 12 });
+    add({ type: 'expense', amount: 300, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-10-01' });
+    add({ type: 'expense', amount: 10, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-03', rateToEGP: 13 });
+    add({ type: 'expense', amount: 50, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-09-30' });
+    s = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100, date: '2026-10-03' }, ctx));
+    return s;
+  };
+
+  it('transactionsForMonth filters by month and type, newest first', () => {
+    const s = build();
+    const all = transactionsForMonth(s, '2026-10');
+    assert.equal(all.length, 4);
+    assert.deepEqual(all.map((t) => t.date), ['2026-10-03', '2026-10-03', '2026-10-01', '2026-10-01']);
+    assert.equal(transactionsForMonth(s, '2026-10', 'expense').length, 2);
+    assert.equal(transactionsForMonth(s, '2026-10', 'income').length, 1);
+    assert.equal(transactionsForMonth(s, '2026-10', 'transfer').length, 1);
+    assert.equal(transactionsForMonth(s, '2026-09').length, 1);
+    assert.equal(transactionsForMonth(s, '2026-11').length, 0);
+  });
+
+  it('groupTransactionsByDay orders days and nets each day in EGP at stored rates', () => {
+    const groups = groupTransactionsByDay(transactionsForMonth(build(), '2026-10'));
+    assert.deepEqual(groups.map((g) => [g.date, g.transactions.length]), [
+      ['2026-10-03', 2],
+      ['2026-10-01', 2],
+    ]);
+    approx(groups[0].netEGP, -10 * 13); // the transfer is neutral
+    approx(groups[1].netEGP, 1000 * 12 - 300);
+    // Within a day, the later-created transaction comes first.
+    assert.equal(groups[0].transactions[0].type, 'transfer');
+  });
+
+  it('remembers the last account and category per type', () => {
+    assert.deepEqual(build().settings.lastUsed, {
+      income: { accountId: 'sar', categoryId: 'cat-income-salary' },
+      expense: { accountId: 'egp', categoryId: 'cat-essentials-rent' },
+      transfer: { fromAccountId: 'sar', toAccountId: 'egp' },
+    });
+  });
+});
+
+describe('editing transactions', () => {
+  const setup = () => {
+    let s: FinanceStateV2 = {
+      ...emptyState(),
+      accounts: [account('sar', 'SAR', 0), account('sar2', 'SAR', 0), account('egp', 'EGP', 0)],
+    };
+    s = apply(
+      s,
+      ops.addTransaction(s, { type: 'expense', amount: 100, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-02', rateToEGP: 11 }, makeCtx())
+    );
+    // Rates move after the transaction was recorded.
+    return apply(s, ops.updateRates(s, { ...RATES, SAR_EGP: 14 }));
+  };
+
+  const expenseOf = (s: FinanceStateV2) => {
+    const tx = s.transactions[0];
+    if (tx.type !== 'expense') throw new Error('expected an expense');
+    return tx;
+  };
+
+  it('keeps the snapshotted rate and createdAt when the currency is unchanged', () => {
+    const s = setup();
+    const tx = expenseOf(s);
+    const after = apply(
+      s,
+      ops.updateTransaction(s, { ...tx, amount: 150, accountId: 'sar2', rateToEGP: 999, createdAt: 'tampered' })
+    );
+    const updated = after.transactions[0];
+    assert.equal(updated.amount, 150);
+    assert.equal(updated.rateToEGP, 11);
+    assert.equal(updated.createdAt, tx.createdAt);
+  });
+
+  it('re-snapshots the rate when moved to an account in another currency', () => {
+    const s = setup();
+    const tx = expenseOf(s);
+    const after = apply(s, ops.updateTransaction(s, { ...tx, accountId: 'egp', currency: 'EGP', amount: 1500 }));
+    assert.equal(after.transactions[0].rateToEGP, 1);
+    // ...and still validates the currency against the account, like add does.
+    assert.throws(() => ops.updateTransaction(s, { ...tx, accountId: 'egp' }), { code: 'CURRENCY_MISMATCH' });
+  });
+
+  it('can turn an expense into a transfer', () => {
+    const s = setup();
+    const tx = s.transactions[0];
+    const after = apply(
+      s,
+      ops.updateTransaction(s, {
+        id: tx.id,
+        type: 'transfer',
+        fromAccountId: 'sar',
+        toAccountId: 'egp',
+        amount: 100,
+        toAmount: 1400,
+        date: tx.date,
+        rateToEGP: tx.rateToEGP,
+        createdAt: tx.createdAt,
+      })
+    );
+    approx(accountBalance(after, 'egp'), 1400);
+    approx(accountBalance(after, 'sar'), -100);
+    assert.equal(after.transactions[0].rateToEGP, 11); // still SAR-denominated
+  });
+
+  it('deleting a transaction restores the account balance', () => {
+    const s = setup();
+    approx(accountBalance(s, 'sar'), -100);
+    const after = apply(s, ops.deleteTransaction(s, s.transactions[0].id));
+    approx(accountBalance(after, 'sar'), 0);
+    assert.throws(() => ops.deleteTransaction(after, 'missing'), { code: 'NOT_FOUND' });
+  });
+});
+
+describe('formatDayLabel', () => {
+  it('names today and yesterday', () => {
+    assert.equal(formatDayLabel('2026-10-15', NOW), 'النهارده');
+    assert.equal(formatDayLabel('2026-10-14', NOW), 'امبارح');
+    assert.match(formatDayLabel('2026-10-13', NOW), /أكتوبر/);
   });
 });

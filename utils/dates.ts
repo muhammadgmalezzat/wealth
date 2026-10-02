@@ -11,6 +11,18 @@ export function toMonthKey(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
 }
 
+// 'YYYY-MM-DD' → local midnight. (new Date('YYYY-MM-DD') would parse as UTC.)
+export function fromDateKey(dateKey: string): Date {
+  const [y, m, d] = dateKey.slice(0, 10).split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+export function shiftDate(dateKey: string, days: number): string {
+  const date = fromDateKey(dateKey);
+  date.setDate(date.getDate() + days);
+  return toDateKey(date);
+}
+
 // 'YYYY-MM-DD' (or a full ISO string) → 'YYYY-MM'.
 export function monthOf(dateKey: string): string {
   return dateKey.slice(0, 7);

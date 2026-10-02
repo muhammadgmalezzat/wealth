@@ -139,10 +139,20 @@ export interface ExchangeRates {
   lastUpdated: string;
 }
 
+// Defaults for the next transaction form, remembered per type. Ids may point at entities
+// that were deleted since, so readers must check they still exist.
+export interface LastUsedSelection {
+  expense?: { accountId: string; categoryId: string };
+  income?: { accountId: string; categoryId: string };
+  transfer?: { fromAccountId: string; toAccountId: string };
+}
+
 export interface Settings {
   exchangeRates: ExchangeRates;
   goldPrice24kEGP: number;
   goldPriceUpdatedAt: string;
+  // Optional, so v2 data without it stays valid (no migration needed).
+  lastUsed?: LastUsedSelection;
 }
 
 export interface FinanceStateV2 {
