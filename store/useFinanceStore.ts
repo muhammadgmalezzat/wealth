@@ -6,7 +6,7 @@ import { createJSONStorage, persist, type StateStorage } from 'zustand/middlewar
 import { newId } from '@/utils/id';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import * as ops from './operations';
-import { stateSummary } from './selectors';
+import { stateSummary, type FundAmount } from './selectors';
 import type {
   Account,
   Category,
@@ -57,6 +57,9 @@ interface FinanceActions {
   updateFund: (fund: Fund) => void;
   deleteFund: (id: string) => void;
   editFund: (fundId: string, edit: ops.FundEdit) => void;
+  allocateMany: (allocations: FundAmount[], note?: string) => void;
+  withdrawMany: (withdrawals: FundAmount[], note?: string) => void;
+  paySinkingFund: (payment: ops.SinkingPayment) => void;
   allocateToFund: (fundId: string, amount: number, note?: string) => void;
   withdrawFromFund: (fundId: string, amount: number, note?: string) => void;
   updateFundMovement: (movement: FundMovement) => void;
@@ -141,6 +144,9 @@ export const useFinanceStore = create<FinanceStore>()(
       updateFund: (fund) => set(ops.updateFund(get(), fund)),
       deleteFund: (id) => set(ops.deleteFund(get(), id)),
       editFund: (fundId, edit) => set(ops.editFund(get(), fundId, edit, ctx)),
+      allocateMany: (allocations, note) => set(ops.allocateMany(get(), allocations, note, ctx)),
+      withdrawMany: (withdrawals, note) => set(ops.withdrawMany(get(), withdrawals, note, ctx)),
+      paySinkingFund: (payment) => set(ops.paySinkingFund(get(), payment, ctx)),
       allocateToFund: (fundId, amount, note) =>
         set(ops.allocateToFund(get(), fundId, amount, note, ctx)),
       withdrawFromFund: (fundId, amount, note) =>

@@ -8,6 +8,7 @@ import type {
   Holding,
   IncomeExpenseTransaction,
   Liability,
+  SinkingFrequency,
   Transaction,
 } from './types';
 
@@ -18,6 +19,7 @@ import type {
 type State = FinanceStateV2;
 
 const sum = (values: number[]) => values.reduce((total, v) => total + v, 0);
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 const isIncomeExpense = (tx: State['transactions'][number]): tx is IncomeExpenseTransaction =>
   tx.type !== 'transfer';
@@ -124,8 +126,8 @@ export function fundAllocated(state: State, fundId: string): number {
   return sum(state.fundMovements.filter((m) => m.fundId === fundId).map((m) => m.amount));
 }
 
-// Fund currency: cash movements + market value of linked holdings.
-export function fundCurrent(state: State, fundId: string): number {
+// Market value of the fund's linked holdings, in the fund's currency.
+export function fundLinkedValue(state: State, fundId: string): number {
   const fund = findFund(state, fundId);
   if (!fund) return 0;
   const linkedEGP = sum(
@@ -133,9 +135,12 @@ export function fundCurrent(state: State, fundId: string): number {
       .filter((h) => fund.linkedHoldingIds.includes(h.id))
       .map((h) => holdingValueEGP(state, h))
   );
-  return (
-    fundAllocated(state, fundId) + fromEGP(linkedEGP, fund.currency, state.settings.exchangeRates)
-  );
+  return fromEGP(linkedEGP, fund.currency, state.settings.exchangeRates);
+}
+
+// Fund currency: cash movements + market value of linked holdings.
+export function fundCurrent(state: State, fundId: string): number {
+  return fundAllocated(state, fundId) + fundLinkedValue(state, fundId);
 }
 
 // 0..∞ (can exceed 1 when over-funded). A non-positive target counts as complete.
@@ -146,12 +151,34 @@ export function fundProgress(state: State, fundId: string): number {
   return Math.max(0, fundCurrent(state, fundId) / fund.targetAmount);
 }
 
-// Fund currency per month to hit the target by the deadline; null without a deadline.
+// When the target must be reached: the deadline for goals, the next due date for sinking funds.
+export function fundDueDate(fund: Fund): string | undefined {
+  return fund.type === 'sinking' ? fund.nextDueDate : fund.deadline;
+}
+
+export const SINKING_CYCLE_MONTHS: Record<SinkingFrequency, number> = {
+  yearly: 12,
+  semiannual: 6,
+  quarterly: 3,
+};
+
+// Fund currency per month to hit the target by the due date; null without one.
 export function fundRequiredMonthly(state: State, fundId: string, now: Date = new Date()): number | null {
   const fund = findFund(state, fundId);
-  if (!fund?.deadline) return null;
+  const due = fund && fundDueDate(fund);
+  if (!fund || !due) return null;
   const remaining = Math.max(0, fund.targetAmount - fundCurrent(state, fundId));
-  return remaining / monthsUntil(fund.deadline, now);
+  return remaining / monthsUntil(due, now);
+}
+
+// Sinking funds: the full cycle amount spread over the months until it is due (ignores what
+// is already saved, unlike fundRequiredMonthly). null for other funds or without a schedule.
+export function sinkingMonthlySuggestion(
+  fund: Pick<Fund, 'type' | 'targetAmount' | 'nextDueDate'>,
+  now: Date = new Date()
+): number | null {
+  if (fund.type !== 'sinking' || !fund.nextDueDate) return null;
+  return fund.targetAmount / monthsUntil(fund.nextDueDate, now);
 }
 
 export type FundStatus = 'ahead' | 'on_track' | 'behind' | 'no_deadline';
@@ -161,7 +188,8 @@ export type FundStatus = 'ahead' | 'on_track' | 'behind' | 'no_deadline';
 // behind: < required · on_track: required…110% · ahead: > 110% or target already reached.
 export function fundStatus(state: State, fundId: string, now: Date = new Date()): FundStatus {
   const fund = findFund(state, fundId);
-  if (!fund?.deadline) return 'no_deadline';
+  const due = fund && fundDueDate(fund);
+  if (!fund || !due) return 'no_deadline';
 
   const month = toMonthKey(now);
   const allocatedThisMonth = sum(
@@ -171,11 +199,23 @@ export function fundStatus(state: State, fundId: string, now: Date = new Date())
   );
   const currentAtMonthStart = fundCurrent(state, fundId) - allocatedThisMonth;
   const remainingAtMonthStart = Math.max(0, fund.targetAmount - currentAtMonthStart);
-  const required = remainingAtMonthStart / monthsUntil(fund.deadline, now);
+  const required = remainingAtMonthStart / monthsUntil(due, now);
 
   if (required <= 0) return 'ahead';
   if (allocatedThisMonth < required) return 'behind';
   return allocatedThisMonth > required * 1.1 ? 'ahead' : 'on_track';
+}
+
+// Active funds, highest priority (lowest number) first.
+export function fundsByPriority(state: Pick<State, 'funds'>): Fund[] {
+  return state.funds.filter((f) => !f.archived).sort((a, b) => a.priority - b.priority);
+}
+
+// Gold/currency holdings that `fundId` may link: unlinked ones plus its own.
+export function linkableHoldings(state: State, fundId?: string): Holding[] {
+  return state.holdings.filter(
+    (h) => !state.funds.some((f) => f.id !== fundId && f.linkedHoldingIds.includes(h.id))
+  );
 }
 
 // Liquid money not yet earmarked by any fund (cash movements only; linked holdings
@@ -202,6 +242,85 @@ export function unassignedEGPWithFundCash(
   if (!fund) return unassignedEGP(state);
   const change = cashAllocation - fundAllocated(state, fundId);
   return unassignedEGP(state) - toEGP(change, fund.currency, state.settings.exchangeRates);
+}
+
+// --- Distributing and covering ---------------------------------------------
+
+export interface FundAmount {
+  fundId: string;
+  amount: number; // fund currency
+}
+
+// Sum of `amounts` in EGP at current rates (unknown funds count as 0).
+export function fundAmountsEGP(state: State, amounts: FundAmount[]): number {
+  const rates = state.settings.exchangeRates;
+  return sum(
+    amounts.map(({ fundId, amount }) => {
+      const fund = findFund(state, fundId);
+      return fund ? toEGP(amount, fund.currency, rates) : 0;
+    })
+  );
+}
+
+// How much a fund should get this month (fund currency): its required monthly amount if it
+// has a due date, else its planned monthly contribution, never more than what's left to
+// reach the target.
+export function fundSuggestedMonthly(state: State, fundId: string, now: Date = new Date()): number {
+  const fund = findFund(state, fundId);
+  if (!fund) return 0;
+  const remaining = Math.max(0, fund.targetAmount - fundCurrent(state, fundId));
+  const monthly = fundRequiredMonthly(state, fundId, now) ?? fund.monthlyContribution ?? 0;
+  return Math.min(monthly, remaining);
+}
+
+// Splits `amountEGP` across funds in priority order, each capped by its suggested monthly
+// amount, until the money runs out. Funds that would get nothing are omitted.
+export function suggestAllocation(state: State, amountEGP: number, now: Date = new Date()): FundAmount[] {
+  const rates = state.settings.exchangeRates;
+  let leftEGP = Math.max(0, amountEGP);
+  const result: FundAmount[] = [];
+  for (const fund of fundsByPriority(state)) {
+    if (leftEGP <= 0.005) break;
+    const wantEGP = toEGP(fundSuggestedMonthly(state, fund.id, now), fund.currency, rates);
+    const giveEGP = Math.min(wantEGP, leftEGP);
+    if (giveEGP <= 0.005) continue;
+    result.push({ fundId: fund.id, amount: round2(fromEGP(giveEGP, fund.currency, rates)) });
+    leftEGP -= giveEGP;
+  }
+  return result;
+}
+
+export interface CoverPlan {
+  withdrawals: FundAmount[];
+  // EGP still uncovered after the withdrawals (0 when fully covered).
+  remainingEGP: number;
+}
+
+// Withdraws cash from the chosen funds, lowest priority first, until unassigned money is
+// back to zero. Funds without cash are skipped.
+export function planCover(state: State, fundIds: string[]): CoverPlan {
+  const rates = state.settings.exchangeRates;
+  let deficitEGP = Math.max(0, -unassignedEGP(state));
+  const withdrawals: FundAmount[] = [];
+  const chosen = state.funds
+    .filter((f) => fundIds.includes(f.id))
+    .sort((a, b) => b.priority - a.priority);
+  for (const fund of chosen) {
+    if (deficitEGP <= 0.005) break;
+    const cashEGP = toEGP(fundAllocated(state, fund.id), fund.currency, rates);
+    const takeEGP = Math.min(cashEGP, deficitEGP);
+    if (takeEGP <= 0.005) continue;
+    // Round up to the cent so the cover never falls a fraction short.
+    const amount = Math.min(fundAllocated(state, fund.id), Math.ceil(fromEGP(takeEGP, fund.currency, rates) * 100) / 100);
+    withdrawals.push({ fundId: fund.id, amount });
+    deficitEGP -= takeEGP;
+  }
+  return { withdrawals, remainingEGP: Math.max(0, deficitEGP) };
+}
+
+// Default cover choice: the lowest-priority fund that holds cash.
+export function defaultCoverFundId(state: State): string | undefined {
+  return [...fundsByPriority(state)].reverse().find((f) => fundAllocated(state, f.id) > 0)?.id;
 }
 
 // --- Transaction lists ------------------------------------------------------
@@ -300,16 +419,21 @@ export function safeToSpend(state: State, month: string): number | null {
   return limit - monthSummary(state, month).expenseByBucket.lifestyle;
 }
 
-// Average essentials spend over the 3 full months before `now`, times `months`.
+// Average monthly essentials over the 3 full months before `now`, times `months`. Only
+// months with recorded essentials count toward the average; null when none of the three
+// has any (not enough history to suggest a number).
 export function suggestedEmergencyTarget(
   state: State,
   months: 3 | 6,
   now: Date = new Date()
-): number {
+): number | null {
   const current = toMonthKey(now);
   const lastThree = [1, 2, 3].map((n) => shiftMonth(current, -n));
-  const essentials = sum(lastThree.map((m) => monthSummary(state, m).expenseByBucket.essentials));
-  return (essentials / 3) * months;
+  const recorded = lastThree
+    .map((m) => monthSummary(state, m).expenseByBucket.essentials)
+    .filter((essentials) => essentials > 0);
+  if (recorded.length === 0) return null;
+  return (sum(recorded) / recorded.length) * months;
 }
 
 // --- Diagnostics ------------------------------------------------------------

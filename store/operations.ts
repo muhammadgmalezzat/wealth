@@ -1,5 +1,5 @@
 import { fromEGP, rateToEGP, toEGP } from '@/utils/currency';
-import { isDateKey, isMonthKey, toDateKey } from '@/utils/dates';
+import { addMonthsToDate, isDateKey, isMonthKey, toDateKey } from '@/utils/dates';
 import {
   FinanceValidationError,
   type FinanceEntity,
@@ -7,7 +7,14 @@ import {
   type FinanceErrorDetails,
   type FinanceField,
 } from './errors';
-import { fundAllocated, unassignedEGPWithFundCash } from './selectors';
+import {
+  fundAllocated,
+  fundAmountsEGP,
+  SINKING_CYCLE_MONTHS,
+  unassignedEGP,
+  unassignedEGPWithFundCash,
+  type FundAmount,
+} from './selectors';
 import type {
   Account,
   Category,
@@ -23,6 +30,7 @@ import type {
   MonthlyPlan,
   RecurringRule,
   Settings,
+  SinkingFrequency,
   Transaction,
   TransferTransaction,
 } from './types';
@@ -64,6 +72,13 @@ export type NewRecurringRule = Omit<RecurringRule, 'id'>;
 export interface FundEdit {
   name: string;
   targetAmount: number;
+  // Optional fields keep the fund's current value when omitted…
+  type?: Fund['type'];
+  priority?: number;
+  frequency?: SinkingFrequency;
+  nextDueDate?: string;
+  linkedHoldingIds?: string[];
+  // …except the deadline: omitting it clears it.
   deadline?: string;
   // Desired total cash allocated to the fund (fund currency).
   cashAllocation: number;
@@ -278,6 +293,19 @@ export function deleteTransaction(state: State, id: string): Patch {
 
 // --- Funds & movements ------------------------------------------------------
 
+const SINKING_FREQUENCIES: SinkingFrequency[] = ['yearly', 'semiannual', 'quarterly'];
+
+// Drops fields that don't apply to the fund's type: the schedule belongs to sinking funds,
+// the deadline to the others (a sinking fund is due on nextDueDate).
+function normalizeFundShape<T extends NewFund>(fund: T): T {
+  const { deadline, frequency, nextDueDate, ...rest } = fund;
+  return (
+    fund.type === 'sinking'
+      ? { ...rest, ...(frequency ? { frequency } : {}), ...(nextDueDate ? { nextDueDate } : {}) }
+      : { ...rest, ...(deadline ? { deadline } : {}) }
+  ) as T;
+}
+
 // `fundId` is the fund being validated (undefined when adding), so it may keep its own links.
 function validateFund(state: State, fund: NewFund, fundId?: string) {
   assertName(fund.name, 'fund');
@@ -287,6 +315,12 @@ function validateFund(state: State, fund: NewFund, fundId?: string) {
     assertNonNegative(fund.monthlyContribution, 'monthlyContribution');
   }
   if (fund.deadline !== undefined) assertDate(fund.deadline, 'deadline');
+  if (fund.type === 'sinking') {
+    if (!fund.frequency || !SINKING_FREQUENCIES.includes(fund.frequency) || !fund.nextDueDate) {
+      fail('SINKING_SCHEDULE_REQUIRED');
+    }
+    assertDate(fund.nextDueDate, 'deadline');
+  }
 
   // A holding backs at most one fund, otherwise its value would be counted twice.
   const linked = fund.linkedHoldingIds ?? [];
@@ -301,10 +335,11 @@ function validateFund(state: State, fund: NewFund, fundId?: string) {
 }
 
 export function addFund(state: State, input: NewFund, ctx: OpContext): Patch {
-  validateFund(state, input);
+  const normalized = normalizeFundShape(input);
+  validateFund(state, normalized);
   const fund: Fund = {
-    ...input,
-    linkedHoldingIds: input.linkedHoldingIds ?? [],
+    ...normalized,
+    linkedHoldingIds: normalized.linkedHoldingIds ?? [],
     id: ctx.newId(),
     createdAt: ctx.now().toISOString(),
   };
@@ -312,8 +347,9 @@ export function addFund(state: State, input: NewFund, ctx: OpContext): Patch {
 }
 
 export function updateFund(state: State, fund: Fund): Patch {
-  validateFund(state, fund, fund.id);
-  return { funds: replaceById(state.funds, fund, 'fund') };
+  const normalized = normalizeFundShape(fund);
+  validateFund(state, normalized, fund.id);
+  return { funds: replaceById(state.funds, normalized, 'fund') };
 }
 
 // Deleting a fund releases its allocations back to unassigned money.
@@ -360,18 +396,71 @@ export function withdrawFromFund(
   return { fundMovements: [...state.fundMovements, newMovement(fundId, -amount, note, ctx)] };
 }
 
+// Allocates to several funds at once. All or nothing: the total may not exceed the
+// money that is currently unassigned.
+export function allocateMany(
+  state: State,
+  allocations: FundAmount[],
+  note: string | undefined,
+  ctx: OpContext
+): Patch {
+  if (allocations.length === 0) fail('NOTHING_SELECTED');
+  for (const { fundId, amount } of allocations) {
+    requireById(state.funds, fundId, 'fund');
+    assertPositive(amount, 'amount');
+  }
+  if (fundAmountsEGP(state, allocations) > unassignedEGP(state) + 0.005) fail('INSUFFICIENT_UNASSIGNED');
+  return {
+    fundMovements: [
+      ...state.fundMovements,
+      ...allocations.map(({ fundId, amount }) => newMovement(fundId, amount, note, ctx)),
+    ],
+  };
+}
+
+// Withdraws from several funds at once. All or nothing: no fund may go below zero cash.
+export function withdrawMany(
+  state: State,
+  withdrawals: FundAmount[],
+  note: string | undefined,
+  ctx: OpContext
+): Patch {
+  if (withdrawals.length === 0) fail('NOTHING_SELECTED');
+  const perFund = new Map<string, number>();
+  for (const { fundId, amount } of withdrawals) {
+    requireById(state.funds, fundId, 'fund');
+    assertPositive(amount, 'amount');
+    perFund.set(fundId, (perFund.get(fundId) ?? 0) + amount);
+  }
+  for (const [fundId, total] of perFund) {
+    if (total > fundAllocated(state, fundId) + 0.005) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
+  }
+  return {
+    fundMovements: [
+      ...state.fundMovements,
+      ...withdrawals.map(({ fundId, amount }) => newMovement(fundId, -amount, note, ctx)),
+    ],
+  };
+}
+
 // Edits a fund's details and sets its cash allocation in one atomic patch. The allocation is
 // changed by a single adjustment movement for the difference. Increasing it may not push
 // unassigned money below zero; decreasing is always allowed (it only frees money).
+// Omitted optional fields keep their current values, except `deadline`, which is cleared.
 export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpContext): Patch {
   const fund = requireById(state.funds, fundId, 'fund');
-  const { deadline: _previousDeadline, ...rest } = fund;
-  const updated: Fund = {
+  const { deadline: _previousDeadline, frequency, nextDueDate, ...rest } = fund;
+  const updated = normalizeFundShape<Fund>({
     ...rest,
     name: edit.name.trim(),
     targetAmount: edit.targetAmount,
+    type: edit.type ?? fund.type,
+    priority: edit.priority ?? fund.priority,
+    linkedHoldingIds: edit.linkedHoldingIds ?? fund.linkedHoldingIds,
     ...(edit.deadline ? { deadline: edit.deadline } : {}),
-  };
+    ...((edit.frequency ?? frequency) ? { frequency: edit.frequency ?? frequency } : {}),
+    ...((edit.nextDueDate ?? nextDueDate) ? { nextDueDate: edit.nextDueDate ?? nextDueDate } : {}),
+  });
   validateFund(state, updated, fundId);
   assertNonNegative(edit.cashAllocation, 'cashAllocation');
 
@@ -382,9 +471,70 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
 
   const fundMovements =
     Math.abs(change) >= 0.005
-      ? [...state.fundMovements, newMovement(fundId, change, 'Adjustment', ctx)]
+      ? [...state.fundMovements, newMovement(fundId, change, 'تعديل الرصيد', ctx)]
       : state.fundMovements;
   return { funds: replaceById(state.funds, updated, 'fund'), fundMovements };
+}
+
+export interface SinkingPayment {
+  fundId: string;
+  accountId: string;
+  categoryId: string;
+  // In the paying account's currency.
+  amount: number;
+  date: string;
+  note?: string;
+}
+
+// Records a sinking fund's bill as one atomic step: the expense transaction, a withdrawal of
+// the same value from the fund's cash (as much as it holds; any excess comes out of
+// unassigned money), and nextDueDate advanced by one cycle.
+export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpContext): Patch {
+  const fund = requireById(state.funds, payment.fundId, 'fund');
+  if (fund.type !== 'sinking') fail('NOT_A_SINKING_FUND', { id: fund.id });
+  if (!fund.frequency || !fund.nextDueDate) fail('SINKING_SCHEDULE_REQUIRED', { id: fund.id });
+  const account = requireById(state.accounts, payment.accountId, 'account');
+
+  // Each step validates against the result of the previous one; any failure throws before
+  // a patch is returned, so nothing is applied.
+  let draft = state;
+  const apply = (patch: Patch) => {
+    draft = { ...draft, ...patch };
+  };
+
+  apply(
+    addTransaction(
+      draft,
+      {
+        type: 'expense',
+        amount: payment.amount,
+        currency: account.currency,
+        accountId: account.id,
+        categoryId: payment.categoryId,
+        date: payment.date,
+        note: payment.note?.trim() || fund.name,
+      },
+      ctx
+    )
+  );
+  const expense = draft.transactions[0];
+  const valueInFund = fromEGP(
+    payment.amount * expense.rateToEGP,
+    fund.currency,
+    state.settings.exchangeRates
+  );
+  const take = Math.min(valueInFund, fundAllocated(draft, fund.id));
+  if (take > 0.005) apply(withdrawFromFund(draft, fund.id, take, `اتدفعت: ${fund.name}`, ctx));
+
+  const nextDue = addMonthsToDate(fund.nextDueDate, SINKING_CYCLE_MONTHS[fund.frequency]);
+  apply({ funds: draft.funds.map((f) => (f.id === fund.id ? { ...f, nextDueDate: nextDue } : f)) });
+
+  return {
+    transactions: draft.transactions,
+    fundMovements: draft.fundMovements,
+    funds: draft.funds,
+    settings: draft.settings,
+  };
 }
 
 export function updateFundMovement(state: State, movement: FundMovement): Patch {

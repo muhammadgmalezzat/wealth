@@ -57,18 +57,26 @@ export interface TransferTransaction extends TransactionBase {
 
 export type Transaction = IncomeExpenseTransaction | TransferTransaction;
 
+export type SinkingFrequency = 'yearly' | 'semiannual' | 'quarterly';
+
 export interface Fund {
   id: string;
   name: string;
   type: 'emergency' | 'goal' | 'sinking';
+  // For sinking funds: the amount due each cycle.
   targetAmount: number;
   currency: CurrencyCode;
+  // Goals only; sinking funds are due on nextDueDate instead.
   deadline?: string;
+  // Lower number = higher priority.
   priority: number;
   monthlyContribution?: number;
   linkedHoldingIds: string[];
   createdAt: string;
   archived?: boolean;
+  // Sinking funds only. Optional so funds saved before these fields existed stay valid.
+  frequency?: SinkingFrequency;
+  nextDueDate?: string;
 }
 
 export interface FundMovement {

@@ -16,7 +16,9 @@ export function formatCurrency(
   currency: CurrencyCode
 ): string {
   const symbol = CURRENCY_SYMBOLS[currency];
-  const formatted = amount.toLocaleString('en-US', {
+  // Float noise like -0.0000001 would otherwise print as "-0".
+  const value = Math.abs(amount) < 0.005 ? 0 : amount;
+  const formatted = value.toLocaleString('en-US', {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   });

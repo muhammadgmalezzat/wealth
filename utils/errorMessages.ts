@@ -71,6 +71,9 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   WITHDRAW_EXCEEDS_FUND: () => 'لا يمكن سحب أكثر من المبلغ المخصص نقداً في الصندوق',
   HOLDING_ALREADY_LINKED: () => 'هذا الاستثمار مربوط بصندوق آخر بالفعل',
   INSUFFICIENT_UNASSIGNED: () => 'المبلغ أكبر من الفلوس اللي بدون وظيفة',
+  NOTHING_SELECTED: () => 'أدخل مبلغاً لصندوق واحد على الأقل',
+  SINKING_SCHEDULE_REQUIRED: () => 'حدد التكرار وتاريخ الاستحقاق القادم',
+  NOT_A_SINKING_FUND: () => 'هذا الصندوق ليس صندوق مصاريف دورية',
 };
 
 export function errorMessage(error: unknown): string {

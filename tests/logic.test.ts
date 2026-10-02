@@ -11,6 +11,7 @@ import { migratePersistedState, type FinanceStateV1 } from '@/store/migrations';
 import * as ops from '@/store/operations';
 import {
   accountBalance,
+  defaultCoverFundId,
   fundAllocated,
   fundCurrent,
   fundProgress,
@@ -23,14 +24,18 @@ import {
   monthSummary,
   netWorthEGP,
   openingBalanceForCurrentBalance,
+  planCover,
   safeToSpend,
+  sinkingMonthlySuggestion,
   stateSummary,
+  suggestAllocation,
   suggestedEmergencyTarget,
   transactionsForMonth,
   unassignedEGP,
   unassignedEGPWithFundCash,
 } from '@/store/selectors';
 import type { FinanceStateV2, Fund } from '@/store/types';
+import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
 import { formatDayLabel } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
@@ -473,7 +478,7 @@ describe('one fund per holding', () => {
 
   it('rejects linking a holding that already backs another fund', () => {
     const s = state();
-    const input: ops.NewFund = { name: 'B', type: 'sinking', targetAmount: 1000, currency: 'EGP', priority: 2 };
+    const input: ops.NewFund = { name: 'B', type: 'goal', targetAmount: 1000, currency: 'EGP', priority: 2 };
     assert.throws(() => ops.addFund(s, { ...input, linkedHoldingIds: ['gold'] }, makeCtx()), {
       code: 'HOLDING_ALREADY_LINKED',
     });
@@ -705,5 +710,215 @@ describe('formatDayLabel', () => {
     assert.equal(formatDayLabel('2026-10-15', NOW), 'النهارده');
     assert.equal(formatDayLabel('2026-10-14', NOW), 'امبارح');
     assert.match(formatDayLabel('2026-10-13', NOW), /أكتوبر/);
+  });
+});
+
+// --- Funds feature ----------------------------------------------------------
+
+describe('fund allocation', () => {
+  // 100,000 EGP liquid; F already holds 900 cash → 99,100 unassigned.
+  const state = (): FinanceStateV2 => ({
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 100000)],
+    funds: [
+      fund({ id: 'A', type: 'emergency', priority: 1, targetAmount: 30000, monthlyContribution: 5000 }),
+      fund({ id: 'B', priority: 2, targetAmount: 12000, deadline: '2026-12-31' }), // 3 months → 4,000
+      fund({ id: 'C', type: 'sinking', priority: 3, targetAmount: 2400, frequency: 'yearly', nextDueDate: '2027-09-30' }), // 12 months → 200
+      fund({ id: 'D', priority: 4, targetAmount: 50000 }), // no deadline, no plan → nothing suggested
+      fund({ id: 'F', priority: 5, targetAmount: 1000, monthlyContribution: 500 }), // only 100 left to reach
+    ],
+    fundMovements: [{ id: 'm1', fundId: 'F', amount: 900, date: '2026-09-01' }],
+  });
+
+  it('suggestAllocation follows priority and caps each fund', () => {
+    const s = state();
+    assert.deepEqual(suggestAllocation(s, unassignedEGP(s), NOW), [
+      { fundId: 'A', amount: 5000 },
+      { fundId: 'B', amount: 4000 },
+      { fundId: 'C', amount: 200 },
+      { fundId: 'F', amount: 100 },
+    ]);
+    // Money runs out part-way through B.
+    assert.deepEqual(suggestAllocation(s, 7000, NOW), [
+      { fundId: 'A', amount: 5000 },
+      { fundId: 'B', amount: 2000 },
+    ]);
+    assert.deepEqual(suggestAllocation(s, 0, NOW), []);
+  });
+
+  it('allocateMany applies everything or nothing, never beyond unassigned money', () => {
+    const s = state();
+    const ctx = makeCtx();
+    assert.throws(
+      () => ops.allocateMany(s, [{ fundId: 'A', amount: 60000 }, { fundId: 'B', amount: 40000 }], undefined, ctx),
+      { code: 'INSUFFICIENT_UNASSIGNED' }
+    );
+    assert.throws(() => ops.allocateMany(s, [{ fundId: 'A', amount: 10 }, { fundId: 'B', amount: -1 }], undefined, ctx), {
+      code: 'NOT_POSITIVE',
+    });
+    assert.throws(() => ops.allocateMany(s, [], undefined, ctx), { code: 'NOTHING_SELECTED' });
+
+    const after = apply(s, ops.allocateMany(s, suggestAllocation(s, unassignedEGP(s), NOW), 'توزيع', ctx));
+    assert.equal(after.fundMovements.length, 1 + 4);
+    approx(unassignedEGP(after), 99100 - 9300);
+  });
+
+  it('sinkingMonthlySuggestion spreads the cycle amount until it is due', () => {
+    approx(sinkingMonthlySuggestion({ type: 'sinking', targetAmount: 2400, nextDueDate: '2027-09-30' }, NOW), 200);
+    assert.equal(sinkingMonthlySuggestion({ type: 'goal', targetAmount: 2400 }, NOW), null);
+    assert.equal(sinkingMonthlySuggestion({ type: 'sinking', targetAmount: 2400 }, NOW), null);
+  });
+
+  it('sinking funds need a schedule and drop the goal deadline', () => {
+    const s = state();
+    const base: ops.NewFund = { name: 'Car insurance', type: 'sinking', targetAmount: 6000, currency: 'EGP', priority: 6 };
+    assert.throws(() => ops.addFund(s, base, makeCtx()), { code: 'SINKING_SCHEDULE_REQUIRED' });
+    const after = apply(
+      s,
+      ops.addFund(s, { ...base, frequency: 'semiannual', nextDueDate: '2027-01-31', deadline: '2027-05-01' }, makeCtx())
+    );
+    const created = after.funds[after.funds.length - 1];
+    assert.equal(created.deadline, undefined);
+    assert.equal(created.nextDueDate, '2027-01-31');
+    assert.equal(fundRequiredMonthly(after, created.id, NOW), 6000 / 4); // Oct → Jan
+  });
+});
+
+describe('covering overspent fund money', () => {
+  // 10,000 liquid, 9,000 allocated; then a 5,000 expense → unassigned −4,000.
+  const state = (): FinanceStateV2 => {
+    let s: FinanceStateV2 = {
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 10000)],
+      funds: [fund({ id: 'A', priority: 1 }), fund({ id: 'B', priority: 2 })],
+      fundMovements: [
+        { id: 'm1', fundId: 'A', amount: 6000, date: '2026-09-01' },
+        { id: 'm2', fundId: 'B', amount: 3000, date: '2026-09-01' },
+      ],
+    };
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 5000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-bills', date: '2026-10-10' }, makeCtx()));
+    return s;
+  };
+
+  it('defaults to the lowest-priority fund with cash and reports what is left', () => {
+    const s = state();
+    approx(unassignedEGP(s), -4000);
+    assert.equal(defaultCoverFundId(s), 'B');
+    const plan = planCover(s, ['B']);
+    assert.deepEqual(plan.withdrawals, [{ fundId: 'B', amount: 3000 }]);
+    approx(plan.remainingEGP, 1000);
+  });
+
+  it('brings unassigned money back to zero when enough funds are chosen', () => {
+    const s = state();
+    const plan = planCover(s, ['A', 'B']);
+    assert.deepEqual(plan.withdrawals, [
+      { fundId: 'B', amount: 3000 },
+      { fundId: 'A', amount: 1000 },
+    ]);
+    assert.equal(plan.remainingEGP, 0);
+    const after = apply(s, ops.withdrawMany(s, plan.withdrawals, 'تغطية مصروف', makeCtx()));
+    assert.ok(unassignedEGP(after) >= 0);
+    approx(fundAllocated(after, 'A'), 5000);
+    approx(fundAllocated(after, 'B'), 0);
+  });
+
+  it('withdrawMany rejects taking more than a fund holds', () => {
+    const s = state();
+    assert.throws(
+      () => ops.withdrawMany(s, [{ fundId: 'B', amount: 2000 }, { fundId: 'B', amount: 1500 }], undefined, makeCtx()),
+      { code: 'WITHDRAW_EXCEEDS_FUND' }
+    );
+  });
+
+  it('deleting a fund returns its cash to unassigned money', () => {
+    const s = state();
+    const after = apply(s, ops.deleteFund(s, 'A'));
+    approx(unassignedEGP(after), unassignedEGP(s) + 6000);
+    assert.equal(after.fundMovements.some((m) => m.fundId === 'A'), false);
+  });
+});
+
+describe('paySinkingFund', () => {
+  const state = (): FinanceStateV2 => ({
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 10000), account('sar', 'SAR', 1000)],
+    funds: [
+      fund({ id: 'S', type: 'sinking', targetAmount: 2400, frequency: 'yearly', nextDueDate: '2026-10-20' }),
+      fund({ id: 'G', priority: 2 }),
+    ],
+    fundMovements: [{ id: 'm1', fundId: 'S', amount: 2000, date: '2026-09-01' }],
+  });
+  const payment = (overrides: Partial<ops.SinkingPayment> = {}): ops.SinkingPayment => ({
+    fundId: 'S',
+    accountId: 'egp',
+    categoryId: 'cat-essentials-bills',
+    amount: 1500,
+    date: '2026-10-15',
+    ...overrides,
+  });
+
+  it('records the expense, withdraws from the fund and advances the due date', () => {
+    const s = state();
+    const after = apply(s, ops.paySinkingFund(s, payment(), makeCtx()));
+    approx(accountBalance(after, 'egp'), 8500);
+    approx(fundAllocated(after, 'S'), 500);
+    assert.equal(after.funds.find((f) => f.id === 'S')?.nextDueDate, '2027-10-20');
+    const [tx] = after.transactions;
+    assert.equal(tx.type, 'expense');
+    assert.equal(tx.amount, 1500);
+    // The fund paid for it, so unassigned money is untouched.
+    approx(unassignedEGP(after), unassignedEGP(s));
+  });
+
+  it('takes only the cash the fund holds; the rest comes from unassigned money', () => {
+    const s = state();
+    const after = apply(s, ops.paySinkingFund(s, payment({ amount: 2400 }), makeCtx()));
+    approx(fundAllocated(after, 'S'), 0);
+    approx(unassignedEGP(after), unassignedEGP(s) - 400);
+  });
+
+  it('converts when paying from an account in another currency', () => {
+    const s = state();
+    const after = apply(s, ops.paySinkingFund(s, payment({ accountId: 'sar', amount: 100 }), makeCtx()));
+    approx(accountBalance(after, 'sar'), 900);
+    approx(fundAllocated(after, 'S'), 2000 - 100 * 12.5);
+  });
+
+  it('is all-or-nothing on failure', () => {
+    const s = state();
+    const snapshot = JSON.stringify(s);
+    assert.throws(() => ops.paySinkingFund(s, payment({ categoryId: 'cat-income-salary' }), makeCtx()), {
+      code: 'CATEGORY_KIND_MISMATCH',
+    });
+    assert.throws(() => ops.paySinkingFund(s, payment({ amount: 0 }), makeCtx()), { code: 'NOT_POSITIVE' });
+    assert.throws(() => ops.paySinkingFund(s, payment({ fundId: 'G' }), makeCtx()), { code: 'NOT_A_SINKING_FUND' });
+    assert.equal(JSON.stringify(s), snapshot);
+  });
+});
+
+describe('emergency fund suggestion', () => {
+  it('is null without essentials history', () => {
+    const s: FinanceStateV2 = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
+    assert.equal(suggestedEmergencyTarget(s, 3, NOW), null);
+    // Spending this month (not a full month yet) doesn't count.
+    const after = apply(s, ops.addTransaction(s, { type: 'expense', amount: 9000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-10-05' }, makeCtx()));
+    assert.equal(suggestedEmergencyTarget(after, 6, NOW), null);
+  });
+
+  it('averages only the months that have essentials', () => {
+    let s: FinanceStateV2 = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 8000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-09-05' }, makeCtx()));
+    approx(suggestedEmergencyTarget(s, 3, NOW), 24000);
+    approx(suggestedEmergencyTarget(s, 6, NOW), 48000);
+  });
+});
+
+describe('addMonthsToDate', () => {
+  it('keeps the day and clamps to the month end', () => {
+    assert.equal(addMonthsToDate('2026-10-20', 12), '2027-10-20');
+    assert.equal(addMonthsToDate('2027-01-31', 1), '2027-02-28');
+    assert.equal(addMonthsToDate('2026-11-30', 3), '2027-02-28');
+    assert.equal(addMonthsToDate('2027-08-31', 6), '2028-02-29');
   });
 });

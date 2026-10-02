@@ -1,17 +1,17 @@
 import { useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { DatePicker } from '@/components/transactions/DatePicker';
 import { Chip, ChipRow } from '@/components/ui/Chip';
+import { PastDateField } from '@/components/ui/DateFields';
 import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { Segment } from '@/components/ui/Segment';
 import { Colors, FinanceColors } from '@/constants/theme';
 import type { Category, ExpenseBucket, Transaction } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { fromEGP, toEGP } from '@/utils/currency';
-import { shiftDate, toDateKey } from '@/utils/dates';
+import { toDateKey } from '@/utils/dates';
 import { confirmAction, showMessage } from '@/utils/dialogs';
-import { currencySymbol, formatDate } from '@/utils/formatters';
+import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
@@ -36,8 +36,6 @@ interface TransactionSheetProps {
 // its form state is initialised from `transaction` (or the remembered defaults) on mount.
 export function TransactionSheet({ transaction, onClose }: TransactionSheetProps) {
   const state = useFinanceStore();
-  const today = toDateKey(new Date());
-  const yesterday = shiftDate(today, -1);
   const lastUsed = state.settings.lastUsed ?? {};
 
   // Archived accounts are hidden unless the edited transaction already uses them.
@@ -84,9 +82,8 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
   const [toAmountText, setToAmountText] = useState<string | null>(
     transaction?.type === 'transfer' ? String(transaction.toAmount) : null
   );
-  const [date, setDate] = useState(transaction?.date ?? today);
+  const [date, setDate] = useState(transaction?.date ?? toDateKey(new Date()));
   const [note, setNote] = useState(transaction?.note ?? '');
-  const [pickerOpen, setPickerOpen] = useState(false);
 
   const isTransfer = type === 'transfer';
   const fromAccount = accountById(fromAccountId);
@@ -223,7 +220,6 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
   );
 
   const kindCategories = isTransfer ? [] : state.categories.filter((c) => c.kind === type);
-  const otherDate = date !== today && date !== yesterday;
 
   return (
     <FormSheet
@@ -297,16 +293,7 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
 
       {/* Date */}
       <FieldLabel>التاريخ</FieldLabel>
-      <ChipRow>
-        <Chip label="النهارده" selected={date === today} onPress={() => setDate(today)} />
-        <Chip label="امبارح" selected={date === yesterday} onPress={() => setDate(yesterday)} />
-        <Chip
-          label={otherDate ? formatDate(date) : 'تاريخ تاني'}
-          selected={otherDate}
-          onPress={() => setPickerOpen(true)}
-        />
-      </ChipRow>
-      {pickerOpen && <DatePicker value={date} onChange={setDate} onClose={() => setPickerOpen(false)} />}
+      <PastDateField value={date} onChange={setDate} />
 
       {/* Note */}
       <FieldLabel>ملاحظة (اختياري)</FieldLabel>

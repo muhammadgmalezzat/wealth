@@ -17,6 +17,14 @@ export function fromDateKey(dateKey: string): Date {
   return new Date(y, m - 1, d);
 }
 
+// Same day `months` later, clamped to the month's end (31 Jan + 1 month → 28/29 Feb).
+export function addMonthsToDate(dateKey: string, months: number): string {
+  const [y, m, d] = dateKey.slice(0, 10).split('-').map(Number);
+  const firstOfTarget = new Date(y, m - 1 + months, 1);
+  const lastDay = new Date(firstOfTarget.getFullYear(), firstOfTarget.getMonth() + 1, 0).getDate();
+  return toDateKey(new Date(firstOfTarget.getFullYear(), firstOfTarget.getMonth(), Math.min(d, lastDay)));
+}
+
 export function shiftDate(dateKey: string, days: number): string {
   const date = fromDateKey(dateKey);
   date.setDate(date.getDate() + days);

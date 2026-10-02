@@ -1,10 +1,11 @@
 ﻿import { useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { router } from 'expo-router';
 
-import { EditFundSheet } from '@/components/dashboard/EditFundSheet';
-import { FundCard } from '@/components/dashboard/FundCard';
 import { NetWorthCard } from '@/components/dashboard/NetWorthCard';
+import { FundCard } from '@/components/funds/FundCard';
+import { UnassignedPanel } from '@/components/funds/UnassignedPanel';
 import { TransactionRow } from '@/components/transactions/TransactionRow';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
 import { Card } from '@/components/ui/Card';
@@ -12,14 +13,12 @@ import { LoadingView } from '@/components/ui/LoadingView';
 import { StatCard } from '@/components/ui/StatCard';
 import { Colors, FinanceColors } from '@/constants/theme';
 import {
-  fundCurrent,
-  fundProgress,
+  fundsByPriority,
   holdingsTotalEGP,
   liquidTotalEGP,
   monthSummary,
   netWorthEGP,
   recentTransactions,
-  unassignedEGP,
 } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toMonthKey } from '@/utils/dates';
@@ -33,13 +32,11 @@ type TxSheetTarget = 'add' | { id: string } | null;
 export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
   const state = useFinanceStore();
-  const [editingFundId, setEditingFundId] = useState<string | null>(null);
   const [txSheet, setTxSheet] = useState<TxSheetTarget>(null);
 
   if (!state.hasHydrated) return <LoadingView />;
 
-  const funds = state.funds.filter((f) => !f.archived).sort((a, b) => a.priority - b.priority);
-  const editingFund = funds.find((f) => f.id === editingFundId);
+  const funds = fundsByPriority(state);
   // 0 when the month has no transactions.
   const monthNetEGP = monthSummary(state, toMonthKey(new Date())).netCashFlow;
 
@@ -75,8 +72,8 @@ export default function DashboardScreen() {
         </View>
 
         {/* ── Unassigned money ───────────────────────────────────── */}
-        <View style={[styles.section, styles.statsRow]}>
-          <StatCard label="فلوس بدون وظيفة" amountEGP={unassignedEGP(state)} accentColor={Colors.light.icon} />
+        <View style={styles.section}>
+          <UnassignedPanel state={state} />
         </View>
 
         {/* ── Quick Stats ────────────────────────────────────────── */}
@@ -90,17 +87,13 @@ export default function DashboardScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>الصناديق</Text>
           {funds.map((fund) => (
-            <TouchableOpacity
-              key={fund.id}
-              style={styles.fundItem}
-              onPress={() => setEditingFundId(fund.id)}
-              activeOpacity={0.8}>
+            <View key={fund.id} style={styles.fundItem}>
               <FundCard
                 fund={fund}
-                current={fundCurrent(state, fund.id)}
-                progress={fundProgress(state, fund.id)}
+                state={state}
+                onPress={() => router.push({ pathname: '/fund/[id]', params: { id: fund.id } })}
               />
-            </TouchableOpacity>
+            </View>
           ))}
         </View>
 
@@ -133,9 +126,6 @@ export default function DashboardScreen() {
         <View style={{ height: insets.bottom + 24 }} />
       </ScrollView>
 
-      {editingFund && (
-        <EditFundSheet key={editingFund.id} fund={editingFund} onClose={() => setEditingFundId(null)} />
-      )}
       {txSheet === 'add' && <TransactionSheet onClose={() => setTxSheet(null)} />}
       {editingTx && (
         <TransactionSheet key={editingTx.id} transaction={editingTx} onClose={() => setTxSheet(null)} />

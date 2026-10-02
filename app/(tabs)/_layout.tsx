@@ -40,7 +40,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="goals"
         options={{
-          title: 'Goals',
+          title: 'الصناديق',
           tabBarIcon: ({ color }) => <IconSymbol size={28} name="flag.fill" color={color} />,
         }}
       />
