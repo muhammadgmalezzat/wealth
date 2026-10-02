@@ -38,6 +38,9 @@ yarn-error.*
 
 app-example
 
+# personal seed data (see store/seed.example.ts)
+store/seed.local.ts
+
 # generated native folders
 /ios
 /android

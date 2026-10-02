@@ -27,15 +27,9 @@ In the output, you'll find options to open the app in a
 
 You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
 
-## Get a fresh project
+## Seed data
 
-When you're ready, run:
-
-```bash
-npm run reset-project
-```
-
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+On first launch the store is seeded from `store/seed.local.ts` (git-ignored) if it exists, otherwise from `store/seed.example.ts`. Copy the example to `seed.local.ts` to use your own figures.
 
 ## Learn more
 

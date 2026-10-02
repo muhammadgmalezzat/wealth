@@ -1,8 +1,8 @@
-import type { ExchangeRates } from '@/store/types';
+import type { CurrencyCode, ExchangeRates } from '@/store/types';
 
 export function toEGP(
   amount: number,
-  currency: 'EGP' | 'SAR' | 'USD',
+  currency: CurrencyCode,
   rates: ExchangeRates
 ): number {
   switch (currency) {
@@ -17,7 +17,7 @@ export function toEGP(
 
 export function fromEGP(
   amountEGP: number,
-  targetCurrency: 'EGP' | 'SAR' | 'USD',
+  targetCurrency: CurrencyCode,
   rates: ExchangeRates
 ): number {
   switch (targetCurrency) {

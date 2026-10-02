@@ -15,22 +15,28 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
 import { Card } from '@/components/ui/Card';
+import { LoadingView } from '@/components/ui/LoadingView';
+import { StatCard } from '@/components/ui/StatCard';
+import { GOLD_PRICE_24K } from '@/constants/market';
 import { Colors, FinanceColors } from '@/constants/theme';
-import type { Asset, ExchangeRates } from '@/store/types';
+import {
+  goldMarketValueEGP,
+  isGold,
+  isLiquid,
+  liquidTotalEGP,
+  netWorthEGP,
+} from '@/store/selectors';
+import type { Asset, CurrencyCode, ExchangeRates } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
+import { confirmAction } from '@/utils/confirm';
 import { toEGP } from '@/utils/currency';
 import { formatCurrency } from '@/utils/formatters';
-import { goldValueEGP } from '@/utils/gold';
-
-// Placeholder until a live gold-price feed is wired up.
-// Derived from seed purchase prices (~6,102 EGP/g); set slightly higher to show demo PnL.
-const GOLD_PRICE_24K = 6_500; // EGP per gram of 24k gold
+import { goldPnlEGP } from '@/utils/gold';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-type AssetType = 'cash' | 'bank' | 'gold';
-type CurrencyCode = 'EGP' | 'SAR' | 'USD';
+type AssetType = Asset['type'];
 
 interface FormState {
   type: AssetType;
@@ -55,24 +61,6 @@ const INITIAL_FORM: FormState = {
 // ---------------------------------------------------------------------------
 // Local sub-components
 // ---------------------------------------------------------------------------
-
-interface SummaryCardProps {
-  label: string;
-  amountEGP: number;
-  accentColor: string;
-}
-
-function SummaryCard({ label, amountEGP, accentColor }: SummaryCardProps) {
-  return (
-    <Card style={styles.summaryCard}>
-      <View style={[styles.summaryAccent, { backgroundColor: accentColor }]} />
-      <Text style={styles.summaryAmount} numberOfLines={1} adjustsFontSizeToFit>
-        {formatCurrency(amountEGP, 'EGP')}
-      </Text>
-      <Text style={styles.summaryLabel}>{label}</Text>
-    </Card>
-  );
-}
 
 interface LiquidRowProps {
   asset: Asset;
@@ -113,9 +101,8 @@ interface GoldRowProps {
 }
 
 function GoldRow({ asset, rates, onDelete }: GoldRowProps) {
-  const currentValue = goldValueEGP(asset, GOLD_PRICE_24K);
   const costEGP = toEGP(asset.purchasePrice ?? 0, asset.currency, rates);
-  const pnl = currentValue - costEGP;
+  const pnl = goldPnlEGP(asset, GOLD_PRICE_24K, rates);
   const hasCost = costEGP > 0;
   const isProfit = pnl >= 0;
 
@@ -192,34 +179,30 @@ function Segment<T extends string>({ options, value, onChange }: SegmentProps<T>
 // ---------------------------------------------------------------------------
 export default function AssetsScreen() {
   const insets = useSafeAreaInsets();
-  const { assets, exchangeRates, addAsset, deleteAsset } = useFinanceStore();
+  const state = useFinanceStore();
+  const { assets, exchangeRates, addAsset, deleteAsset } = state;
 
   const [modalVisible, setModalVisible] = useState(false);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
 
-  // Derived data
-  const liquidAssets = assets.filter((a) => a.type === 'cash' || a.type === 'bank');
-  const goldAssets = assets.filter((a) => a.type === 'gold');
+  if (!state.hasHydrated) return <LoadingView />;
 
-  const liquidEGP = liquidAssets.reduce(
-    (sum, a) => sum + toEGP(a.amount, a.currency, exchangeRates),
-    0
-  );
-  const goldEGP = goldAssets.reduce((sum, a) => {
-    const v = goldValueEGP(a, GOLD_PRICE_24K);
-    return sum + (v > 0 ? v : toEGP(a.purchasePrice ?? 0, a.currency, exchangeRates));
-  }, 0);
-  const totalEGP = liquidEGP + goldEGP;
+  // Derived data
+  const liquidAssets = assets.filter(isLiquid);
+  const goldAssets = assets.filter(isGold);
 
   // Helpers
   const set = <K extends keyof FormState>(key: K, val: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: val }));
 
   const handleDelete = (asset: Asset) => {
-    Alert.alert('حذف الأصل', `هل تريد حذف "${asset.name}"؟`, [
-      { text: 'إلغاء', style: 'cancel' },
-      { text: 'حذف', style: 'destructive', onPress: () => deleteAsset(asset.id) },
-    ]);
+    confirmAction({
+      title: 'حذف الأصل',
+      message: `هل تريد حذف "${asset.name}"؟`,
+      confirmText: 'حذف',
+      cancelText: 'إلغاء',
+      onConfirm: () => deleteAsset(asset.id),
+    });
   };
 
   const handleSubmit = () => {
@@ -229,14 +212,14 @@ export default function AssetsScreen() {
       return;
     }
 
-    const isGold = form.type === 'gold';
+    const goldSelected = form.type === 'gold';
     const newAsset: Asset = {
       id: Date.now().toString(),
       type: form.type,
       name,
-      amount: isGold ? 0 : parseFloat(form.amount) || 0,
+      amount: goldSelected ? 0 : parseFloat(form.amount) || 0,
       currency: form.currency,
-      ...(isGold && {
+      ...(goldSelected && {
         weightGrams: parseFloat(form.weightGrams) || 0,
         karat: (parseInt(form.karat, 10) as 21 | 24),
         purchasePrice: parseFloat(form.purchasePrice) || 0,
@@ -262,9 +245,9 @@ export default function AssetsScreen() {
 
         {/* ── Summary row ──────────────────────────────────── */}
         <View style={styles.summaryRow}>
-          <SummaryCard label="إجمالي الأصول" amountEGP={totalEGP} accentColor={Colors.light.tint} />
-          <SummaryCard label="السيولة" amountEGP={liquidEGP} accentColor={Colors.light.tint} />
-          <SummaryCard label="الذهب" amountEGP={goldEGP} accentColor={FinanceColors.gold} />
+          <StatCard label="إجمالي الأصول" amountEGP={netWorthEGP(state)} accentColor={Colors.light.tint} />
+          <StatCard label="السيولة" amountEGP={liquidTotalEGP(state)} accentColor={Colors.light.tint} />
+          <StatCard label="الذهب" amountEGP={goldMarketValueEGP(state)} accentColor={FinanceColors.gold} />
         </View>
 
         {/* ── Cash & bank ───────────────────────────────────── */}
@@ -455,35 +438,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     marginBottom: 20,
-  },
-  summaryCard: {
-    flex: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 12,
-    overflow: 'hidden',
-    minWidth: 0,
-  },
-  summaryAccent: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 3,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-  },
-  summaryAmount: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: Colors.light.text,
-    marginTop: 8,
-    textAlign: 'right',
-  },
-  summaryLabel: {
-    fontSize: 11,
-    color: Colors.light.icon,
-    marginTop: 3,
-    textAlign: 'right',
   },
 
   // Section

@@ -1,7 +1,9 @@
+export type CurrencyCode = 'EGP' | 'SAR' | 'USD';
+
 export interface Transaction {
   id: string;
   amount: number;
-  currency: 'EGP' | 'SAR' | 'USD';
+  currency: CurrencyCode;
   type: 'income' | 'expense';
   category: string;
   date: string;
@@ -13,7 +15,7 @@ export interface Asset {
   type: 'cash' | 'gold' | 'bank';
   name: string;
   amount: number;
-  currency: 'EGP' | 'SAR' | 'USD';
+  currency: CurrencyCode;
   purchasePrice?: number;
   weightGrams?: number;
   karat?: 21 | 24;
@@ -25,7 +27,7 @@ export interface Goal {
   targetAmount: number;
   currentAmount: number;
   deadline?: string;
-  currency: 'EGP' | 'SAR' | 'USD';
+  currency: CurrencyCode;
 }
 
 export interface ExchangeRates {

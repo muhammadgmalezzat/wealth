@@ -1,4 +1,6 @@
-const CURRENCY_SYMBOLS: Record<string, string> = {
+import type { CurrencyCode } from '@/store/types';
+
+const CURRENCY_SYMBOLS: Record<CurrencyCode, string> = {
   EGP: 'ج.م',
   SAR: 'ر.س',
   USD: '$',
@@ -6,9 +8,9 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
 
 export function formatCurrency(
   amount: number,
-  currency: 'EGP' | 'SAR' | 'USD'
+  currency: CurrencyCode
 ): string {
-  const symbol = CURRENCY_SYMBOLS[currency] ?? currency;
+  const symbol = CURRENCY_SYMBOLS[currency];
   const formatted = amount.toLocaleString('en-US', {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,

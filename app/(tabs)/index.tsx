@@ -4,33 +4,17 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GoalCard } from '@/components/dashboard/GoalCard';
 import { NetWorthCard } from '@/components/dashboard/NetWorthCard';
 import { Card } from '@/components/ui/Card';
+import { LoadingView } from '@/components/ui/LoadingView';
+import { StatCard } from '@/components/ui/StatCard';
 import { Colors, FinanceColors } from '@/constants/theme';
-import { useFinanceStore } from '@/store/useFinanceStore';
+import { goldMarketValueEGP, liquidTotalEGP, netWorthEGP } from '@/store/selectors';
 import type { Transaction } from '@/store/types';
-import { toEGP } from '@/utils/currency';
+import { useFinanceStore } from '@/store/useFinanceStore';
 import { formatCurrency, formatDate } from '@/utils/formatters';
 
 // ---------------------------------------------------------------------------
 // Local component — only used on this screen
 // ---------------------------------------------------------------------------
-interface StatCardProps {
-  label: string;
-  amount: number;
-  accentColor: string;
-}
-
-function StatCard({ label, amount, accentColor }: StatCardProps) {
-  return (
-    <Card style={styles.statCard}>
-      <View style={[styles.statAccent, { backgroundColor: accentColor }]} />
-      <Text style={styles.statAmount} numberOfLines={1} adjustsFontSizeToFit>
-        {formatCurrency(amount, 'EGP')}
-      </Text>
-      <Text style={styles.statLabel}>{label}</Text>
-    </Card>
-  );
-}
-
 interface TxRowProps {
   tx: Transaction;
   isLast: boolean;
@@ -60,24 +44,11 @@ function TxRow({ tx, isLast }: TxRowProps) {
 // ---------------------------------------------------------------------------
 export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
-  const { assets, goals, transactions, exchangeRates } = useFinanceStore();
+  const state = useFinanceStore();
 
-  // Net worth: liquid assets use amount, gold uses purchase price (no live feed)
-  const netWorthEGP = assets.reduce((sum, asset) => {
-    if (asset.type === 'gold') {
-      return sum + toEGP(asset.purchasePrice ?? 0, asset.currency, exchangeRates);
-    }
-    return sum + toEGP(asset.amount, asset.currency, exchangeRates);
-  }, 0);
+  if (!state.hasHydrated) return <LoadingView />;
 
-  const liquidEGP = assets
-    .filter((a) => a.type === 'cash' || a.type === 'bank')
-    .reduce((sum, a) => sum + toEGP(a.amount, a.currency, exchangeRates), 0);
-
-  const goldEGP = assets
-    .filter((a) => a.type === 'gold')
-    .reduce((sum, a) => sum + toEGP(a.purchasePrice ?? 0, a.currency, exchangeRates), 0);
-
+  const { goals, transactions } = state;
   const MONTHLY_SAVINGS = 17_000;
 
   const recentTx = transactions.slice(0, 5);
@@ -104,15 +75,15 @@ export default function DashboardScreen() {
 
       {/* ── Net Worth ──────────────────────────────────────────── */}
       <View style={styles.section}>
-        <NetWorthCard totalEGP={netWorthEGP} />
+        <NetWorthCard totalEGP={netWorthEGP(state)} />
         <Text style={styles.netWorthLabel}>إجمالي الثروة</Text>
       </View>
 
       {/* ── Quick Stats ────────────────────────────────────────── */}
       <View style={[styles.section, styles.statsRow]}>
-        <StatCard label="سيولة" amount={liquidEGP} accentColor={Colors.light.tint} />
-        <StatCard label="ذهب" amount={goldEGP} accentColor={FinanceColors.gold} />
-        <StatCard label="ادخار شهري" amount={MONTHLY_SAVINGS} accentColor={FinanceColors.income} />
+        <StatCard label="سيولة" amountEGP={liquidTotalEGP(state)} accentColor={Colors.light.tint} />
+        <StatCard label="ذهب" amountEGP={goldMarketValueEGP(state)} accentColor={FinanceColors.gold} />
+        <StatCard label="ادخار شهري" amountEGP={MONTHLY_SAVINGS} accentColor={FinanceColors.income} />
       </View>
 
       {/* ── Goals ──────────────────────────────────────────────── */}
@@ -206,35 +177,6 @@ const styles = StyleSheet.create({
   statsRow: {
     flexDirection: 'row',
     gap: 10,
-  },
-  statCard: {
-    flex: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 12,
-    overflow: 'hidden',
-    minWidth: 0,
-  },
-  statAccent: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 3,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-  },
-  statAmount: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: Colors.light.text,
-    marginTop: 8,
-    textAlign: 'right',
-  },
-  statLabel: {
-    fontSize: 11,
-    color: Colors.light.icon,
-    marginTop: 3,
-    textAlign: 'right',
   },
 
   // Goals

@@ -1,4 +1,4 @@
-import type { ExchangeRates } from '@/store/types';
+import type { CurrencyCode, ExchangeRates } from '@/store/types';
 
 export const DEFAULT_RATES: ExchangeRates = {
   SAR_EGP: 12.57,
@@ -6,8 +6,7 @@ export const DEFAULT_RATES: ExchangeRates = {
   lastUpdated: new Date().toISOString(),
 };
 
-export const CURRENCIES = ['EGP', 'SAR', 'USD'] as const;
-export type CurrencyCode = (typeof CURRENCIES)[number];
+export const CURRENCIES: readonly CurrencyCode[] = ['EGP', 'SAR', 'USD'];
 
 export const CURRENCY_LABELS: Record<CurrencyCode, string> = {
   EGP: 'Egyptian Pound',

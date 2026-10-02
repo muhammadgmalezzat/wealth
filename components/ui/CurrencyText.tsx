@@ -1,9 +1,10 @@
 import { Text, TextStyle } from 'react-native';
+import type { CurrencyCode } from '@/store/types';
 import { formatCurrency } from '@/utils/formatters';
 
 interface CurrencyTextProps {
   amount: number;
-  currency: 'EGP' | 'SAR' | 'USD';
+  currency: CurrencyCode;
   style?: TextStyle;
 }
 
