@@ -1,27 +1,28 @@
-﻿import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import { Card } from '@/components/ui/Card';
 import { ProgressBar } from '@/components/ui/ProgressBar';
 import { formatCurrency } from '@/utils/formatters';
-import type { Goal } from '@/store/types';
+import type { Fund } from '@/store/types';
 
-interface GoalCardProps {
-  goal: Goal;
+interface FundCardProps {
+  fund: Fund;
+  current: number; // fund currency
+  progress: number; // 0..∞
 }
 
-export function GoalCard({ goal }: GoalCardProps) {
-  const progress = goal.currentAmount / goal.targetAmount;
+export function FundCard({ fund, current, progress }: FundCardProps) {
   const percent = Math.round(progress * 100);
 
   return (
     <Card>
       <View style={styles.header}>
-        <Text style={styles.name}>{goal.name}</Text>
+        <Text style={styles.name}>{fund.name}</Text>
         <Text style={styles.percent}>{percent}%</Text>
       </View>
       <ProgressBar progress={progress} />
       <View style={styles.footer}>
-        <Text style={styles.sub}>{formatCurrency(goal.currentAmount, goal.currency)}</Text>
-        <Text style={styles.sub}>{formatCurrency(goal.targetAmount, goal.currency)}</Text>
+        <Text style={styles.sub}>{formatCurrency(current, fund.currency)}</Text>
+        <Text style={styles.sub}>{formatCurrency(fund.targetAmount, fund.currency)}</Text>
       </View>
     </Card>
   );

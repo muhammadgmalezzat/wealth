@@ -1,15 +1,26 @@
-﻿import { ScrollView, StyleSheet, Text, View } from 'react-native';
+﻿import { useState } from 'react';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { GoalCard } from '@/components/dashboard/GoalCard';
+import { EditFundSheet } from '@/components/dashboard/EditFundSheet';
+import { FundCard } from '@/components/dashboard/FundCard';
 import { NetWorthCard } from '@/components/dashboard/NetWorthCard';
 import { Card } from '@/components/ui/Card';
 import { LoadingView } from '@/components/ui/LoadingView';
 import { StatCard } from '@/components/ui/StatCard';
 import { Colors, FinanceColors } from '@/constants/theme';
-import { goldMarketValueEGP, liquidTotalEGP, netWorthEGP } from '@/store/selectors';
-import type { Transaction } from '@/store/types';
+import {
+  fundCurrent,
+  fundProgress,
+  holdingsTotalEGP,
+  liquidTotalEGP,
+  monthSummary,
+  netWorthEGP,
+  unassignedEGP,
+} from '@/store/selectors';
+import type { CurrencyCode, FinanceStateV2, Transaction } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
+import { toMonthKey } from '@/utils/dates';
 import { formatCurrency, formatDate } from '@/utils/formatters';
 
 // ---------------------------------------------------------------------------
@@ -17,26 +28,41 @@ import { formatCurrency, formatDate } from '@/utils/formatters';
 // ---------------------------------------------------------------------------
 interface TxRowProps {
   tx: Transaction;
+  label: string;
+  currency: CurrencyCode;
   isLast: boolean;
 }
 
-function TxRow({ tx, isLast }: TxRowProps) {
-  const isIncome = tx.type === 'income';
+function TxRow({ tx, label, currency, isLast }: TxRowProps) {
+  const sign = tx.type === 'income' ? '+' : tx.type === 'expense' ? '−' : '';
+  const color =
+    tx.type === 'income'
+      ? FinanceColors.income
+      : tx.type === 'expense'
+        ? FinanceColors.expense
+        : Colors.light.text;
   return (
     <View style={[styles.txRow, !isLast && styles.txRowBorder]}>
       <View style={styles.txLeft}>
-        <Text style={styles.txCategory}>{tx.category}</Text>
+        <Text style={styles.txCategory}>{label}</Text>
         <Text style={styles.txDate}>{formatDate(tx.date)}</Text>
       </View>
-      <Text
-        style={[
-          styles.txAmount,
-          { color: isIncome ? FinanceColors.income : FinanceColors.expense },
-        ]}>
-        {isIncome ? '+' : '−'}{formatCurrency(tx.amount, tx.currency)}
+      <Text style={[styles.txAmount, { color }]}>
+        {sign}
+        {formatCurrency(tx.amount, currency)}
       </Text>
     </View>
   );
+}
+
+// Row label and display currency; transfers show in the source account's currency.
+function describeTx(state: FinanceStateV2, tx: Transaction): { label: string; currency: CurrencyCode } {
+  if (tx.type === 'transfer') {
+    const from = state.accounts.find((a) => a.id === tx.fromAccountId);
+    return { label: 'تحويل', currency: from?.currency ?? 'EGP' };
+  }
+  const category = state.categories.find((c) => c.id === tx.categoryId);
+  return { label: category?.name ?? '—', currency: tx.currency };
 }
 
 // ---------------------------------------------------------------------------
@@ -45,11 +71,15 @@ function TxRow({ tx, isLast }: TxRowProps) {
 export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
   const state = useFinanceStore();
+  const [editingFundId, setEditingFundId] = useState<string | null>(null);
 
   if (!state.hasHydrated) return <LoadingView />;
 
-  const { goals, transactions } = state;
-  const MONTHLY_SAVINGS = 17_000;
+  const { transactions } = state;
+  const funds = state.funds.filter((f) => !f.archived).sort((a, b) => a.priority - b.priority);
+  const editingFund = funds.find((f) => f.id === editingFundId);
+  // 0 when the month has no transactions.
+  const monthNetEGP = monthSummary(state, toMonthKey(new Date())).netCashFlow;
 
   const recentTx = transactions.slice(0, 5);
 
@@ -60,58 +90,82 @@ export default function DashboardScreen() {
   });
 
   return (
-    <ScrollView
-      style={styles.scroll}
-      contentContainerStyle={[styles.content, { paddingTop: insets.top + 16 }]}
-      showsVerticalScrollIndicator={false}>
-      {/* ── Header ─────────────────────────────────────────────── */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.appTitle}>Wealth</Text>
-          <Text style={styles.greeting}>مرحباً</Text>
-        </View>
-        <Text style={styles.dateText}>{todayArabic}</Text>
-      </View>
-
-      {/* ── Net Worth ──────────────────────────────────────────── */}
-      <View style={styles.section}>
-        <NetWorthCard totalEGP={netWorthEGP(state)} />
-        <Text style={styles.netWorthLabel}>إجمالي الثروة</Text>
-      </View>
-
-      {/* ── Quick Stats ────────────────────────────────────────── */}
-      <View style={[styles.section, styles.statsRow]}>
-        <StatCard label="سيولة" amountEGP={liquidTotalEGP(state)} accentColor={Colors.light.tint} />
-        <StatCard label="ذهب" amountEGP={goldMarketValueEGP(state)} accentColor={FinanceColors.gold} />
-        <StatCard label="ادخار شهري" amountEGP={MONTHLY_SAVINGS} accentColor={FinanceColors.income} />
-      </View>
-
-      {/* ── Goals ──────────────────────────────────────────────── */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>الأهداف</Text>
-        {goals.map((goal) => (
-          <View key={goal.id} style={styles.goalItem}>
-            <GoalCard goal={goal} />
+    <>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[styles.content, { paddingTop: insets.top + 16 }]}
+        showsVerticalScrollIndicator={false}>
+        {/* ── Header ─────────────────────────────────────────────── */}
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.appTitle}>Wealth</Text>
+            <Text style={styles.greeting}>مرحباً</Text>
           </View>
-        ))}
-      </View>
+          <Text style={styles.dateText}>{todayArabic}</Text>
+        </View>
 
-      {/* ── Recent Transactions ────────────────────────────────── */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>آخر المعاملات</Text>
-        <Card style={styles.txCard}>
-          {recentTx.length === 0 ? (
-            <Text style={styles.emptyText}>لا توجد معاملات بعد</Text>
-          ) : (
-            recentTx.map((tx, idx) => (
-              <TxRow key={tx.id} tx={tx} isLast={idx === recentTx.length - 1} />
-            ))
-          )}
-        </Card>
-      </View>
+        {/* ── Net Worth ──────────────────────────────────────────── */}
+        <View style={styles.section}>
+          <NetWorthCard totalEGP={netWorthEGP(state)} />
+          <Text style={styles.netWorthLabel}>إجمالي الثروة</Text>
+        </View>
 
-      <View style={{ height: insets.bottom + 24 }} />
-    </ScrollView>
+        {/* ── Unassigned money ───────────────────────────────────── */}
+        <View style={[styles.section, styles.statsRow]}>
+          <StatCard label="فلوس بدون وظيفة" amountEGP={unassignedEGP(state)} accentColor={Colors.light.icon} />
+        </View>
+
+        {/* ── Quick Stats ────────────────────────────────────────── */}
+        <View style={[styles.section, styles.statsRow]}>
+          <StatCard label="سيولة" amountEGP={liquidTotalEGP(state)} accentColor={Colors.light.tint} />
+          <StatCard label="استثمارات" amountEGP={holdingsTotalEGP(state)} accentColor={FinanceColors.gold} />
+          <StatCard label="صافي الشهر" amountEGP={monthNetEGP} accentColor={FinanceColors.income} />
+        </View>
+
+        {/* ── Funds ──────────────────────────────────────────────── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>الصناديق</Text>
+          {funds.map((fund) => (
+            <TouchableOpacity
+              key={fund.id}
+              style={styles.fundItem}
+              onPress={() => setEditingFundId(fund.id)}
+              activeOpacity={0.8}>
+              <FundCard
+                fund={fund}
+                current={fundCurrent(state, fund.id)}
+                progress={fundProgress(state, fund.id)}
+              />
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* ── Recent Transactions ────────────────────────────────── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>آخر المعاملات</Text>
+          <Card style={styles.txCard}>
+            {recentTx.length === 0 ? (
+              <Text style={styles.emptyText}>لا توجد معاملات بعد</Text>
+            ) : (
+              recentTx.map((tx, idx) => (
+                <TxRow
+                  key={tx.id}
+                  tx={tx}
+                  {...describeTx(state, tx)}
+                  isLast={idx === recentTx.length - 1}
+                />
+              ))
+            )}
+          </Card>
+        </View>
+
+        <View style={{ height: insets.bottom + 24 }} />
+      </ScrollView>
+
+      {editingFund && (
+        <EditFundSheet key={editingFund.id} fund={editingFund} onClose={() => setEditingFundId(null)} />
+      )}
+    </>
   );
 }
 
@@ -179,8 +233,8 @@ const styles = StyleSheet.create({
     gap: 10,
   },
 
-  // Goals
-  goalItem: {
+  // Funds
+  fundItem: {
     marginBottom: 10,
   },
 

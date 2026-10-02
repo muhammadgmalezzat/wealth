@@ -1,18 +1,19 @@
 import type { CurrencyCode, ExchangeRates } from '@/store/types';
 
-export function toEGP(
-  amount: number,
-  currency: CurrencyCode,
-  rates: ExchangeRates
-): number {
+// How many EGP one unit of `currency` is worth at the given rates.
+export function rateToEGP(currency: CurrencyCode, rates: ExchangeRates): number {
   switch (currency) {
     case 'EGP':
-      return amount;
+      return 1;
     case 'SAR':
-      return amount * rates.SAR_EGP;
+      return rates.SAR_EGP;
     case 'USD':
-      return amount * rates.USD_EGP;
+      return rates.USD_EGP;
   }
+}
+
+export function toEGP(amount: number, currency: CurrencyCode, rates: ExchangeRates): number {
+  return amount * rateToEGP(currency, rates);
 }
 
 export function fromEGP(
@@ -20,12 +21,5 @@ export function fromEGP(
   targetCurrency: CurrencyCode,
   rates: ExchangeRates
 ): number {
-  switch (targetCurrency) {
-    case 'EGP':
-      return amountEGP;
-    case 'SAR':
-      return amountEGP / rates.SAR_EGP;
-    case 'USD':
-      return amountEGP / rates.USD_EGP;
-  }
+  return amountEGP / rateToEGP(targetCurrency, rates);
 }

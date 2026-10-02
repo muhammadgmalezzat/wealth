@@ -1,33 +1,136 @@
+// Data model V2. Monetary amounts are stored in the entity's own currency unless the
+// field name says EGP. Dates are local calendar dates ('YYYY-MM-DD'); createdAt is an ISO timestamp.
+// Deliberately no interest/APR fields anywhere.
+
 export type CurrencyCode = 'EGP' | 'SAR' | 'USD';
 
-export interface Transaction {
+export type Bucket = 'essentials' | 'lifestyle' | 'giving' | 'income';
+export type ExpenseBucket = Exclude<Bucket, 'income'>;
+
+export interface Account {
+  id: string;
+  name: string;
+  type: 'cash' | 'bank' | 'wallet';
+  currency: CurrencyCode;
+  // Balance is derived (see accountBalance selector), never stored.
+  openingBalance: number;
+  createdAt: string;
+  archived?: boolean;
+}
+
+export interface Category {
+  id: string;
+  name: string;
+  kind: 'income' | 'expense';
+  bucket: Bucket;
+  isDefault: boolean;
+}
+
+interface TransactionBase {
   id: string;
   amount: number;
-  currency: CurrencyCode;
+  date: string;
+  note?: string;
+  // Exchange rate of the transaction's currency to EGP, snapshotted at creation.
+  rateToEGP: number;
+  createdAt: string;
+}
+
+export interface IncomeExpenseTransaction extends TransactionBase {
   type: 'income' | 'expense';
-  category: string;
+  // Always equals the account's currency.
+  currency: CurrencyCode;
+  accountId: string;
+  categoryId: string;
+  recurringRuleId?: string;
+  liabilityId?: string;
+}
+
+export interface TransferTransaction extends TransactionBase {
+  type: 'transfer';
+  fromAccountId: string;
+  toAccountId: string;
+  // `amount` leaves the source account (its currency); `toAmount` arrives in the target
+  // account's currency, so SAR→EGP transfers record the real converted amount.
+  toAmount: number;
+}
+
+export type Transaction = IncomeExpenseTransaction | TransferTransaction;
+
+export interface Fund {
+  id: string;
+  name: string;
+  type: 'emergency' | 'goal' | 'sinking';
+  targetAmount: number;
+  currency: CurrencyCode;
+  deadline?: string;
+  priority: number;
+  monthlyContribution?: number;
+  linkedHoldingIds: string[];
+  createdAt: string;
+  archived?: boolean;
+}
+
+export interface FundMovement {
+  id: string;
+  fundId: string;
+  // In the fund's currency: positive = allocate, negative = withdraw.
+  amount: number;
   date: string;
   note?: string;
 }
 
-export interface Asset {
+export type GoldKarat = 18 | 21 | 24;
+
+export interface GoldHolding {
   id: string;
-  type: 'cash' | 'gold' | 'bank';
+  type: 'gold';
   name: string;
-  amount: number;
-  currency: CurrencyCode;
-  purchasePrice?: number;
-  weightGrams?: number;
-  karat?: 21 | 24;
+  weightGrams: number;
+  karat: GoldKarat;
+  purchaseCostEGP: number;
+  purchaseDate?: string;
 }
 
-export interface Goal {
+export interface CurrencyHolding {
+  id: string;
+  type: 'currency';
+  name: string;
+  currency: CurrencyCode;
+  quantity: number;
+  purchaseCostEGP: number;
+  purchaseDate?: string;
+}
+
+export type Holding = GoldHolding | CurrencyHolding;
+
+export interface Liability {
   id: string;
   name: string;
-  targetAmount: number;
-  currentAmount: number;
-  deadline?: string;
+  principal: number;
   currency: CurrencyCode;
+  monthlyPayment?: number;
+  startDate: string;
+  notes?: string;
+}
+
+export interface RecurringRule {
+  id: string;
+  name: string;
+  type: 'income' | 'expense';
+  amount: number;
+  currency: CurrencyCode;
+  accountId: string;
+  categoryId: string;
+  frequency: 'weekly' | 'monthly' | 'yearly';
+  nextDate: string;
+  active: boolean;
+}
+
+export interface MonthlyPlan {
+  month: string; // 'YYYY-MM'
+  expectedIncomeEGP: number;
+  bucketLimitsEGP: Partial<Record<Bucket, number>>;
 }
 
 export interface ExchangeRates {
@@ -36,9 +139,21 @@ export interface ExchangeRates {
   lastUpdated: string;
 }
 
-export interface FinanceState {
-  transactions: Transaction[];
-  assets: Asset[];
-  goals: Goal[];
+export interface Settings {
   exchangeRates: ExchangeRates;
+  goldPrice24kEGP: number;
+  goldPriceUpdatedAt: string;
+}
+
+export interface FinanceStateV2 {
+  accounts: Account[];
+  categories: Category[];
+  transactions: Transaction[];
+  funds: Fund[];
+  fundMovements: FundMovement[];
+  holdings: Holding[];
+  liabilities: Liability[];
+  recurringRules: RecurringRule[];
+  monthlyPlans: MonthlyPlan[];
+  settings: Settings;
 }
