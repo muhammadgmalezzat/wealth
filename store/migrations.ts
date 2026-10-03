@@ -30,8 +30,11 @@ import type {
 //   v3: + account location & openingDate, holding location, oneTime expenses,
 //       asset_purchase transactions, 21k gold price, trackingStartDate, new categories
 //   v4: + updatedAt on every entity, tombstones (deletion log), settings.deviceId
+//   v5: monthly plans become per-category lines in a plan currency (+ fund contributions)
+//   v6: recurring rules get kind (incl. transfer), interval, dayOfMonth, start/end, mode,
+//       variableAmount, skippedDates; transactions can carry occurrenceDate
 
-export const CURRENT_VERSION = 4;
+export const CURRENT_VERSION = 6;
 
 interface LegacyTransactionV1 {
   id: string;
@@ -89,13 +92,47 @@ export interface FinanceStateV3 {
   fundMovements: Unsynced<FundMovement>[];
   holdings: Unsynced<Holding>[];
   liabilities: Unsynced<Liability>[];
-  recurringRules: Unsynced<RecurringRule>[];
-  monthlyPlans: Unsynced<MonthlyPlan>[];
+  recurringRules: LegacyRecurringRule[];
+  monthlyPlans: LegacyMonthlyPlan[];
   settings: Omit<Settings, 'deviceId'> & { deviceId?: string };
   tombstones?: Tombstone[];
 }
 
-// Selectors are typed for v4 but only read fields that v3 already had.
+// Monthly plans before v5: EGP bucket limits, keyed by month.
+export interface LegacyMonthlyPlan {
+  month: string;
+  expectedIncomeEGP: number;
+  bucketLimitsEGP: Partial<Record<string, number>>;
+  updatedAt?: string;
+}
+
+// Recurring rules before v6 (income/expense only, monthly-style schedule by nextDate).
+export interface LegacyRecurringRule {
+  id: string;
+  name: string;
+  type: 'income' | 'expense';
+  amount: number;
+  currency: CurrencyCode;
+  accountId: string;
+  categoryId: string;
+  frequency: 'weekly' | 'monthly' | 'yearly';
+  nextDate: string;
+  active: boolean;
+  updatedAt?: string;
+}
+
+// The v4 data shape: current entities, but plans and recurring rules in their legacy forms.
+export type FinanceStateV4 = Omit<FinanceState, 'monthlyPlans' | 'recurringRules'> & {
+  monthlyPlans: (LegacyMonthlyPlan & { updatedAt: string })[];
+  recurringRules: (LegacyRecurringRule & { updatedAt: string })[];
+};
+
+// The v5 data shape: current except recurring rules.
+export type FinanceStateV5 = Omit<FinanceState, 'recurringRules'> & {
+  recurringRules: (LegacyRecurringRule & { updatedAt: string })[];
+};
+
+// Selectors are typed for the current version but only read fields older versions had.
 const asCurrent = (state: object) => state as unknown as FinanceState;
 
 // Tolerate partially written or older payloads: missing collections become empty.
@@ -290,7 +327,7 @@ export function migrateV2toV3(persisted: unknown): FinanceStateV3 {
 // v3 → v4: every entity gets updatedAt (its createdAt, or `now` when it has none), the
 // tombstone log starts empty and the installation gets its device id. Idempotent: values
 // that already exist are kept.
-export function migrateV3toV4(persisted: unknown, ctx: MigrationContext): FinanceState {
+export function migrateV3toV4(persisted: unknown, ctx: MigrationContext): FinanceStateV4 {
   const s = (persisted ?? {}) as Partial<FinanceStateV3>;
   const synced = <T extends { updatedAt?: string; createdAt?: string }>(value: T[] | undefined) =>
     (Array.isArray(value) ? value : []).map((e) => ({ ...e, updatedAt: e.updatedAt ?? e.createdAt ?? ctx.now }));
@@ -303,11 +340,77 @@ export function migrateV3toV4(persisted: unknown, ctx: MigrationContext): Financ
     fundMovements: synced(s.fundMovements) as FundMovement[],
     holdings: synced(s.holdings) as Holding[],
     liabilities: synced(s.liabilities) as Liability[],
-    recurringRules: synced(s.recurringRules) as RecurringRule[],
-    monthlyPlans: synced(s.monthlyPlans) as MonthlyPlan[],
+    recurringRules: synced(s.recurringRules) as FinanceStateV4['recurringRules'],
+    monthlyPlans: synced(s.monthlyPlans) as FinanceStateV4['monthlyPlans'],
     settings: { ...settings, deviceId: settings.deviceId || ctx.newId() },
     tombstones: Array.isArray(s.tombstones) ? s.tombstones : [],
   };
+}
+
+export const planIdFor = (month: string) => `plan-${month}`;
+const isMonthKeyLike = (value: string) => /^\d{4}-\d{2}$/.test(value);
+
+// v4 → v5: plans become { id, currency, expectedIncome, lines, fundContributions }. Old plans
+// held EGP bucket limits that can't be mapped onto categories, so they keep their income (in
+// EGP, their original currency) and start with no lines. Monthly-plan tombstones, which were
+// keyed by month, are re-keyed to the plan id. Idempotent: v5 plans pass through unchanged.
+export function migrateV4toV5(persisted: unknown, ctx: MigrationContext): FinanceStateV5 {
+  const s = (persisted ?? {}) as FinanceStateV4 | FinanceStateV5;
+  const plans = (Array.isArray(s.monthlyPlans) ? s.monthlyPlans : []) as (LegacyMonthlyPlan | MonthlyPlan)[];
+  const monthlyPlans: MonthlyPlan[] = plans.map((plan) => {
+    if ('lines' in plan && Array.isArray(plan.lines)) return plan as MonthlyPlan;
+    const legacy = plan as LegacyMonthlyPlan;
+    const updatedAt = legacy.updatedAt ?? ctx.now;
+    return {
+      id: planIdFor(legacy.month),
+      month: legacy.month,
+      currency: 'EGP',
+      expectedIncome: legacy.expectedIncomeEGP ?? 0,
+      lines: [],
+      fundContributions: [],
+      createdAt: updatedAt,
+      updatedAt,
+    };
+  });
+  const tombstones = (Array.isArray(s.tombstones) ? s.tombstones : []).map((t) =>
+    t.entity === 'monthlyPlan' && isMonthKeyLike(t.id) ? { ...t, id: planIdFor(t.id) } : t
+  );
+  return { ...(s as FinanceStateV5), monthlyPlans, tombstones };
+}
+
+// v5 → v6: legacy rules become { kind: type, interval: 1, startDate = nextDate, mode:
+// 'confirm', variableAmount: false, skippedDates: [] }; monthly/yearly rules keep their day
+// via dayOfMonth. 'confirm' means nothing is recorded automatically after the upgrade.
+// Idempotent: rules that already have `kind` pass through unchanged.
+export function migrateV5toV6(persisted: unknown, ctx: MigrationContext): FinanceState {
+  const s = (persisted ?? {}) as FinanceStateV5 | FinanceState;
+  const rules = (Array.isArray(s.recurringRules) ? s.recurringRules : []) as (LegacyRecurringRule | RecurringRule)[];
+  const recurringRules: RecurringRule[] = rules.map((rule) => {
+    if ('kind' in rule) return rule as RecurringRule;
+    const legacy = rule as LegacyRecurringRule;
+    const updatedAt = legacy.updatedAt ?? ctx.now;
+    return {
+      id: legacy.id,
+      name: legacy.name,
+      kind: legacy.type,
+      amount: legacy.amount,
+      currency: legacy.currency,
+      accountId: legacy.accountId,
+      categoryId: legacy.categoryId,
+      frequency: legacy.frequency,
+      interval: 1,
+      ...(legacy.frequency !== 'weekly' ? { dayOfMonth: Number(legacy.nextDate.slice(8, 10)) } : {}),
+      startDate: legacy.nextDate,
+      nextDate: legacy.nextDate,
+      mode: 'confirm',
+      variableAmount: false,
+      active: legacy.active,
+      skippedDates: [],
+      createdAt: updatedAt,
+      updatedAt,
+    };
+  });
+  return { ...(s as FinanceState), recurringRules };
 }
 
 // Entry point used by zustand persist and backup restore: upgrades any older payload step by step.
@@ -322,5 +425,7 @@ export function migratePersistedState(
   if (version < 2) ({ state, clampedBy } = migrateV1toV2(state, ctx));
   if (version < 3) state = migrateV2toV3(state);
   if (version < 4) state = migrateV3toV4(state, ctx);
+  if (version < 5) state = migrateV4toV5(state, ctx);
+  if (version < 6) state = migrateV5toV6(state, ctx);
   return { state: state as FinanceState, clampedBy };
 }

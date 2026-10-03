@@ -28,7 +28,14 @@ export type FinanceErrorCode =
   | 'SINKING_SCHEDULE_REQUIRED'
   | 'NOT_A_SINKING_FUND'
   | 'HOLDING_HAS_PURCHASE'
-  | 'ASSET_PURCHASE_TYPE_LOCKED';
+  | 'ASSET_PURCHASE_TYPE_LOCKED'
+  | 'DUPLICATE_ENTRY'
+  | 'PLAN_EXISTS'
+  | 'OCCURRENCE_NOT_DUE'
+  | 'CATEGORY_NAME_TAKEN'
+  | 'CATEGORY_KIND_LOCKED'
+  | 'DEFAULT_CATEGORY_DELETE'
+  | 'PLAN_NOT_FOUND';
 
 export type FinanceEntity =
   | 'account'
@@ -38,7 +45,8 @@ export type FinanceEntity =
   | 'fundMovement'
   | 'holding'
   | 'liability'
-  | 'recurringRule';
+  | 'recurringRule'
+  | 'monthlyPlan';
 
 export type FinanceField =
   | 'amount'
@@ -54,15 +62,18 @@ export type FinanceField =
   | 'purchaseCostEGP'
   | 'principal'
   | 'monthlyPayment'
-  | 'expectedIncomeEGP'
-  | 'bucketLimit'
+  | 'expectedIncome'
+  | 'planLimit'
   | 'exchangeRate'
   | 'goldPrice'
   | 'date'
   | 'deadline'
   | 'startDate'
   | 'nextDate'
-  | 'purchaseDate';
+  | 'purchaseDate'
+  | 'endDate'
+  | 'interval'
+  | 'dayOfMonth';
 
 export interface FinanceErrorDetails {
   entity?: FinanceEntity;

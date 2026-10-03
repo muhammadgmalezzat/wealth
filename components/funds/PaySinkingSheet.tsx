@@ -5,7 +5,7 @@ import { Chip, ChipRow } from '@/components/ui/Chip';
 import { PastDateField } from '@/components/ui/DateFields';
 import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { Colors } from '@/constants/theme';
-import { fundAllocated, SINKING_CYCLE_MONTHS } from '@/store/selectors';
+import { fundAllocated, pickerCategories, SINKING_CYCLE_MONTHS } from '@/store/selectors';
 import type { Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { fromEGP, toEGP } from '@/utils/currency';
@@ -27,7 +27,7 @@ export function PaySinkingSheet({ fund, onClose }: PaySinkingSheetProps) {
   const state = useFinanceStore();
   const rates = state.settings.exchangeRates;
   const accounts = state.accounts.filter((a) => !a.archived);
-  const expenseCategories = state.categories.filter((c) => c.kind === 'expense');
+  const expenseCategories = pickerCategories(state.categories, 'expense');
   const lastUsed = state.settings.lastUsed?.expense;
 
   const [accountId, setAccountId] = useState(

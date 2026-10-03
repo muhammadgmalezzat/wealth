@@ -36,6 +36,8 @@ export interface Category extends Synced {
   kind: 'income' | 'expense';
   bucket: Bucket;
   isDefault: boolean;
+  // Hidden from pickers but kept for history and reports. Missing = false (no migration needed).
+  archived?: boolean;
 }
 
 interface TransactionBase extends Synced {
@@ -46,6 +48,10 @@ interface TransactionBase extends Synced {
   // Exchange rate of the transaction's currency to EGP, snapshotted at creation.
   rateToEGP: number;
   createdAt: string;
+  // Set when the transaction records an occurrence of a recurring rule: the rule and the
+  // scheduled date it fulfils (the transaction's own `date` may differ).
+  recurringRuleId?: string;
+  occurrenceDate?: string;
 }
 
 export interface IncomeExpenseTransaction extends TransactionBase {
@@ -54,7 +60,6 @@ export interface IncomeExpenseTransaction extends TransactionBase {
   currency: CurrencyCode;
   accountId: string;
   categoryId: string;
-  recurringRuleId?: string;
   liabilityId?: string;
   // A one-off expense (e.g. furnishing): excluded from monthly averages.
   oneTime?: boolean;
@@ -150,23 +155,70 @@ export interface Liability extends Synced {
   notes?: string;
 }
 
+export type RecurringKind = 'income' | 'expense' | 'transfer';
+export type RecurringFrequency = 'weekly' | 'monthly' | 'yearly';
+
+// A scheduled income, expense or transfer. Occurrences are computed from startDate,
+// frequency × interval and dayOfMonth (store/recurring.ts); the ones on or before today that
+// have no transaction (matched by recurringRuleId + occurrenceDate) and aren't skipped are
+// "due". 'auto' rules record them automatically; 'confirm' rules wait in the due inbox.
 export interface RecurringRule extends Synced {
   id: string;
   name: string;
-  type: 'income' | 'expense';
+  kind: RecurringKind;
+  // In `currency`, which is the (source) account's currency.
   amount: number;
   currency: CurrencyCode;
   accountId: string;
-  categoryId: string;
-  frequency: 'weekly' | 'monthly' | 'yearly';
+  categoryId?: string; // income/expense
+  toAccountId?: string; // transfer
+  toAmount?: number; // transfer, in the target account's currency
+  frequency: RecurringFrequency;
+  // Every N weeks/months/years (≥ 1).
+  interval: number;
+  // Monthly/yearly: day of month (1–31), clamped to the month's last day. Defaults to
+  // startDate's day.
+  dayOfMonth?: number;
+  startDate: string;
+  endDate?: string; // inclusive
+  // Cached next upcoming occurrence on or after today that isn't handled yet ('' once the
+  // rule has ended). Recomputed by operations; for display and notifications.
   nextDate: string;
+  mode: 'auto' | 'confirm';
+  // The amount varies (e.g. electricity): it's a suggestion when confirming.
+  variableAmount: boolean;
   active: boolean;
+  skippedDates: string[];
+  note?: string;
+  createdAt: string;
 }
 
+// A budget line for one expense category. Bucket totals are derived from the lines'
+// categories, never stored. 'fixed' lines (rent, internet…) don't count as safe to spend.
+export type PlanLineKind = 'fixed' | 'flexible';
+
+export interface PlanLine {
+  categoryId: string;
+  limit: number; // plan currency
+  kind: PlanLineKind;
+}
+
+export interface PlannedContribution {
+  fundId: string;
+  amount: number; // plan currency
+}
+
+// Zero-based monthly plan: every unit of expected income gets a job (a line or a fund).
+// One plan per month; its id is derived from the month (plan-YYYY-MM) so two devices
+// planning the same month can never create duplicates.
 export interface MonthlyPlan extends Synced {
+  id: string;
   month: string; // 'YYYY-MM'
-  expectedIncomeEGP: number;
-  bucketLimitsEGP: Partial<Record<Bucket, number>>;
+  currency: CurrencyCode;
+  expectedIncome: number;
+  lines: PlanLine[];
+  fundContributions: PlannedContribution[];
+  createdAt: string;
 }
 
 export interface ExchangeRates {
@@ -196,6 +248,8 @@ export interface Settings {
   lastBackupAt?: string;
   // Require biometrics / device PIN to open the app.
   appLockEnabled?: boolean;
+  // Local reminder at 10:00 on due dates of 'confirm' recurring rules. Off by default.
+  dueNotificationsEnabled?: boolean;
   // Optional, so v2 data without it stays valid (no migration needed).
   lastUsed?: LastUsedSelection;
 }
@@ -212,7 +266,7 @@ export type SyncEntity =
   | 'monthlyPlan';
 
 // Log of deletions for a future server sync. Deleted data is really removed from its
-// collection; selectors never look at tombstones. Monthly plans use their month as id.
+// collection; selectors never look at tombstones.
 export interface Tombstone {
   entity: SyncEntity;
   id: string;

@@ -2,6 +2,7 @@ import { fromEGP, toEGP } from '@/utils/currency';
 import { monthOf, monthsUntil, shiftMonth, toMonthKey } from '@/utils/dates';
 import type {
   Account,
+  Category,
   CurrencyCode,
   ExpenseBucket,
   FinanceState,
@@ -464,13 +465,6 @@ export function monthSummary(state: State, month: string, options: MonthSummaryO
   return summary;
 }
 
-// Lifestyle limit left this month; null when the month has no plan or no lifestyle limit.
-export function safeToSpend(state: State, month: string): number | null {
-  const limit = state.monthlyPlans.find((p) => p.month === month)?.bucketLimitsEGP.lifestyle;
-  if (limit === undefined) return null;
-  return limit - monthSummary(state, month).expenseByBucket.lifestyle;
-}
-
 // Average monthly essentials (one-time expenses excluded) over the 3 full months before
 // `now`, times `months`. Only
 // months with recorded essentials count toward the average; null when none of the three
@@ -499,4 +493,16 @@ export function stateSummary(state: State) {
     netWorthEGP: Math.round(netWorthEGP(state) * 100) / 100,
     unassignedEGP: Math.round(unassignedEGP(state) * 100) / 100,
   };
+}
+
+// --- Categories -------------------------------------------------------------
+
+// Categories offered in pickers: active ones of `kind`, plus `keepIds` (e.g. the archived
+// category of a transaction being edited, so it stays selectable). Reports never filter.
+export function pickerCategories(
+  categories: Category[],
+  kind: Category['kind'],
+  keepIds: (string | undefined)[] = []
+): Category[] {
+  return categories.filter((c) => c.kind === kind && (!c.archived || keepIds.includes(c.id)));
 }

@@ -1,4 +1,4 @@
-import { useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -13,12 +13,14 @@ import { LoadingView } from '@/components/ui/LoadingView';
 import { Colors, FinanceColors } from '@/constants/theme';
 import { openBackup, parseBackup, type BackupFile, type OpenedBackup } from '@/store/backup';
 import { useFinanceStore } from '@/store/useFinanceStore';
+import { appInfo } from '@/utils/appInfo';
 import { appLockAvailability, authenticate, type LockAvailability } from '@/utils/appLock';
 import { pickBackupFile } from '@/utils/backupFiles';
 import { confirmAction, showMessage } from '@/utils/dialogs';
 import { errorMessage } from '@/utils/errorMessages';
 import { formatCurrency, formatDate } from '@/utils/formatters';
 import { newId } from '@/utils/id';
+import { enableReminders, remindersSupported } from '@/utils/notifications';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
@@ -77,6 +79,24 @@ export default function SettingsScreen() {
     if (enabled && !(await authenticate('أكد هويتك لتفعيل القفل'))) return;
     state.setAppLock(enabled);
   };
+
+  const toggleDueReminders = async (enabled: boolean) => {
+    if (enabled && !(await enableReminders())) {
+      showMessage('التنبيهات مقفولة', 'اسمح للتطبيق بالإشعارات من إعدادات الموبايل وجرب تاني');
+      return;
+    }
+    state.setDueNotifications(enabled);
+  };
+
+  const info = appInfo();
+  const versionLine = [
+    `الإصدار ${info.version}`,
+    `runtime ${info.runtimeVersion ?? '—'}`,
+    info.channel ? `القناة ${info.channel}` : null,
+    `التحديث ${info.updateId ? info.updateId.slice(0, 8) : 'المدمج في التطبيق'}`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   const lastBackupLabel = settings.lastBackupAt
     ? `آخر نسخة احتياطية: ${formatDate(settings.lastBackupAt)}`
@@ -144,6 +164,36 @@ export default function SettingsScreen() {
         <Text style={styles.saveText}>حفظ الإعدادات</Text>
       </TouchableOpacity>
 
+      {/* ── Categories ── */}
+      <Text style={styles.sectionTitle}>البنود</Text>
+      <Card>
+        <TouchableOpacity style={styles.secondaryBtn} onPress={() => router.push('/categories')} activeOpacity={0.85}>
+          <Text style={styles.secondaryText}>إدارة البنود</Text>
+        </TouchableOpacity>
+        <Text style={styles.hint}>إضافة، إعادة تسمية، نقل بين الأنواع، وأرشفة</Text>
+      </Card>
+
+      {/* ── Recurring ── */}
+      <Text style={styles.sectionTitle}>المعاملات المتكررة</Text>
+      <Card>
+        <TouchableOpacity style={styles.secondaryBtn} onPress={() => router.push('/recurring')} activeOpacity={0.85}>
+          <Text style={styles.secondaryText}>إدارة المعاملات المتكررة</Text>
+        </TouchableOpacity>
+        <View style={styles.switchRow}>
+          <Switch
+            value={!!settings.dueNotificationsEnabled}
+            onValueChange={toggleDueReminders}
+            disabled={!remindersSupported}
+          />
+          <Text style={styles.body}>تنبيهات المستحقات</Text>
+        </View>
+        <Text style={styles.hint}>
+          {remindersSupported
+            ? 'تنبيه الساعة 10 الصبح يوم استحقاق أي معاملة متكررة بتأكيد'
+            : 'التنبيهات متاحة على الموبايل بس'}
+        </Text>
+      </Card>
+
       {/* ── Backups ── */}
       <Text style={styles.sectionTitle}>النسخ الاحتياطي</Text>
       <Card>
@@ -188,6 +238,9 @@ export default function SettingsScreen() {
           <Text style={styles.importText}>{importing ? 'جاري الاستيراد…' : 'استيراد البيانات الافتتاحية'}</Text>
         </TouchableOpacity>
       </Card>
+      {/* ── Version ── */}
+      <Text style={styles.versionInfo}>{versionLine}</Text>
+
       {exportOpen && <ExportSheet onClose={() => setExportOpen(false)} />}
       {restore && (
         <RestoreSheet file={restore.file} initialOpened={restore.opened} onClose={() => setRestore(null)} />
@@ -211,6 +264,12 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     marginTop: 20,
     marginBottom: 10,
+  },
+  versionInfo: {
+    marginTop: 28,
+    fontSize: 11,
+    color: Colors.light.icon,
+    textAlign: 'center',
   },
   hint: {
     fontSize: 12,

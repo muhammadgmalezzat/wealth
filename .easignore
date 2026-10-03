@@ -1,0 +1,48 @@
+# EAS uses this file INSTEAD of .gitignore when uploading a build.
+# store/seed.local.ts is git-ignored but deliberately NOT listed here: the build must include
+# the real opening data. Never add it to this file.
+
+# dependencies (installed on the build server)
+node_modules/
+
+# Expo / build output
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+*.tsbuildinfo
+coverage/
+app-example
+
+# generated native folders (EAS runs prebuild from app.json)
+/ios
+/android
+.kotlin/
+
+# version control, editors and assistants
+.git/
+.claude/
+.qodo/
+.vscode/
+.idea/
+
+# secrets and signing material
+.env
+.env.*
+*.keystore
+*.jks
+*.p8
+*.p12
+*.key
+*.pem
+*.mobileprovision
+
+# logs and OS junk
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.metro-health-check*
+*.orig.*
+.DS_Store
+Thumbs.db

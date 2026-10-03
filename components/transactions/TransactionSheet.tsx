@@ -2,16 +2,20 @@ import { useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { Chip, ChipRow } from '@/components/ui/Chip';
+import { RuleSheet } from '@/components/recurring/RuleSheet';
 import { PastDateField } from '@/components/ui/DateFields';
 import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { Segment } from '@/components/ui/Segment';
 import { Colors, FinanceColors } from '@/constants/theme';
 import type { Category, ExpenseBucket, GoldKarat, Location, Transaction } from '@/store/types';
+import type { NewRecurringRule } from '@/store/operations';
+import { planFor, spendImpact } from '@/store/planning';
+import { pickerCategories } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { fromEGP, toEGP } from '@/utils/currency';
-import { toDateKey } from '@/utils/dates';
+import { monthOf, toDateKey } from '@/utils/dates';
 import { confirmAction, showMessage } from '@/utils/dialogs';
-import { currencySymbol } from '@/utils/formatters';
+import { currencySymbol, formatCurrency } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
@@ -57,7 +61,7 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
   const accountById = (id: string) => accounts.find((a) => a.id === id);
   const validAccount = (id: string | undefined) => (id && accountById(id) ? id : undefined);
   const validCategory = (id: string | undefined, kind: FlowType) =>
-    id && state.categories.some((c) => c.id === id && c.kind === kind) ? id : '';
+    id && state.categories.some((c) => c.id === id && c.kind === kind && !c.archived) ? id : '';
 
   const flowDefaults = (kind: FlowType) => ({
     accountId: validAccount(lastUsed[kind]?.accountId) ?? accounts[0]?.id ?? '',
@@ -109,6 +113,14 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
   const crossCurrency = isTransfer && !!fromAccount && !!toAccount && fromAccount.currency !== toAccount.currency;
 
   const amount = parseAmount(amountText);
+
+  // Live budget hint for new expenses (never blocks saving).
+  const impact =
+    !transaction && type === 'expense' && categoryId && amount !== null && flowAccount
+      ? spendImpact(state, monthOf(date), categoryId, amount, flowAccount.currency)
+      : null;
+  const impactCategory = state.categories.find((c) => c.id === categoryId)?.name;
+  const impactCurrency = planFor(state, monthOf(date))?.currency ?? 'EGP';
   const rates = state.settings.exchangeRates;
   const convertedToAmount =
     crossCurrency && amount !== null
@@ -136,6 +148,14 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
     }
   };
 
+  // A transaction recording a recurring occurrence keeps that link through edits.
+  const occurrenceLink = transaction?.recurringRuleId
+    ? {
+        recurringRuleId: transaction.recurringRuleId,
+        ...(transaction.occurrenceDate ? { occurrenceDate: transaction.occurrenceDate } : {}),
+      }
+    : {};
+
   const handleSave = () => {
     const value = amount ?? NaN; // NaN → the store reports an Arabic "invalid amount" message
     const noteField = note.trim() ? { note: note.trim() } : {};
@@ -151,6 +171,7 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
         transaction
           ? state.updateTransaction({
               ...fields,
+              ...occurrenceLink,
               type: 'transfer',
               id: transaction.id,
               createdAt: transaction.createdAt,
@@ -209,14 +230,14 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
         state.addTransaction(fields);
         return;
       }
-      // Keep links that the form doesn't edit (recurring rule, liability payment).
+      // Keep links that the form doesn't edit (recurring occurrence, liability payment).
       const links =
         transaction.type === 'income' || transaction.type === 'expense'
           ? {
-              ...(transaction.recurringRuleId ? { recurringRuleId: transaction.recurringRuleId } : {}),
+              ...occurrenceLink,
               ...(transaction.liabilityId && type === 'expense' ? { liabilityId: transaction.liabilityId } : {}),
             }
-          : {};
+          : occurrenceLink;
       state.updateTransaction({
         ...fields,
         ...links,
@@ -228,6 +249,36 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
     });
     if (saved) onClose();
   };
+
+  // "خليها متكررة": a monthly rule prefilled from the saved transaction (not yet linked to one).
+  const [ruleOpen, setRuleOpen] = useState(false);
+  const recurringPrefill: Partial<NewRecurringRule> | null =
+    !transaction || transaction.recurringRuleId || transaction.type === 'asset_purchase'
+      ? null
+      : {
+          ...(transaction.type === 'transfer'
+            ? {
+                kind: 'transfer' as const,
+                name: 'تحويل',
+                accountId: transaction.fromAccountId,
+                toAccountId: transaction.toAccountId,
+                toAmount: transaction.toAmount,
+              }
+            : {
+                kind: transaction.type,
+                name: state.categories.find((c) => c.id === transaction.categoryId)?.name ?? '',
+                accountId: transaction.accountId,
+                categoryId: transaction.categoryId,
+              }),
+          amount: transaction.amount,
+          frequency: 'monthly',
+          interval: 1,
+          dayOfMonth: Number(transaction.date.slice(8, 10)),
+          startDate: transaction.date,
+          mode: 'confirm',
+          variableAmount: false,
+          ...(transaction.note ? { note: transaction.note } : {}),
+        };
 
   const handleDelete = () => {
     if (!transaction) return;
@@ -267,7 +318,13 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
     </ChipRow>
   );
 
-  const kindCategories = state.categories.filter((c) => c.kind === type);
+  // Archived categories are hidden, except the one this transaction already uses.
+  const kindCategories =
+    type === 'income' || type === 'expense'
+      ? pickerCategories(state.categories, type, [
+          transaction?.type === 'income' || transaction?.type === 'expense' ? transaction.categoryId : undefined,
+        ])
+      : [];
   // A gold purchase can't become another type (and vice versa) once saved.
   const typeOptions: { label: string; value: TxType }[] =
     transaction?.type === 'asset_purchase'
@@ -303,6 +360,13 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
         />
         {amountCurrency && <Text style={styles.currency}>{currencySymbol(amountCurrency)}</Text>}
       </View>
+      {impact && impactCategory && (
+        <Text style={[styles.impact, impact.overBy > 0 && styles.impactOver]}>
+          {impact.overBy > 0
+            ? `هتعدّي ميزانية ${impactCategory} بـ ${formatCurrency(impact.overBy, impactCurrency)}`
+            : `هيفضل ${formatCurrency(impact.remainingAfter, impactCurrency)} في ميزانية ${impactCategory}`}
+        </Text>
+      )}
 
       {accounts.length === 0 && (
         <Text style={styles.hint}>أضف حساباً أولاً من شاشة الأصول</Text>
@@ -399,6 +463,15 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
       <FieldLabel>ملاحظة (اختياري)</FieldLabel>
       <FormInput value={note} onChangeText={setNote} placeholder="مثال: عشاء مع الأصحاب" />
 
+      {recurringPrefill && (
+        <TouchableOpacity style={styles.recurringBtn} onPress={() => setRuleOpen(true)} activeOpacity={0.8}>
+          <Text style={styles.recurringText}>خليها متكررة</Text>
+        </TouchableOpacity>
+      )}
+      {ruleOpen && recurringPrefill && transaction && (
+        <RuleSheet prefill={recurringPrefill} linkTransactionId={transaction.id} onClose={() => setRuleOpen(false)} />
+      )}
+
       {transaction && (
         <TouchableOpacity style={styles.deleteBtn} onPress={handleDelete} activeOpacity={0.8}>
           <Text style={styles.deleteText}>حذف</Text>
@@ -425,6 +498,16 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: Colors.light.icon,
   },
+  impact: {
+    marginTop: 6,
+    fontSize: 13,
+    color: FinanceColors.income,
+    textAlign: 'right',
+  },
+  impactOver: {
+    color: FinanceColors.expense,
+    fontWeight: '600',
+  },
   fixedType: {
     fontSize: 15,
     fontWeight: '700',
@@ -448,6 +531,18 @@ const styles = StyleSheet.create({
     color: Colors.light.icon,
     textAlign: 'right',
     marginTop: 6,
+  },
+  recurringBtn: {
+    marginTop: 24,
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    backgroundColor: Colors.light.tint + '15',
+  },
+  recurringText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: Colors.light.tint,
   },
   deleteBtn: {
     marginTop: 32,

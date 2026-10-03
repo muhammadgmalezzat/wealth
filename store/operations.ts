@@ -1,5 +1,7 @@
 import { fromEGP, rateToEGP, toEGP } from '@/utils/currency';
-import { addMonthsToDate, isDateKey, isMonthKey, toDateKey } from '@/utils/dates';
+import { addMonthsToDate, isDateKey, isMonthKey, shiftDate, toDateKey } from '@/utils/dates';
+import { planIdFor } from './migrations';
+import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
 import {
   FinanceValidationError,
   type FinanceEntity,
@@ -32,6 +34,7 @@ import type {
   Liability,
   Location,
   MonthlyPlan,
+  PlanLine,
   RecurringRule,
   Settings,
   SinkingFrequency,
@@ -77,7 +80,9 @@ export type NewFund = Omit<Fund, 'id' | 'createdAt' | 'updatedAt' | 'linkedHoldi
 };
 export type NewHolding = DistributiveOmit<Holding, 'id' | 'updatedAt'>;
 export type NewLiability = Omit<Liability, 'id' | 'updatedAt'>;
-export type NewRecurringRule = Omit<RecurringRule, 'id' | 'updatedAt'>;
+export type NewRecurringRule = Omit<RecurringRule, 'id' | 'updatedAt' | 'createdAt' | 'nextDate' | 'skippedDates'> & {
+  skippedDates?: string[];
+};
 
 export interface FundEdit {
   name: string;
@@ -192,29 +197,61 @@ export function deleteAccount(state: State, id: string, ctx: OpContext): Patch {
 
 // --- Categories -------------------------------------------------------------
 
-function validateCategory(category: NewCategory) {
+const sameName = (a: string, b: string) => a.trim().toLocaleLowerCase() === b.trim().toLocaleLowerCase();
+
+// Name (trimmed) required and unique among active categories; income kind ⇔ income bucket.
+function validateCategory(state: State, category: NewCategory, selfId?: string) {
   assertName(category.name, 'category');
   if ((category.kind === 'income') !== (category.bucket === 'income')) {
     fail('CATEGORY_BUCKET_MISMATCH');
   }
+  if (!category.archived && state.categories.some((c) => c.id !== selfId && !c.archived && sameName(c.name, category.name))) {
+    fail('CATEGORY_NAME_TAKEN');
+  }
+}
+
+// Whether transactions, recurring rules or plan lines reference the category (then it can only
+// be archived, not deleted).
+export function categoryInUse(state: Pick<State, 'transactions' | 'recurringRules' | 'monthlyPlans'>, id: string): boolean {
+  return (
+    state.transactions.some((tx) => isIncomeExpense(tx) && tx.categoryId === id) ||
+    state.recurringRules.some((r) => r.categoryId === id) ||
+    state.monthlyPlans.some((p) => p.lines.some((l) => l.categoryId === id))
+  );
+}
+
+function newCategory(state: State, input: NewCategory, ctx: OpContext): Category {
+  const normalized = { ...input, name: input.name?.trim() ?? '' };
+  validateCategory(state, normalized);
+  return stamp({ ...normalized, id: ctx.newId(), isDefault: false }, ctx);
 }
 
 export function addCategory(state: State, input: NewCategory, ctx: OpContext): Patch {
-  validateCategory(input);
-  return { categories: [...state.categories, stamp({ ...input, id: ctx.newId(), isDefault: false }, ctx)] };
+  return { categories: [...state.categories, newCategory(state, input, ctx)] };
 }
 
+// Rename / move to another bucket. The kind (expense vs income) and isDefault never change.
 export function updateCategory(state: State, category: Editable<Category>, ctx: OpContext): Patch {
-  validateCategory(category);
-  return { categories: replaceById(state.categories, stamp(category, ctx), 'category') };
+  const existing = requireById(state.categories, category.id, 'category');
+  if (category.kind !== existing.kind) fail('CATEGORY_KIND_LOCKED', { id: existing.id });
+  const updated = { ...category, name: category.name?.trim() ?? '', isDefault: existing.isDefault };
+  validateCategory(state, updated, existing.id);
+  return { categories: replaceById(state.categories, stamp(updated, ctx), 'category') };
 }
 
+// Archive (hide from pickers, keep history) or bring back. Restoring re-checks name uniqueness.
+export function archiveCategory(state: State, id: string, archived: boolean, ctx: OpContext): Patch {
+  const existing = requireById(state.categories, id, 'category');
+  const updated = { ...existing, archived };
+  if (!archived) validateCategory(state, updated, id);
+  return { categories: replaceById(state.categories, stamp(updated, ctx), 'category') };
+}
+
+// Real delete: only custom categories nothing refers to.
 export function deleteCategory(state: State, id: string, ctx: OpContext): Patch {
-  requireById(state.categories, id, 'category');
-  const inUse =
-    state.transactions.some((tx) => isIncomeExpense(tx) && tx.categoryId === id) ||
-    state.recurringRules.some((r) => r.categoryId === id);
-  if (inUse) fail('CATEGORY_IN_USE', { id });
+  const existing = requireById(state.categories, id, 'category');
+  if (existing.isDefault) fail('DEFAULT_CATEGORY_DELETE', { id });
+  if (categoryInUse(state, id)) fail('CATEGORY_IN_USE', { id });
   return {
     categories: state.categories.filter((c) => c.id !== id),
     tombstones: logDeletes(state, 'category', [id], ctx),
@@ -539,6 +576,11 @@ export function deleteFund(state: State, id: string, ctx: OpContext): Patch {
   return {
     funds: state.funds.filter((f) => f.id !== id),
     fundMovements: state.fundMovements.filter((m) => m.fundId !== id),
+    monthlyPlans: state.monthlyPlans.map((p) =>
+      p.fundContributions.some((c) => c.fundId === id)
+        ? stamp({ ...p, fundContributions: p.fundContributions.filter((c) => c.fundId !== id) }, ctx)
+        : p
+    ),
     tombstones: [
       ...logDeletes(state, 'fund', [id], ctx),
       ...movementIds.map((movementId) => tombstone('fundMovement', movementId, ctx)),
@@ -831,25 +873,103 @@ export function deleteLiability(state: State, id: string, ctx: OpContext): Patch
 
 // --- Recurring rules --------------------------------------------------------
 
+const FREQUENCIES: RecurringRule['frequency'][] = ['weekly', 'monthly', 'yearly'];
+
 function validateRecurringRule(state: State, rule: NewRecurringRule) {
   assertName(rule.name, 'recurringRule');
   assertPositive(rule.amount, 'amount');
-  assertDate(rule.nextDate, 'nextDate');
-  if (!['weekly', 'monthly', 'yearly'].includes(rule.frequency)) fail('INVALID_FREQUENCY');
+  if (!FREQUENCIES.includes(rule.frequency)) fail('INVALID_FREQUENCY');
+  if (!Number.isInteger(rule.interval) || rule.interval < 1) fail('NOT_POSITIVE', { field: 'interval' });
+  if (rule.dayOfMonth !== undefined && (!Number.isInteger(rule.dayOfMonth) || rule.dayOfMonth < 1 || rule.dayOfMonth > 31)) {
+    fail('NOT_A_NUMBER', { field: 'dayOfMonth' });
+  }
+  assertDate(rule.startDate, 'startDate');
+  if (rule.endDate !== undefined) {
+    assertDate(rule.endDate, 'endDate');
+    if (rule.endDate < rule.startDate) fail('INVALID_DATE', { field: 'endDate' });
+  }
+  if (rule.mode !== 'auto' && rule.mode !== 'confirm') fail('INVALID_FREQUENCY');
   const account = requireById(state.accounts, rule.accountId, 'account');
   if (rule.currency !== account.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
-  const category = requireById(state.categories, rule.categoryId, 'category');
-  if (category.kind !== rule.type) fail('CATEGORY_KIND_MISMATCH', { id: category.id });
+  if (rule.kind === 'transfer') {
+    const to = requireById(state.accounts, rule.toAccountId ?? '', 'account');
+    if (to.id === account.id) fail('SAME_ACCOUNT_TRANSFER');
+    if (to.currency !== account.currency) assertPositive(rule.toAmount ?? NaN, 'toAmount');
+  } else {
+    const category = requireById(state.categories, rule.categoryId ?? '', 'category');
+    if (category.kind !== rule.kind) fail('CATEGORY_KIND_MISMATCH', { id: category.id });
+  }
 }
 
-export function addRecurringRule(state: State, input: NewRecurringRule, ctx: OpContext): Patch {
-  validateRecurringRule(state, input);
-  return { recurringRules: [...state.recurringRules, stamp({ ...input, id: ctx.newId() }, ctx)] };
+// Drops fields that don't belong to the rule's kind (category vs target account).
+function normalizeRuleShape<T extends NewRecurringRule>(rule: T): T {
+  const { categoryId, toAccountId, toAmount, ...rest } = rule;
+  return (
+    rule.kind === 'transfer'
+      ? { ...rest, toAccountId, ...(toAmount !== undefined ? { toAmount } : {}) }
+      : { ...rest, categoryId }
+  ) as T;
+}
+
+const todayOf = (ctx: OpContext) => toDateKey(ctx.now());
+
+function withNextDate(state: State, rule: RecurringRule, ctx: OpContext): RecurringRule {
+  return { ...rule, nextDate: nextOccurrence(state, rule, todayOf(ctx)) };
+}
+
+// Creates a rule. `linkTransactionId` ("خليها متكررة") links that existing transaction as the
+// occurrence on its date — when the date is an occurrence of the rule — so it isn't due again.
+export function addRecurringRule(
+  state: State,
+  input: NewRecurringRule,
+  ctx: OpContext,
+  linkTransactionId?: string
+): Patch {
+  const normalized = normalizeRuleShape(input);
+  validateRecurringRule(state, normalized);
+  const now = ctx.now().toISOString();
+  const rule: RecurringRule = stamp(
+    { ...normalized, skippedDates: normalized.skippedDates ?? [], id: ctx.newId(), createdAt: now, nextDate: '' },
+    ctx
+  );
+  let transactions = state.transactions;
+  if (linkTransactionId) {
+    const tx = requireById(state.transactions, linkTransactionId, 'transaction');
+    if (!tx.recurringRuleId && isOccurrence(rule, tx.date)) {
+      transactions = replaceById(
+        state.transactions,
+        stamp({ ...tx, recurringRuleId: rule.id, occurrenceDate: tx.date }, ctx) as Transaction,
+        'transaction'
+      );
+    }
+  }
+  const linked = { ...state, transactions };
+  return {
+    transactions,
+    recurringRules: [...state.recurringRules, withNextDate(linked, rule, ctx)],
+  };
 }
 
 export function updateRecurringRule(state: State, rule: Editable<RecurringRule>, ctx: OpContext): Patch {
-  validateRecurringRule(state, rule);
-  return { recurringRules: replaceById(state.recurringRules, stamp(rule, ctx), 'recurringRule') };
+  const existing = requireById(state.recurringRules, rule.id, 'recurringRule');
+  const normalized = normalizeRuleShape(rule);
+  validateRecurringRule(state, normalized);
+  const updated = stamp({ ...normalized, createdAt: existing.createdAt }, ctx) as RecurringRule;
+  return { recurringRules: replaceById(state.recurringRules, withNextDate(state, updated, ctx), 'recurringRule') };
+}
+
+// Pause / resume. Resuming skips the occurrences that fell due while paused, so they don't
+// all pop up (or get auto-recorded) at once.
+export function setRecurringActive(state: State, id: string, active: boolean, ctx: OpContext): Patch {
+  const rule = requireById(state.recurringRules, id, 'recurringRule');
+  let skippedDates = rule.skippedDates;
+  if (active && !rule.active) {
+    const yesterday = shiftDate(todayOf(ctx), -1);
+    const missed = dueOccurrences({ ...state, recurringRules: [{ ...rule, active: true }] }, yesterday).map((o) => o.date);
+    skippedDates = [...rule.skippedDates, ...missed];
+  }
+  const updated = stamp({ ...rule, active, skippedDates }, ctx);
+  return { recurringRules: replaceById(state.recurringRules, withNextDate(state, updated, ctx), 'recurringRule') };
 }
 
 // Past transactions created by the rule are kept but unlinked (and so count as changed).
@@ -858,33 +978,226 @@ export function deleteRecurringRule(state: State, id: string, ctx: OpContext): P
   return {
     recurringRules: state.recurringRules.filter((r) => r.id !== id),
     transactions: state.transactions.map((tx) => {
-      if (!isIncomeExpense(tx) || tx.recurringRuleId !== id) return tx;
-      const { recurringRuleId: _removed, ...rest } = tx;
-      return stamp(rest, ctx);
+      if (tx.recurringRuleId !== id) return tx;
+      const { recurringRuleId: _rule, occurrenceDate: _date, ...rest } = tx;
+      return stamp(rest, ctx) as Transaction;
     }),
     tombstones: logDeletes(state, 'recurringRule', [id], ctx),
   };
 }
 
-// --- Monthly plans ----------------------------------------------------------
+export interface OccurrenceOverrides {
+  amount?: number;
+  date?: string;
+  accountId?: string;
+  toAmount?: number;
+  note?: string;
+}
 
-// Inserts or replaces the plan for `plan.month`.
-export function setMonthlyPlan(state: State, plan: Editable<MonthlyPlan>, ctx: OpContext): Patch {
-  if (!isMonthKey(plan.month)) fail('INVALID_MONTH');
-  assertNonNegative(plan.expectedIncomeEGP, 'expectedIncomeEGP');
-  for (const limit of Object.values(plan.bucketLimitsEGP)) {
-    assertNonNegative(limit ?? 0, 'bucketLimit');
+// The transaction recording `occurrenceDate` of `rule`, snapshotting today's rate.
+function occurrenceTransaction(
+  state: State,
+  rule: RecurringRule,
+  occurrenceDate: string,
+  overrides: OccurrenceOverrides,
+  ctx: OpContext
+): Transaction {
+  const rates = state.settings.exchangeRates;
+  const account = requireById(state.accounts, overrides.accountId ?? rule.accountId, 'account');
+  const amount = overrides.amount ?? rule.amount;
+  const note = overrides.note?.trim() || rule.note || rule.name;
+  const base = {
+    id: ctx.newId(),
+    amount,
+    date: overrides.date ?? occurrenceDate,
+    note,
+    rateToEGP: rateToEGP(account.currency, rates),
+    createdAt: ctx.now().toISOString(),
+    recurringRuleId: rule.id,
+    occurrenceDate,
+  };
+  if (rule.kind === 'transfer') {
+    const to = requireById(state.accounts, rule.toAccountId ?? '', 'account');
+    const converted = fromEGP(toEGP(amount, account.currency, rates), to.currency, rates);
+    const toAmount =
+      overrides.toAmount ??
+      (to.currency === account.currency ? amount : overrides.amount === undefined ? (rule.toAmount ?? converted) : converted);
+    const tx: TransferTransaction = stamp(
+      { ...base, type: 'transfer' as const, fromAccountId: account.id, toAccountId: to.id, toAmount },
+      ctx
+    );
+    validateTransfer(state, tx);
+    return tx;
   }
+  const tx: IncomeExpenseTransaction = stamp(
+    { ...base, type: rule.kind, currency: account.currency, accountId: account.id, categoryId: rule.categoryId ?? '' },
+    ctx
+  );
+  validateIncomeExpense(state, tx);
+  return tx;
+}
+
+// Records every due occurrence of 'auto' rules (missed ones included) and advances their
+// nextDate. Idempotent: occurrences already recorded or skipped aren't due, so a second run
+// changes nothing. A rule that can't be recorded (e.g. its account was deleted) is left
+// pending instead of blocking the others; everything else is applied in one patch.
+export function processDue(state: State, ctx: OpContext): Patch {
+  const due = dueOccurrences(state, todayOf(ctx), 'auto');
+  if (due.length === 0) return {};
+  const created: Transaction[] = [];
+  const touched = new Set<string>();
+  for (const { rule, date } of due) {
+    try {
+      created.push(occurrenceTransaction(state, rule, date, {}, ctx));
+      touched.add(rule.id);
+    } catch (error) {
+      if (!(error instanceof FinanceValidationError)) throw error;
+    }
+  }
+  if (created.length === 0) return {};
+  const transactions = [...created.reverse(), ...state.transactions];
+  const after = { ...state, transactions };
   return {
-    monthlyPlans: [...state.monthlyPlans.filter((p) => p.month !== plan.month), stamp(plan, ctx)],
+    transactions,
+    recurringRules: state.recurringRules.map((r) => (touched.has(r.id) ? stamp(withNextDate(after, r, ctx), ctx) : r)),
   };
 }
 
-export function deleteMonthlyPlan(state: State, month: string, ctx: OpContext): Patch {
-  const existed = state.monthlyPlans.some((p) => p.month === month);
+function requireDue(state: State, ruleId: string, occurrenceDate: string): RecurringRule {
+  const rule = requireById(state.recurringRules, ruleId, 'recurringRule');
+  const pending =
+    isOccurrence(rule, occurrenceDate) &&
+    !rule.skippedDates.includes(occurrenceDate) &&
+    !recordedOccurrences(state, ruleId).has(occurrenceDate);
+  if (!pending) fail('OCCURRENCE_NOT_DUE', { id: ruleId });
+  return rule;
+}
+
+// "تم": records one occurrence (amount, date, account and note may differ from the rule).
+export function confirmOccurrence(
+  state: State,
+  ruleId: string,
+  occurrenceDate: string,
+  overrides: OccurrenceOverrides,
+  ctx: OpContext
+): Patch {
+  const rule = requireDue(state, ruleId, occurrenceDate);
+  const tx = occurrenceTransaction(state, rule, occurrenceDate, overrides, ctx);
+  const transactions = [tx, ...state.transactions];
+  return {
+    transactions,
+    recurringRules: replaceById(
+      state.recurringRules,
+      stamp(withNextDate({ ...state, transactions }, rule, ctx), ctx),
+      'recurringRule'
+    ),
+  };
+}
+
+// "تخطّي": marks one occurrence as skipped.
+export function skipOccurrence(state: State, ruleId: string, occurrenceDate: string, ctx: OpContext): Patch {
+  const rule = requireDue(state, ruleId, occurrenceDate);
+  const updated = stamp({ ...rule, skippedDates: [...rule.skippedDates, occurrenceDate] }, ctx);
+  return { recurringRules: replaceById(state.recurringRules, withNextDate(state, updated, ctx), 'recurringRule') };
+}
+
+// --- Monthly plans ----------------------------------------------------------
+
+export type PlanInput = Omit<MonthlyPlan, 'id' | 'createdAt' | 'updatedAt'>;
+
+const CURRENCY_CODES: CurrencyCode[] = ['EGP', 'SAR', 'USD'];
+
+function validatePlan(state: State, plan: PlanInput) {
+  if (!isMonthKey(plan.month)) fail('INVALID_MONTH');
+  if (!CURRENCY_CODES.includes(plan.currency)) fail('CURRENCY_MISMATCH', { entity: 'monthlyPlan' });
+  assertNonNegative(plan.expectedIncome, 'expectedIncome');
+  const seenCategories = new Set<string>();
+  for (const line of plan.lines) {
+    const category = requireById(state.categories, line.categoryId, 'category');
+    if (category.kind !== 'expense') fail('CATEGORY_KIND_MISMATCH', { id: category.id });
+    if (seenCategories.has(line.categoryId)) fail('DUPLICATE_ENTRY', { entity: 'category', id: line.categoryId });
+    seenCategories.add(line.categoryId);
+    assertNonNegative(line.limit, 'planLimit');
+    if (line.kind !== 'fixed' && line.kind !== 'flexible') fail('NOT_A_NUMBER', { field: 'planLimit' });
+  }
+  const seenFunds = new Set<string>();
+  for (const contribution of plan.fundContributions) {
+    requireById(state.funds, contribution.fundId, 'fund');
+    if (seenFunds.has(contribution.fundId)) fail('DUPLICATE_ENTRY', { entity: 'fund', id: contribution.fundId });
+    seenFunds.add(contribution.fundId);
+    assertNonNegative(contribution.amount, 'amount');
+  }
+}
+
+// Creates or replaces the plan for `input.month` (one plan per month; its id derives from
+// the month). Replacing keeps the original id and createdAt.
+export function savePlan(state: State, input: PlanInput, ctx: OpContext): Patch {
+  validatePlan(state, input);
+  const existing = state.monthlyPlans.find((p) => p.month === input.month);
+  const plan: MonthlyPlan = stamp(
+    {
+      ...input,
+      id: existing?.id ?? planIdFor(input.month),
+      createdAt: existing?.createdAt ?? ctx.now().toISOString(),
+    },
+    ctx
+  );
+  return { monthlyPlans: [...state.monthlyPlans.filter((p) => p.month !== input.month), plan] };
+}
+
+export interface NewPlanLine {
+  month: string;
+  // In the saved plan's currency.
+  limit: number;
+  kind: PlanLine['kind'];
+}
+
+// "بند جديد" in the plan editor: creates an expense category and adds it as a line of the
+// month's existing plan, in one patch (nothing is saved if either step fails).
+export function addCategoryWithPlanLine(
+  state: State,
+  input: Pick<NewCategory, 'name' | 'bucket'>,
+  line: NewPlanLine,
+  ctx: OpContext
+): Patch {
+  const plan = state.monthlyPlans.find((p) => p.month === line.month);
+  if (!plan) fail('PLAN_NOT_FOUND', { id: line.month });
+  const category = newCategory(state, { name: input.name, kind: 'expense', bucket: input.bucket }, ctx);
+  const withCategory = { ...state, categories: [...state.categories, category] };
+  const { id: _id, createdAt: _c, updatedAt: _u, ...planInput } = plan;
+  const planPatch = savePlan(
+    withCategory,
+    { ...planInput, lines: [...plan.lines, { categoryId: category.id, limit: line.limit, kind: line.kind }] },
+    ctx
+  );
+  return { categories: withCategory.categories, ...planPatch };
+}
+
+// "انسخ خطة الشهر اللي فات": copies another month's plan (income, currency, lines and fund
+// contributions) into an unplanned month. Categories or funds deleted since are skipped.
+export function copyPlan(state: State, fromMonth: string, toMonth: string, ctx: OpContext): Patch {
+  const source = state.monthlyPlans.find((p) => p.month === fromMonth);
+  if (!source) fail('NOT_FOUND', { entity: 'monthlyPlan', id: fromMonth });
+  if (state.monthlyPlans.some((p) => p.month === toMonth)) fail('PLAN_EXISTS', { id: toMonth });
+  return savePlan(
+    state,
+    {
+      month: toMonth,
+      currency: source.currency,
+      expectedIncome: source.expectedIncome,
+      lines: source.lines.filter((l) => state.categories.some((c) => c.id === l.categoryId)),
+      fundContributions: source.fundContributions.filter((c) => state.funds.some((f) => f.id === c.fundId)),
+    },
+    ctx
+  );
+}
+
+export function deletePlan(state: State, month: string, ctx: OpContext): Patch {
+  const plan = state.monthlyPlans.find((p) => p.month === month);
+  if (!plan) return {};
   return {
     monthlyPlans: state.monthlyPlans.filter((p) => p.month !== month),
-    ...(existed ? { tombstones: logDeletes(state, 'monthlyPlan', [month], ctx) } : {}),
+    tombstones: logDeletes(state, 'monthlyPlan', [plan.id], ctx),
   };
 }
 
@@ -1014,6 +1327,10 @@ export function markBackedUp(state: State, at: string): Patch {
 
 export function setAppLock(state: State, enabled: boolean): Patch {
   return { settings: { ...state.settings, appLockEnabled: enabled } };
+}
+
+export function setDueNotifications(state: State, enabled: boolean): Patch {
+  return { settings: { ...state.settings, dueNotificationsEnabled: enabled } };
 }
 
 // Gives the installation its id the first time it runs.

@@ -27,8 +27,12 @@ import {
   migratePersistedState,
   migrateV2toV3,
   migrateV3toV4,
+  migrateV4toV5,
+  migrateV5toV6,
   type FinanceStateV1,
 } from '@/store/migrations';
+import * as planning from '@/store/planning';
+import * as recurring from '@/store/recurring';
 import * as ops from '@/store/operations';
 import {
   accountBalance,
@@ -48,8 +52,8 @@ import {
   netWorthByLocation,
   netWorthEGP,
   openingBalanceForCurrentBalance,
+  pickerCategories,
   planCover,
-  safeToSpend,
   sinkingMonthlySuggestion,
   stateSummary,
   suggestAllocation,
@@ -58,7 +62,7 @@ import {
   unassignedEGP,
   unassignedEGPWithFundCash,
 } from '@/store/selectors';
-import type { FinanceState, Fund } from '@/store/types';
+import type { FinanceState, Fund, RecurringRule } from '@/store/types';
 import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
 import { formatDayLabel } from '@/utils/formatters';
@@ -418,9 +422,6 @@ describe('monthSummary', () => {
     approx(summary.savingsRate, (120000 - 22300) / 120000);
     assert.equal(monthSummary(s, '2026-08').savingsRate, null);
 
-    s = apply(s, ops.setMonthlyPlan(s, { month: '2026-10', expectedIncomeEGP: 120000, bucketLimitsEGP: { lifestyle: 5000 } }, makeCtx()));
-    approx(safeToSpend(s, '2026-10'), 5000 - 1300);
-    assert.equal(safeToSpend(s, '2026-11'), null);
   });
 
   it('suggestedEmergencyTarget averages essentials over the last 3 full months', () => {
@@ -1286,7 +1287,7 @@ describe('sync bookkeeping', () => {
     assert.equal(s.transactions[0].updatedAt, iso());
 
     advance();
-    s = apply(s, ops.setMonthlyPlan(s, { month: '2026-10', expectedIncomeEGP: 1, bucketLimitsEGP: {} }, ctx));
+    s = apply(s, ops.savePlan(s, { month: '2026-10', currency: 'SAR', expectedIncome: 1, lines: [], fundContributions: [] }, ctx));
     assert.equal(s.monthlyPlans[0].updatedAt, iso());
 
     advance();
@@ -1324,12 +1325,12 @@ describe('sync bookkeeping', () => {
       [['holding', holdingId], ['transaction', purchase.id]].sort()
     );
 
-    // Monthly plans are keyed by month.
-    s = apply(s, ops.setMonthlyPlan(s, { month: '2026-11', expectedIncomeEGP: 0, bucketLimitsEGP: {} }, ctx));
-    s = apply(s, ops.deleteMonthlyPlan(s, '2026-11', ctx));
-    assert.deepEqual(s.tombstones.at(-1), { entity: 'monthlyPlan', id: '2026-11', deletedAt: iso() });
+    // Monthly plans have month-derived ids.
+    s = apply(s, ops.savePlan(s, { month: '2026-11', currency: 'SAR', expectedIncome: 0, lines: [], fundContributions: [] }, ctx));
+    s = apply(s, ops.deletePlan(s, '2026-11', ctx));
+    assert.deepEqual(s.tombstones.at(-1), { entity: 'monthlyPlan', id: 'plan-2026-11', deletedAt: iso() });
     // Deleting a month without a plan logs nothing.
-    assert.equal(ops.deleteMonthlyPlan(s, '2030-01', ctx).tombstones, undefined);
+    assert.equal(ops.deletePlan(s, '2030-01', ctx).tombstones, undefined);
 
     // Selectors ignore the log: data is really gone.
     assert.equal(s.funds.length, 0);
@@ -1549,5 +1550,680 @@ describe('restoring a backup', () => {
     const fresh = { ...emptyState(), settings: { ...emptyState().settings, deviceId: '' } };
     assert.equal(apply(fresh, ops.ensureDeviceId(fresh, ctx)).settings.deviceId, 'c-1');
     assert.deepEqual(ops.ensureDeviceId(emptyState(), ctx), {});
+  });
+});
+
+// --- v5: monthly plan & safe to spend ---------------------------------------
+
+const {
+  amountInCurrency,
+  daysLeftInMonth,
+  overspentLines,
+  planProgress,
+  planSuggestion,
+  previousPlanMonth,
+  safeToSpend,
+  safeToSpendToday,
+  spendImpact,
+  unplannedAmount,
+} = planning;
+
+// Tracking from Aug 5 (SAR 12.5). Aug and Sep have history; October is the plan month.
+function planningState(): FinanceState {
+  const ctx = makeCtx();
+  let s: FinanceState = {
+    ...emptyState(),
+    accounts: [account('sar', 'SAR', 10000, 'SA'), account('egp', 'EGP', 50000)],
+    funds: [fund({ id: 'F', targetAmount: 3000, deadline: '2026-12-31' })], // 1,000 EGP/month from Oct
+  };
+  s.settings = { ...s.settings, trackingStartDate: '2026-08-05' };
+  const add = (type: 'income' | 'expense', categoryId: string, amount: number, currency: 'SAR' | 'EGP', date: string, extra: Partial<ops.NewIncomeExpense> = {}) => {
+    const accountId = currency === 'SAR' ? 'sar' : 'egp';
+    s = apply(s, ops.addTransaction(s, { type, amount, currency, accountId, categoryId, date, ...extra } as ops.NewIncomeExpense, ctx));
+  };
+  // Before tracking started: ignored.
+  add('expense', 'cat-lifestyle-dining', 999, 'SAR', '2026-08-02');
+  // August (27 of 31 days tracked)
+  add('income', 'cat-income-salary', 2700, 'SAR', '2026-08-10');
+  add('expense', 'cat-essentials-rent', 700, 'SAR', '2026-08-06');
+  add('expense', 'cat-essentials-telecom', 120, 'SAR', '2026-08-06');
+  add('expense', 'cat-lifestyle-dining', 270, 'SAR', '2026-08-10');
+  add('expense', 'cat-essentials-home-setup', 500, 'SAR', '2026-08-07', { oneTime: true });
+  add('expense', 'cat-essentials-groceries', 1250, 'EGP', '2026-08-20'); // = 100 SAR
+  // September
+  add('income', 'cat-income-salary', 3800, 'SAR', '2026-09-01');
+  add('expense', 'cat-essentials-rent', 700, 'SAR', '2026-09-05');
+  add('expense', 'cat-lifestyle-dining', 400, 'SAR', '2026-09-20');
+  add('expense', 'cat-essentials-groceries', 2500, 'EGP', '2026-09-28'); // = 200 SAR
+  // Buying gold is not spending.
+  s = apply(s, ops.buyGold(s, { accountId: 'egp', amount: 6000, date: '2026-09-15', holding: { name: 'gold', weightGrams: 1, karat: 24 } }, ctx));
+  return s;
+}
+
+describe('plan suggestion', () => {
+  it('averages recent spending, scaling the partial first month and skipping one-time spend', () => {
+    const suggestion = planSuggestion(planningState(), '2026-10', 'SAR', NOW);
+    const trackedMonths = 27 / 31 + 1;
+    const line = (id: string) => suggestion.lines.find((l) => l.categoryId === id);
+
+    // Fixed bills: plain monthly average (unscaled).
+    assert.deepEqual(line('cat-essentials-rent'), { categoryId: 'cat-essentials-rent', limit: 700, kind: 'fixed' });
+    assert.deepEqual(line('cat-essentials-telecom'), { categoryId: 'cat-essentials-telecom', limit: 60, kind: 'fixed' });
+    // Flexible: total ÷ months tracked. Dining excludes the pre-tracking 999.
+    assert.deepEqual(line('cat-lifestyle-dining'), {
+      categoryId: 'cat-lifestyle-dining',
+      limit: Math.round((270 + 400) / trackedMonths),
+      kind: 'flexible',
+    });
+    // EGP spending converted into the SAR plan.
+    assert.equal(line('cat-essentials-groceries')?.limit, Math.round((100 + 200) / trackedMonths));
+    // One-time and asset purchases are excluded.
+    assert.equal(line('cat-essentials-home-setup'), undefined);
+    assert.equal(suggestion.expectedIncome, (2700 + 3800) / 2);
+    // Fund prefilled from its suggested monthly amount (1,000 EGP → 80 SAR).
+    assert.deepEqual(suggestion.fundContributions, [{ fundId: 'F', amount: 80 }]);
+    assert.equal(suggestion.currency, 'SAR');
+  });
+
+  it('suggests nothing without history', () => {
+    const s = planningState();
+    const early = planSuggestion(s, '2026-08', 'SAR', NOW);
+    assert.deepEqual(early.lines, []);
+    assert.equal(early.expectedIncome, 0);
+  });
+});
+
+describe('plan currency conversion', () => {
+  it('uses each transaction’s snapshot to EGP, then today’s rate into the plan currency', () => {
+    const s = planningState(); // current SAR rate 12.5
+    approx(amountInCurrency(s, { amount: 1250, rateToEGP: 1 }, 'SAR'), 100);
+    // A SAR expense recorded at 13: 100 SAR → 1,300 EGP → 104 SAR at today's 12.5.
+    approx(amountInCurrency(s, { amount: 100, rateToEGP: 13 }, 'SAR'), 104);
+    approx(amountInCurrency(s, { amount: 100, rateToEGP: 13 }, 'EGP'), 1300);
+  });
+});
+
+describe('plan progress & safe to spend', () => {
+  const OCTOBER: ops.PlanInput = {
+    month: '2026-10',
+    currency: 'SAR',
+    expectedIncome: 3250,
+    lines: [
+      { categoryId: 'cat-essentials-rent', limit: 700, kind: 'fixed' },
+      { categoryId: 'cat-essentials-groceries', limit: 200, kind: 'flexible' },
+      { categoryId: 'cat-lifestyle-dining', limit: 400, kind: 'flexible' },
+    ],
+    fundContributions: [{ fundId: 'F', amount: 80 }],
+  };
+  const october = () => {
+    const ctx = makeCtx();
+    let s = planningState();
+    s = apply(s, ops.savePlan(s, OCTOBER, ctx));
+    const add = (categoryId: string, amount: number, currency: 'SAR' | 'EGP') => {
+      s = apply(s, ops.addTransaction(s, { type: 'expense', amount, currency, accountId: currency === 'SAR' ? 'sar' : 'egp', categoryId, date: '2026-10-05' }, ctx));
+    };
+    add('cat-essentials-rent', 700, 'SAR');
+    add('cat-lifestyle-dining', 450, 'SAR'); // 50 over
+    add('cat-essentials-groceries', 1250, 'EGP'); // 100 SAR
+    add('cat-lifestyle-clothing', 60, 'SAR'); // no line
+    s = apply(s, ops.allocateToFund(s, 'F', 500, undefined, ctx)); // 40 SAR, dated Oct 15
+    return s;
+  };
+
+  it('reports each line, bucket totals and the whole month', () => {
+    const p = planProgress(october(), '2026-10')!;
+    const line = (id: string) => p.lines.find((l) => l.categoryId === id)!;
+    assert.deepEqual(
+      [line('cat-essentials-rent').spent, line('cat-essentials-rent').remaining, line('cat-essentials-rent').pct],
+      [700, 0, 1]
+    );
+    approx(line('cat-lifestyle-dining').remaining, -50);
+    approx(line('cat-lifestyle-dining').pct, 450 / 400);
+    approx(line('cat-essentials-groceries').spent, 100);
+    assert.deepEqual(p.buckets.essentials, { planned: 900, spent: 800 });
+    assert.deepEqual(p.buckets.lifestyle, { planned: 400, spent: 450 });
+    assert.equal(p.totalPlanned, 1300);
+    approx(p.totalSpent, 1310);
+    approx(p.unplannedSpent, 60);
+    assert.equal(p.unplanned, 3250 - 1300 - 80);
+    assert.equal(p.contributions[0].planned, 80);
+    approx(p.contributions[0].allocated, 40);
+  });
+
+  it('safe to spend counts flexible lines only and never a negative line', () => {
+    const s = october();
+    // groceries 100 left + dining max(0, −50); rent (fixed) excluded.
+    approx(safeToSpend(s, '2026-10'), 100);
+    // 15 Oct → 17 days left including today.
+    assert.equal(daysLeftInMonth('2026-10', NOW), 17);
+    approx(safeToSpendToday(s, '2026-10', NOW), 100 / 17);
+    assert.equal(safeToSpend(s, '2026-11'), null);
+    assert.equal(daysLeftInMonth('2026-09', NOW), 0);
+    assert.equal(daysLeftInMonth('2026-11', NOW), 30);
+    assert.deepEqual(overspentLines(s, '2026-10').map((l) => l.categoryId), ['cat-lifestyle-dining']);
+  });
+
+  it('unplanned is zero-based', () => {
+    assert.equal(unplannedAmount({ expectedIncome: 1000, lines: [{ categoryId: 'x', limit: 600, kind: 'fixed' }], fundContributions: [{ fundId: 'f', amount: 400 }] }), 0);
+    assert.equal(unplannedAmount({ expectedIncome: 1000, lines: [], fundContributions: [{ fundId: 'f', amount: 1200 }] }), -200);
+  });
+
+  it('spendImpact shows what a new expense leaves, or how far over it goes', () => {
+    const s = october();
+    const under = spendImpact(s, '2026-10', 'cat-essentials-groceries', 50)!;
+    approx(under.remainingAfter, 50);
+    assert.equal(under.overBy, 0);
+    // 1,875 EGP = 150 SAR → 50 over.
+    const over = spendImpact(s, '2026-10', 'cat-essentials-groceries', 1875, 'EGP')!;
+    approx(over.remainingAfter, -50);
+    approx(over.overBy, 50);
+    assert.equal(spendImpact(s, '2026-10', 'cat-giving-gifts', 10), null); // no line
+    assert.equal(spendImpact(s, '2026-11', 'cat-essentials-groceries', 10), null); // no plan
+  });
+});
+
+describe('plan operations', () => {
+  const base = (): ops.PlanInput => ({
+    month: '2026-10',
+    currency: 'SAR',
+    expectedIncome: 3000,
+    lines: [{ categoryId: 'cat-essentials-rent', limit: 700, kind: 'fixed' }],
+    fundContributions: [{ fundId: 'F', amount: 80 }],
+  });
+
+  it('copies the previous month’s plan into an unplanned month', () => {
+    const clock = makeClock();
+    let s = planningState();
+    s = apply(s, ops.savePlan(s, base(), clock.ctx));
+    s = apply(s, ops.copyPlan(s, '2026-10', '2026-11', clock.ctx));
+    const nov = s.monthlyPlans.find((p) => p.month === '2026-11')!;
+    assert.equal(nov.id, 'plan-2026-11');
+    assert.deepEqual(
+      { currency: nov.currency, expectedIncome: nov.expectedIncome, lines: nov.lines, fundContributions: nov.fundContributions },
+      { currency: 'SAR', expectedIncome: 3000, lines: base().lines, fundContributions: base().fundContributions }
+    );
+    assert.equal(previousPlanMonth(s, '2026-12'), '2026-11');
+    assert.throws(() => ops.copyPlan(s, '2026-10', '2026-11', clock.ctx), { code: 'PLAN_EXISTS' });
+    assert.throws(() => ops.copyPlan(s, '2025-01', '2026-12', clock.ctx), { code: 'NOT_FOUND' });
+  });
+
+  it('re-saving keeps id and createdAt, bumps updatedAt', () => {
+    const clock = makeClock();
+    let s = planningState();
+    s = apply(s, ops.savePlan(s, base(), clock.ctx));
+    const first = s.monthlyPlans[0];
+    clock.advance(10);
+    s = apply(s, ops.savePlan(s, { ...base(), expectedIncome: 3500 }, clock.ctx));
+    assert.equal(s.monthlyPlans.length, 1);
+    assert.equal(s.monthlyPlans[0].id, first.id);
+    assert.equal(s.monthlyPlans[0].createdAt, first.createdAt);
+    assert.equal(s.monthlyPlans[0].updatedAt, clock.iso());
+  });
+
+  it('validates lines and contributions', () => {
+    const s = planningState();
+    const ctx = makeCtx();
+    const rent = base().lines[0];
+    assert.throws(() => ops.savePlan(s, { ...base(), lines: [rent, rent] }, ctx), { code: 'DUPLICATE_ENTRY' });
+    assert.throws(() => ops.savePlan(s, { ...base(), lines: [{ ...rent, categoryId: 'cat-income-salary' }] }, ctx), { code: 'CATEGORY_KIND_MISMATCH' });
+    assert.throws(() => ops.savePlan(s, { ...base(), lines: [{ ...rent, limit: -1 }] }, ctx), { code: 'NEGATIVE' });
+    assert.throws(() => ops.savePlan(s, { ...base(), fundContributions: [{ fundId: 'nope', amount: 1 }] }, ctx), { code: 'NOT_FOUND' });
+    assert.throws(() => ops.savePlan(s, { ...base(), month: '2026-13' }, ctx), { code: 'INVALID_MONTH' });
+  });
+
+  it('keeps plans consistent when categories or funds are deleted', () => {
+    const ctx = makeCtx();
+    let s = planningState();
+    s = apply(s, ops.addCategory(s, { name: 'Gifts 2', kind: 'expense', bucket: 'giving' }, ctx));
+    const giftsId = s.categories[s.categories.length - 1].id;
+    s = apply(s, ops.savePlan(s, { ...base(), lines: [{ categoryId: giftsId, limit: 50, kind: 'flexible' }] }, ctx));
+    assert.throws(() => ops.deleteCategory(s, giftsId, ctx), { code: 'CATEGORY_IN_USE' });
+    s = apply(s, ops.deleteFund(s, 'F', ctx));
+    assert.deepEqual(s.monthlyPlans[0].fundContributions, []);
+  });
+});
+
+describe('migration v4 → v5', () => {
+  const v4 = () => ({
+    ...emptyState(),
+    monthlyPlans: [{ month: '2026-09', expectedIncomeEGP: 5000, bucketLimitsEGP: { lifestyle: 100 }, updatedAt: T0 }],
+    tombstones: [{ entity: 'monthlyPlan' as const, id: '2026-08', deletedAt: T0 }],
+  });
+
+  it('converts legacy plans and re-keys their tombstones', () => {
+    const migrated = migrateV4toV5(v4(), MIGRATION_CTX);
+    assert.deepEqual(migrated.monthlyPlans, [
+      {
+        id: 'plan-2026-09',
+        month: '2026-09',
+        currency: 'EGP',
+        expectedIncome: 5000,
+        lines: [],
+        fundContributions: [],
+        createdAt: T0,
+        updatedAt: T0,
+      },
+    ]);
+    assert.deepEqual(migrated.tombstones, [{ entity: 'monthlyPlan', id: 'plan-2026-08', deletedAt: T0 }]);
+  });
+
+  it('is idempotent', () => {
+    const once = migrateV4toV5(v4(), MIGRATION_CTX);
+    assert.deepEqual(migrateV4toV5(once, { now: '2031-01-01T00:00:00.000Z', newId: () => 'x' }), once);
+  });
+
+  it('runs as part of the chain', () => {
+    const { state } = migratePersistedState(v4(), 4, MIGRATION_CTX);
+    assert.equal(state.monthlyPlans[0].id, 'plan-2026-09');
+    assert.equal(state.monthlyPlans[0].currency, 'EGP');
+  });
+});
+
+// --- Recurring (v6) -----------------------------------------------------------
+
+const rule = (overrides: Partial<RecurringRule> & Pick<RecurringRule, 'id'>): RecurringRule => ({
+  name: overrides.id,
+  kind: 'expense',
+  amount: 1000,
+  currency: 'EGP',
+  accountId: 'egp',
+  categoryId: 'cat-essentials-rent',
+  frequency: 'monthly',
+  interval: 1,
+  startDate: '2026-08-05',
+  nextDate: '',
+  mode: 'confirm',
+  variableAmount: false,
+  active: true,
+  skippedDates: [],
+  createdAt: T0,
+  updatedAt: T0,
+  ...overrides,
+});
+
+const recurringState = (...rules: RecurringRule[]): FinanceState => ({
+  ...emptyState(),
+  accounts: [account('egp', 'EGP', 100000), account('sar', 'SAR', 10000, 'SA')],
+  recurringRules: rules,
+});
+
+describe('recurring schedule', () => {
+  it('clamps day 31 to the end of short months', () => {
+    const r = rule({ id: 'r', startDate: '2026-01-31', dayOfMonth: 31 });
+    assert.deepEqual(recurring.occurrencesBetween(r, '2026-01-01', '2026-05-31'), [
+      '2026-01-31',
+      '2026-02-28',
+      '2026-03-31',
+      '2026-04-30',
+      '2026-05-31',
+    ]);
+    // Leap-year February.
+    assert.equal(recurring.occurrenceAt({ ...r, startDate: '2028-01-31' }, 1), '2028-02-29');
+  });
+
+  it('honours the interval', () => {
+    const r = rule({ id: 'r', startDate: '2026-01-10', dayOfMonth: 10, interval: 3 });
+    assert.deepEqual(recurring.occurrencesBetween(r, '2026-01-01', '2026-12-31'), [
+      '2026-01-10',
+      '2026-04-10',
+      '2026-07-10',
+      '2026-10-10',
+    ]);
+  });
+
+  it('repeats yearly, clamping 29 Feb', () => {
+    const r = rule({ id: 'r', frequency: 'yearly', startDate: '2028-02-29', dayOfMonth: 29 });
+    assert.deepEqual(recurring.occurrencesBetween(r, '2028-01-01', '2030-12-31'), [
+      '2028-02-29',
+      '2029-02-28',
+      '2030-02-28',
+    ]);
+  });
+
+  it('repeats weekly (and every 2 weeks)', () => {
+    const r = rule({ id: 'r', frequency: 'weekly', startDate: '2026-10-01' });
+    assert.deepEqual(recurring.occurrencesBetween(r, '2026-10-01', '2026-10-22'), [
+      '2026-10-01',
+      '2026-10-08',
+      '2026-10-15',
+      '2026-10-22',
+    ]);
+    assert.deepEqual(recurring.occurrencesBetween({ ...r, interval: 2 }, '2026-10-01', '2026-10-31'), [
+      '2026-10-01',
+      '2026-10-15',
+      '2026-10-29',
+    ]);
+  });
+
+  it('stops after endDate (inclusive)', () => {
+    const r = rule({ id: 'r', dayOfMonth: 5, endDate: '2026-10-05' });
+    assert.deepEqual(recurring.occurrencesBetween(r, '2026-01-01', '2027-12-31'), [
+      '2026-08-05',
+      '2026-09-05',
+      '2026-10-05',
+    ]);
+    assert.equal(recurring.nextOccurrence(recurringState(r), r, '2026-10-06'), '');
+  });
+});
+
+describe('recurring processing', () => {
+  it('processDue records missed auto occurrences, advances nextDate, and is idempotent', () => {
+    const ctx = makeCtx();
+    let s = recurringState(rule({ id: 'rent', mode: 'auto', dayOfMonth: 5 }));
+    s = apply(s, ops.processDue(s, ctx));
+    const recorded = s.transactions.filter((t) => t.recurringRuleId === 'rent');
+    assert.deepEqual(recorded.map((t) => t.occurrenceDate).sort(), ['2026-08-05', '2026-09-05', '2026-10-05']);
+    assert.equal(s.recurringRules[0].nextDate, '2026-11-05');
+    assert.deepEqual(ops.processDue(s, ctx), {});
+    assert.equal(accountBalance(s, 'egp'), 100000 - 3000);
+  });
+
+  it('processDue ignores confirm rules and skipped dates', () => {
+    const ctx = makeCtx();
+    let s = recurringState(
+      rule({ id: 'auto', mode: 'auto', dayOfMonth: 5, skippedDates: ['2026-09-05'] }),
+      rule({ id: 'confirm', mode: 'confirm', dayOfMonth: 5 })
+    );
+    s = apply(s, ops.processDue(s, ctx));
+    assert.deepEqual(s.transactions.map((t) => t.occurrenceDate).sort(), ['2026-08-05', '2026-10-05']);
+    assert.ok(s.transactions.every((t) => t.recurringRuleId === 'auto'));
+  });
+
+  it('snapshots the current rate on foreign-currency occurrences', () => {
+    const ctx = makeCtx();
+    let s = recurringState(rule({ id: 'r', mode: 'auto', currency: 'SAR', accountId: 'sar', startDate: '2026-10-05' }));
+    s = apply(s, ops.processDue(s, ctx));
+    assert.equal(s.transactions[0].rateToEGP, 12.5);
+  });
+
+  it('skips paused and ended rules', () => {
+    const s = recurringState(
+      rule({ id: 'paused', mode: 'auto', active: false }),
+      rule({ id: 'ended', mode: 'auto', startDate: '2026-01-05', endDate: '2026-02-01' })
+    );
+    const due = recurring.dueOccurrences(s, '2026-10-15');
+    assert.deepEqual(
+      due.map((o) => `${o.rule.id}:${o.date}`),
+      ['ended:2026-01-05']
+    );
+    assert.deepEqual(recurring.upcoming(s, 30, '2026-10-15').items, []);
+  });
+
+  it('lists missed confirm occurrences oldest first; confirm and skip handle them', () => {
+    const ctx = makeCtx();
+    let s = recurringState(rule({ id: 'net', dayOfMonth: 5, variableAmount: true }));
+    const due = recurring.dueOccurrences(s, '2026-10-15', 'confirm');
+    assert.deepEqual(
+      due.map((o) => o.date),
+      ['2026-08-05', '2026-09-05', '2026-10-05']
+    );
+
+    s = apply(s, ops.confirmOccurrence(s, 'net', '2026-08-05', { amount: 1234, date: '2026-08-07' }, ctx));
+    const tx = s.transactions[0];
+    assert.equal(tx.amount, 1234);
+    assert.equal(tx.date, '2026-08-07');
+    assert.equal(tx.occurrenceDate, '2026-08-05');
+    s = apply(s, ops.skipOccurrence(s, 'net', '2026-09-05', ctx));
+    assert.deepEqual(s.recurringRules[0].skippedDates, ['2026-09-05']);
+    assert.deepEqual(
+      recurring.dueOccurrences(s, '2026-10-15').map((o) => o.date),
+      ['2026-10-05']
+    );
+
+    // Handling the same occurrence twice is rejected.
+    assert.throws(() => ops.confirmOccurrence(s, 'net', '2026-08-05', {}, ctx), FinanceValidationError);
+    assert.throws(() => ops.skipOccurrence(s, 'net', '2026-09-05', ctx), FinanceValidationError);
+  });
+
+  it('resuming a paused rule skips what fell due while paused', () => {
+    const ctx = makeCtx();
+    let s = recurringState(rule({ id: 'r', mode: 'auto', active: false, dayOfMonth: 5 }));
+    s = apply(s, ops.setRecurringActive(s, 'r', true, ctx));
+    assert.deepEqual(s.recurringRules[0].skippedDates, ['2026-08-05', '2026-09-05', '2026-10-05']);
+    assert.deepEqual(ops.processDue(s, ctx), {});
+    assert.equal(s.recurringRules[0].nextDate, '2026-11-05');
+  });
+
+  it('creating a rule from a transaction links it so it is not due again', () => {
+    const ctx = makeCtx();
+    let s = recurringState();
+    s = apply(
+      s,
+      ops.addTransaction(
+        s,
+        { type: 'expense', amount: 500, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-10-03' },
+        ctx
+      )
+    );
+    const txId = s.transactions[0].id;
+    const { id: _id, updatedAt: _u, createdAt: _c, nextDate: _n, skippedDates: _s, ...input } = rule({
+      id: 'x',
+      amount: 500,
+      startDate: '2026-10-03',
+      dayOfMonth: 3,
+    });
+    s = apply(s, ops.addRecurringRule(s, input, ctx, txId));
+    const ruleId = s.recurringRules[0].id;
+    assert.equal(s.transactions[0].recurringRuleId, ruleId);
+    assert.equal(s.transactions[0].occurrenceDate, '2026-10-03');
+    assert.deepEqual(recurring.dueOccurrences(s, '2026-10-15'), []);
+    assert.equal(s.recurringRules[0].nextDate, '2026-11-03');
+  });
+
+  it('deleting a rule keeps its past transactions, unlinked, and leaves a tombstone', () => {
+    const ctx = makeCtx();
+    let s = recurringState(rule({ id: 'rent', mode: 'auto', dayOfMonth: 5 }));
+    s = apply(s, ops.processDue(s, ctx));
+    s = apply(s, ops.deleteRecurringRule(s, 'rent', ctx));
+    assert.equal(s.recurringRules.length, 0);
+    assert.equal(s.transactions.length, 3);
+    assert.ok(s.transactions.every((t) => t.recurringRuleId === undefined && t.occurrenceDate === undefined));
+    assert.equal(accountBalance(s, 'egp'), 100000 - 3000);
+    assert.ok(s.tombstones.some((t) => t.entity === 'recurringRule' && t.id === 'rent'));
+  });
+});
+
+describe('recurring in the plan', () => {
+  it('monthly equivalent of weekly, yearly and every-N rules', () => {
+    approx(recurring.monthlyEquivalent({ amount: 120, frequency: 'weekly', interval: 1 }), 520);
+    approx(recurring.monthlyEquivalent({ amount: 1200, frequency: 'yearly', interval: 1 }), 100);
+    approx(recurring.monthlyEquivalent({ amount: 300, frequency: 'monthly', interval: 3 }), 100);
+  });
+
+  it('expense rules become fixed lines and income rules set expected income, converted SAR/EGP', () => {
+    const s = recurringState(
+      rule({ id: 'rent', amount: 12500, currency: 'EGP', categoryId: 'cat-essentials-rent' }),
+      rule({ id: 'salary', kind: 'income', amount: 10000, currency: 'SAR', accountId: 'sar', categoryId: undefined })
+    );
+    const plan = planning.planSuggestion(s, '2026-11', 'SAR', NOW);
+    assert.equal(plan.expectedIncome, 10000);
+    assert.deepEqual(
+      plan.lines.find((l) => l.categoryId === 'cat-essentials-rent'),
+      { categoryId: 'cat-essentials-rent', limit: 1000, kind: 'fixed' }
+    );
+    approx(planning.recurringMonthly(s, 'EGP', NOW).income, 125000);
+  });
+
+  it('upcoming totals per currency', () => {
+    const s = recurringState(
+      rule({ id: 'rent', startDate: '2026-10-20' }),
+      rule({ id: 'salary', kind: 'income', amount: 9000, currency: 'SAR', accountId: 'sar', startDate: '2026-10-27' })
+    );
+    const next = recurring.upcoming(s, 30, '2026-10-15');
+    assert.equal(next.items.length, 2);
+    assert.equal(next.expense.EGP, 1000);
+    assert.equal(next.income.SAR, 9000);
+  });
+});
+
+describe('migration v5 → v6', () => {
+  const v5 = () => ({
+    ...emptyState(),
+    recurringRules: [
+      {
+        id: 'old',
+        name: 'rent',
+        type: 'expense' as const,
+        amount: 1000,
+        currency: 'EGP' as const,
+        accountId: 'egp',
+        categoryId: 'cat-essentials-rent',
+        frequency: 'monthly' as const,
+        nextDate: '2026-11-05',
+        active: true,
+        updatedAt: T0,
+      },
+    ],
+  });
+
+  it('converts legacy rules to confirm mode, interval 1', () => {
+    const [r] = migrateV5toV6(v5(), MIGRATION_CTX).recurringRules;
+    assert.equal(r.kind, 'expense');
+    assert.equal(r.mode, 'confirm');
+    assert.equal(r.interval, 1);
+    assert.equal(r.dayOfMonth, 5);
+    assert.equal(r.startDate, '2026-11-05');
+    assert.deepEqual(r.skippedDates, []);
+    assert.equal(r.createdAt, T0);
+  });
+
+  it('is idempotent and runs in the chain', () => {
+    const once = migrateV5toV6(v5(), MIGRATION_CTX);
+    assert.deepEqual(migrateV5toV6(once, { now: '2031-01-01T00:00:00.000Z', newId: () => 'x' }), once);
+    assert.equal(CURRENT_VERSION, 6);
+    const { state } = migratePersistedState(v5(), 5, MIGRATION_CTX);
+    assert.equal(state.recurringRules[0].mode, 'confirm');
+  });
+});
+
+// --- Category management -------------------------------------------------------
+
+describe('category management', () => {
+  const custom = (s: FinanceState, name: string, ctx: ops.OpContext, bucket: 'essentials' | 'lifestyle' | 'giving' = 'lifestyle') => {
+    const next = apply(s, ops.addCategory(s, { name, kind: 'expense', bucket }, ctx));
+    return { s: next, id: next.categories[next.categories.length - 1].id };
+  };
+
+  it('rejects duplicate names among active categories (trimmed, any case)', () => {
+    const ctx = makeCtx();
+    const { s, id } = custom(planningState(), '  Gym ', ctx);
+    assert.equal(s.categories.find((c) => c.id === id)?.name, 'Gym');
+    assert.equal(s.categories.find((c) => c.id === id)?.isDefault, false);
+    assert.throws(() => ops.addCategory(s, { name: 'gym', kind: 'expense', bucket: 'giving' }, ctx), { code: 'CATEGORY_NAME_TAKEN' });
+    const rent = s.categories.find((c) => c.id === 'cat-essentials-rent')!;
+    assert.throws(() => ops.addCategory(s, { name: rent.name, kind: 'income', bucket: 'income' }, ctx), { code: 'CATEGORY_NAME_TAKEN' });
+    assert.throws(() => ops.updateCategory(s, { ...rent, name: 'Gym' }, ctx), { code: 'CATEGORY_NAME_TAKEN' });
+    assert.throws(() => ops.addCategory(s, { name: '   ', kind: 'expense', bucket: 'giving' }, ctx), { code: 'NAME_REQUIRED' });
+    // Renaming to its own name is fine; an archived category's name is free again.
+    ops.updateCategory(s, { ...s.categories.find((c) => c.id === id)!, name: 'GYM' }, ctx);
+    const archived = apply(s, ops.archiveCategory(s, id, true, ctx));
+    const again = apply(archived, ops.addCategory(archived, { name: 'Gym', kind: 'expense', bucket: 'lifestyle' }, ctx));
+    // …but restoring the archived one now clashes.
+    assert.throws(() => ops.archiveCategory(again, id, false, ctx), { code: 'CATEGORY_NAME_TAKEN' });
+  });
+
+  it('locks the kind and the default flag on update', () => {
+    const ctx = makeCtx();
+    const s = planningState();
+    const rent = s.categories.find((c) => c.id === 'cat-essentials-rent')!;
+    assert.throws(() => ops.updateCategory(s, { ...rent, kind: 'income', bucket: 'income' }, ctx), { code: 'CATEGORY_KIND_LOCKED' });
+    const moved = apply(s, ops.updateCategory(s, { ...rent, name: 'Rent', bucket: 'lifestyle', isDefault: false }, ctx));
+    const after = moved.categories.find((c) => c.id === rent.id)!;
+    assert.equal(after.bucket, 'lifestyle');
+    assert.equal(after.isDefault, true);
+    assert.equal(after.updatedAt, NOW.toISOString());
+  });
+
+  it('deletes only unused custom categories; used or default ones are archived instead', () => {
+    const ctx = makeCtx();
+    let { s, id } = custom(planningState(), 'Gym', ctx);
+    // Unused custom → real delete with a tombstone.
+    const deleted = apply(s, ops.deleteCategory(s, id, ctx));
+    assert.ok(!deleted.categories.some((c) => c.id === id));
+    assert.ok(deleted.tombstones.some((t) => t.entity === 'category' && t.id === id));
+    // Defaults can't be deleted, even unused.
+    assert.equal(ops.categoryInUse(s, 'cat-giving-gifts'), false);
+    assert.throws(() => ops.deleteCategory(s, 'cat-giving-gifts', ctx), { code: 'DEFAULT_CATEGORY_DELETE' });
+    // Used by a transaction → in use; archiving keeps it.
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 100, currency: 'SAR', accountId: 'sar', categoryId: id, date: '2026-10-05' }, ctx));
+    assert.equal(ops.categoryInUse(s, id), true);
+    assert.throws(() => ops.deleteCategory(s, id, ctx), { code: 'CATEGORY_IN_USE' });
+    s = apply(s, ops.archiveCategory(s, id, true, ctx));
+    assert.equal(s.categories.find((c) => c.id === id)?.archived, true);
+    // Default categories can be archived too.
+    s = apply(s, ops.archiveCategory(s, 'cat-giving-gifts', true, ctx));
+    assert.equal(s.categories.find((c) => c.id === 'cat-giving-gifts')?.archived, true);
+  });
+
+  it('counts recurring rules and plan lines as use', () => {
+    const ctx = makeCtx();
+    let { s, id } = custom(planningState(), 'Gym', ctx);
+    const inPlan = apply(s, ops.savePlan(s, { month: '2026-10', currency: 'SAR', expectedIncome: 0, lines: [{ categoryId: id, limit: 10, kind: 'flexible' }], fundContributions: [] }, ctx));
+    assert.throws(() => ops.deleteCategory(inPlan, id, ctx), { code: 'CATEGORY_IN_USE' });
+    s = { ...s, recurringRules: [rule({ id: 'r', currency: 'SAR', accountId: 'sar', categoryId: id })] };
+    assert.throws(() => ops.deleteCategory(s, id, ctx), { code: 'CATEGORY_IN_USE' });
+  });
+
+  it('new categories appear in pickers; archived ones are hidden but still counted', () => {
+    const ctx = makeCtx();
+    let { s, id } = custom(planningState(), 'Gym', ctx);
+    assert.ok(pickerCategories(s.categories, 'expense').some((c) => c.id === id));
+    assert.ok(!pickerCategories(s.categories, 'income').some((c) => c.id === id));
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 100, currency: 'SAR', accountId: 'sar', categoryId: id, date: '2026-10-05' }, ctx));
+    const before = monthSummary(s, '2026-10');
+    s = apply(s, ops.archiveCategory(s, id, true, ctx));
+    assert.ok(!pickerCategories(s.categories, 'expense').some((c) => c.id === id));
+    // Still selectable when editing a transaction that already uses it.
+    assert.ok(pickerCategories(s.categories, 'expense', [id]).some((c) => c.id === id));
+    const after = monthSummary(s, '2026-10');
+    assert.equal(after.expenseEGP, before.expenseEGP);
+    assert.equal(after.expenseEGP, 100 * 12.5);
+    assert.deepEqual(after.expenseByBucket, before.expenseByBucket);
+    // Not suggested in new plans.
+    const suggestion = planning.planSuggestion(s, '2026-11', 'SAR', NOW);
+    assert.ok(!suggestion.lines.some((l) => l.categoryId === id));
+  });
+
+  it('moving a category to another bucket moves its plan totals', () => {
+    const ctx = makeCtx();
+    let s = planningState();
+    s = apply(s, ops.savePlan(s, { month: '2026-10', currency: 'SAR', expectedIncome: 1000, lines: [{ categoryId: 'cat-lifestyle-dining', limit: 400, kind: 'flexible' }], fundContributions: [] }, ctx));
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 150, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-05' }, ctx));
+    const before = planning.planProgress(s, '2026-10')!;
+    assert.deepEqual(before.buckets.lifestyle, { planned: 400, spent: 150 });
+    assert.deepEqual(before.buckets.essentials, { planned: 0, spent: 0 });
+    const dining = s.categories.find((c) => c.id === 'cat-lifestyle-dining')!;
+    s = apply(s, ops.updateCategory(s, { ...dining, bucket: 'essentials' }, ctx));
+    const after = planning.planProgress(s, '2026-10')!;
+    assert.deepEqual(after.buckets.essentials, { planned: 400, spent: 150 });
+    assert.deepEqual(after.buckets.lifestyle, { planned: 0, spent: 0 });
+  });
+
+  it('addCategoryWithPlanLine creates the category and the line atomically', () => {
+    const ctx = makeCtx();
+    let s = planningState();
+    assert.throws(
+      () => ops.addCategoryWithPlanLine(s, { name: 'Gym', bucket: 'lifestyle' }, { month: '2026-10', limit: 100, kind: 'flexible' }, ctx),
+      { code: 'PLAN_NOT_FOUND' }
+    );
+    s = apply(s, ops.savePlan(s, { month: '2026-10', currency: 'SAR', expectedIncome: 1000, lines: [], fundContributions: [] }, ctx));
+    const createdAt = s.monthlyPlans[0].createdAt;
+    s = apply(s, ops.addCategoryWithPlanLine(s, { name: ' Gym ', bucket: 'lifestyle' }, { month: '2026-10', limit: 100, kind: 'fixed' }, ctx));
+    const gym = s.categories[s.categories.length - 1];
+    assert.deepEqual(
+      { name: gym.name, kind: gym.kind, bucket: gym.bucket, isDefault: gym.isDefault },
+      { name: 'Gym', kind: 'expense', bucket: 'lifestyle', isDefault: false }
+    );
+    assert.deepEqual(s.monthlyPlans[0].lines, [{ categoryId: gym.id, limit: 100, kind: 'fixed' }]);
+    assert.equal(s.monthlyPlans[0].createdAt, createdAt);
+    // A failing step (duplicate name, negative limit) changes nothing.
+    assert.throws(
+      () => ops.addCategoryWithPlanLine(s, { name: 'gym', bucket: 'giving' }, { month: '2026-10', limit: 5, kind: 'flexible' }, ctx),
+      { code: 'CATEGORY_NAME_TAKEN' }
+    );
+    assert.throws(
+      () => ops.addCategoryWithPlanLine(s, { name: 'Pool', bucket: 'giving' }, { month: '2026-10', limit: -5, kind: 'flexible' }, ctx),
+      { code: 'NEGATIVE' }
+    );
   });
 });

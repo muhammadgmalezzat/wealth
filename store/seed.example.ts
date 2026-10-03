@@ -1,7 +1,7 @@
 import { DEFAULT_RATES } from '@/constants/currencies';
 import { DEFAULT_TRACKING_START_DATE, GOLD_PRICE_21K, GOLD_PRICE_24K } from '@/constants/market';
 import { DEFAULT_CATEGORIES } from './defaultCategories';
-import { migrateV3toV4, type FinanceStateV3 } from './migrations';
+import { migratePersistedState, type FinanceStateV3 } from './migrations';
 import type { FinanceState } from './types';
 
 // Sample data used when store/seed.local.ts is absent. All values are made up.
@@ -9,8 +9,8 @@ import type { FinanceState } from './types';
 const CREATED_AT = '2026-08-01T00:00:00.000Z';
 const OPENING_DATE = '2026-08-01';
 
-// Written in the v3 shape; migrateV3toV4 adds updatedAt (= createdAt) and the empty tombstone
-// log. The device id stays empty here and is created on first launch.
+// Written in the v3 shape and run through the migration chain (updatedAt = createdAt, empty
+// tombstone log, current plan format). The device id stays empty here and is created on first launch.
 const SEED_V3: FinanceStateV3 = {
   accounts: [
     {
@@ -97,4 +97,7 @@ const SEED_V3: FinanceStateV3 = {
   },
 };
 
-export const SEED_STATE: FinanceState = migrateV3toV4(SEED_V3, { now: CREATED_AT, newId: () => '' });
+export const SEED_STATE: FinanceState = migratePersistedState(SEED_V3, 3, {
+  now: CREATED_AT,
+  newId: () => '',
+}).state;

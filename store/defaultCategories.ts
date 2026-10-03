@@ -6,6 +6,14 @@ export const CATEGORY_IDS = {
   groceries: 'cat-essentials-groceries',
 } as const;
 
+// Bills that recur at a set amount whatever you do (rent, internet, utilities): suggested
+// as 'fixed' plan lines, which don't count as safe to spend.
+export const FIXED_CATEGORY_IDS: readonly string[] = [
+  'cat-essentials-rent',
+  'cat-essentials-telecom',
+  'cat-essentials-bills',
+];
+
 // Fixed so default categories are identical on every device (until the user edits them).
 const DEFAULTS_UPDATED_AT = '2026-01-01T00:00:00.000Z';
 

@@ -17,6 +17,7 @@ const ENTITY_LABELS: Record<FinanceEntity, string> = {
   holding: 'الاستثمار',
   liability: 'الالتزام',
   recurringRule: 'المعاملة المتكررة',
+  monthlyPlan: 'الخطة',
 };
 
 const FIELD_LABELS: Record<FinanceField, string> = {
@@ -33,8 +34,8 @@ const FIELD_LABELS: Record<FinanceField, string> = {
   purchaseCostEGP: 'سعر الشراء',
   principal: 'أصل المبلغ',
   monthlyPayment: 'القسط الشهري',
-  expectedIncomeEGP: 'الدخل المتوقع',
-  bucketLimit: 'حد الميزانية',
+  expectedIncome: 'الدخل المتوقع',
+  planLimit: 'حد الميزانية',
   exchangeRate: 'سعر الصرف',
   goldPrice: 'سعر الذهب',
   date: 'التاريخ',
@@ -42,6 +43,9 @@ const FIELD_LABELS: Record<FinanceField, string> = {
   startDate: 'تاريخ البداية',
   nextDate: 'التاريخ القادم',
   purchaseDate: 'تاريخ الشراء',
+  endDate: 'تاريخ النهاية',
+  interval: 'التكرار كل',
+  dayOfMonth: 'يوم الشهر',
 };
 
 type Details = FinanceValidationError['details'];
@@ -66,7 +70,7 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   SAME_ACCOUNT_TRANSFER: () => 'لا يمكن التحويل إلى نفس الحساب',
   ACCOUNT_IN_USE: () => 'هذا الحساب مرتبط بمعاملات، يمكنك أرشفته بدلاً من حذفه',
   ACCOUNT_CURRENCY_LOCKED: () => 'لا يمكن تغيير عملة حساب له معاملات',
-  CATEGORY_IN_USE: () => 'هذا التصنيف مستخدم في معاملات',
+  CATEGORY_IN_USE: () => 'البند ده مستخدم في معاملات أو خطط أو معاملات متكررة؛ أرشفه بدل ما تحذفه',
   LIABILITY_IN_USE: () => 'هذا الالتزام عليه دفعات مسجلة',
   LIABILITY_CURRENCY_LOCKED: () => 'لا يمكن تغيير عملة التزام عليه دفعات',
   WITHDRAW_EXCEEDS_FUND: () => 'لا يمكن سحب أكثر من المبلغ المخصص نقداً في الصندوق',
@@ -75,6 +79,13 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   NOTHING_SELECTED: () => 'أدخل مبلغاً لصندوق واحد على الأقل',
   SINKING_SCHEDULE_REQUIRED: () => 'حدد التكرار وتاريخ الاستحقاق القادم',
   NOT_A_SINKING_FUND: () => 'هذا الصندوق ليس صندوق مصاريف دورية',
+  DUPLICATE_ENTRY: (d) => `${entity(d)} موجود في الخطة بالفعل`,
+  PLAN_EXISTS: () => 'فيه خطة للشهر ده بالفعل',
+  OCCURRENCE_NOT_DUE: () => 'المستحق ده اتسجل أو اتخطى بالفعل',
+  CATEGORY_NAME_TAKEN: () => 'فيه بند بنفس الاسم بالفعل',
+  CATEGORY_KIND_LOCKED: () => 'مينفعش تغيّر بند من مصروف لدخل أو العكس',
+  DEFAULT_CATEGORY_DELETE: () => 'البنود الأساسية مينفعش تتحذف، ممكن تأرشفها',
+  PLAN_NOT_FOUND: () => 'مفيش خطة للشهر ده',
   ASSET_PURCHASE_TYPE_LOCKED: () => 'لا يمكن تغيير نوع معاملة شراء الذهب',
   HOLDING_HAS_PURCHASE: () => 'الذهب ده مسجل بمعاملة شراء؛ احذف معاملة الشراء بدلاً منه',
 };

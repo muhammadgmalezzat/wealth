@@ -16,7 +16,6 @@ import type {
   FundMovement,
   Holding,
   Liability,
-  MonthlyPlan,
   RecurringRule,
   Transaction,
 } from './types';
@@ -75,6 +74,9 @@ interface FinanceActions {
   addCategory: (input: ops.NewCategory) => void;
   updateCategory: (category: ops.Editable<Category>) => void;
   deleteCategory: (id: string) => void;
+  archiveCategory: (id: string, archived: boolean) => void;
+  // Returns the new category's id.
+  addCategoryWithPlanLine: (input: Pick<ops.NewCategory, 'name' | 'bucket'>, line: ops.NewPlanLine) => string;
 
   addTransaction: (input: ops.NewIncomeExpense) => void;
   addTransfer: (input: ops.NewTransfer) => void;
@@ -101,12 +103,19 @@ interface FinanceActions {
   updateLiability: (liability: ops.Editable<Liability>) => void;
   deleteLiability: (id: string) => void;
 
-  addRecurringRule: (input: ops.NewRecurringRule) => void;
+  // `linkTransactionId`: the transaction a rule is being made from ("خليها متكررة").
+  addRecurringRule: (input: ops.NewRecurringRule, linkTransactionId?: string) => void;
   updateRecurringRule: (rule: ops.Editable<RecurringRule>) => void;
   deleteRecurringRule: (id: string) => void;
+  setRecurringActive: (id: string, active: boolean) => void;
+  // Records due occurrences of 'auto' rules. Safe to call any time (idempotent).
+  processDue: () => void;
+  confirmOccurrence: (ruleId: string, occurrenceDate: string, overrides: ops.OccurrenceOverrides) => void;
+  skipOccurrence: (ruleId: string, occurrenceDate: string) => void;
 
-  setMonthlyPlan: (plan: ops.Editable<MonthlyPlan>) => void;
-  deleteMonthlyPlan: (month: string) => void;
+  savePlan: (plan: ops.PlanInput) => void;
+  copyPlan: (fromMonth: string, toMonth: string) => void;
+  deletePlan: (month: string) => void;
 
   updateRates: (rates: ExchangeRates) => void;
   updateSettings: (update: ops.SettingsUpdate) => void;
@@ -120,6 +129,7 @@ interface FinanceActions {
   restoreBackup: (restored: FinanceState) => Promise<void>;
   markBackedUp: (at: string) => void;
   setAppLock: (enabled: boolean) => void;
+  setDueNotifications: (enabled: boolean) => void;
 }
 
 export type FinanceStore = FinanceState &
@@ -172,6 +182,12 @@ export const useFinanceStore = create<FinanceStore>()(
       addCategory: (input) => set(ops.addCategory(get(), input, ctx)),
       updateCategory: (category) => set(ops.updateCategory(get(), category, ctx)),
       deleteCategory: (id) => set(ops.deleteCategory(get(), id, ctx)),
+      archiveCategory: (id, archived) => set(ops.archiveCategory(get(), id, archived, ctx)),
+      addCategoryWithPlanLine: (input, line) => {
+        const patch = ops.addCategoryWithPlanLine(get(), input, line, ctx);
+        set(patch);
+        return patch.categories![patch.categories!.length - 1].id;
+      },
 
       addTransaction: (input) => set(ops.addTransaction(get(), input, ctx)),
       addTransfer: (input) => set(ops.addTransfer(get(), input, ctx)),
@@ -200,12 +216,21 @@ export const useFinanceStore = create<FinanceStore>()(
       updateLiability: (liability) => set(ops.updateLiability(get(), liability, ctx)),
       deleteLiability: (id) => set(ops.deleteLiability(get(), id, ctx)),
 
-      addRecurringRule: (input) => set(ops.addRecurringRule(get(), input, ctx)),
+      addRecurringRule: (input, linkTransactionId) => set(ops.addRecurringRule(get(), input, ctx, linkTransactionId)),
       updateRecurringRule: (rule) => set(ops.updateRecurringRule(get(), rule, ctx)),
       deleteRecurringRule: (id) => set(ops.deleteRecurringRule(get(), id, ctx)),
+      setRecurringActive: (id, active) => set(ops.setRecurringActive(get(), id, active, ctx)),
+      processDue: () => {
+        const patch = ops.processDue(get(), ctx);
+        if (Object.keys(patch).length > 0) set(patch);
+      },
+      confirmOccurrence: (ruleId, occurrenceDate, overrides) =>
+        set(ops.confirmOccurrence(get(), ruleId, occurrenceDate, overrides, ctx)),
+      skipOccurrence: (ruleId, occurrenceDate) => set(ops.skipOccurrence(get(), ruleId, occurrenceDate, ctx)),
 
-      setMonthlyPlan: (plan) => set(ops.setMonthlyPlan(get(), plan, ctx)),
-      deleteMonthlyPlan: (month) => set(ops.deleteMonthlyPlan(get(), month, ctx)),
+      savePlan: (plan) => set(ops.savePlan(get(), plan, ctx)),
+      copyPlan: (fromMonth, toMonth) => set(ops.copyPlan(get(), fromMonth, toMonth, ctx)),
+      deletePlan: (month) => set(ops.deletePlan(get(), month, ctx)),
 
       updateRates: (rates) => set(ops.updateRates(get(), rates)),
       updateSettings: (update) => set(ops.updateSettings(get(), update, ctx)),
@@ -225,6 +250,7 @@ export const useFinanceStore = create<FinanceStore>()(
       },
       markBackedUp: (at) => set(ops.markBackedUp(get(), at)),
       setAppLock: (enabled) => set(ops.setAppLock(get(), enabled)),
+      setDueNotifications: (enabled) => set(ops.setDueNotifications(get(), enabled)),
     }),
     {
       name: STORAGE_KEY,

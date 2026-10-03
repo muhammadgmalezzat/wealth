@@ -9,7 +9,8 @@ export interface SegmentOption<T extends string> {
 
 interface SegmentProps<T extends string> {
   options: SegmentOption<T>[];
-  value: T;
+  // undefined = nothing selected yet.
+  value: T | undefined;
   onChange: (v: T) => void;
 }
 

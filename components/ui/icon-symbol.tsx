@@ -21,6 +21,7 @@ const MAPPING = {
   'list.bullet': 'list',
   'briefcase.fill': 'account-balance-wallet',
   'flag.fill': 'flag',
+  'chart.pie.fill': 'pie-chart',
 } as IconMapping;
 
 /**

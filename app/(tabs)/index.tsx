@@ -6,6 +6,8 @@ import { router } from 'expo-router';
 
 import { BackupReminder } from '@/components/dashboard/BackupReminder';
 import { NetWorthCard } from '@/components/dashboard/NetWorthCard';
+import { RecurringCard } from '@/components/dashboard/RecurringCard';
+import { SafeToSpendCard } from '@/components/dashboard/SafeToSpendCard';
 import { FundCard } from '@/components/funds/FundCard';
 import { UnassignedPanel } from '@/components/funds/UnassignedPanel';
 import { TransactionRow } from '@/components/transactions/TransactionRow';
@@ -87,6 +89,16 @@ export default function DashboardScreen() {
             مصر {formatCurrency(byLocation.EG, 'EGP')} · السعودية {formatCurrency(byLocation.SA, 'EGP')}
           </Text>
           <Text style={styles.netWorthLabel}>إجمالي الثروة</Text>
+        </View>
+
+        {/* ── Safe to spend ──────────────────────────────────────── */}
+        <View style={styles.section}>
+          <SafeToSpendCard state={state} />
+        </View>
+
+        {/* ── Recurring: due & this week ─────────────────────────── */}
+        <View style={styles.section}>
+          <RecurringCard state={state} />
         </View>
 
         {/* ── Unassigned money ───────────────────────────────────── */}

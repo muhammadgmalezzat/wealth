@@ -7,6 +7,7 @@ import { TransactionRow } from '@/components/transactions/TransactionRow';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
 import { Chip, ChipRow } from '@/components/ui/Chip';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { MonthSwitcher } from '@/components/ui/MonthSwitcher';
 import { StatCard } from '@/components/ui/StatCard';
 import { Colors, FinanceColors } from '@/constants/theme';
 import {
@@ -16,8 +17,8 @@ import {
   type TransactionFilter,
 } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { shiftMonth, toMonthKey } from '@/utils/dates';
-import { formatCurrency, formatDayLabel, formatMonthLabel } from '@/utils/formatters';
+import { toMonthKey } from '@/utils/dates';
+import { formatCurrency, formatDayLabel } from '@/utils/formatters';
 
 const FILTERS: { label: string; value: TransactionFilter }[] = [
   { label: 'الكل', value: 'all' },
@@ -54,22 +55,7 @@ export default function TransactionsScreen() {
 
   const header = (
     <View>
-      {/* ── Month switcher (RTL: previous on the right, next on the left) ── */}
-      <View style={styles.monthRow}>
-        <TouchableOpacity
-          onPress={() => setMonth(shiftMonth(month, 1))}
-          hitSlop={10}
-          accessibilityLabel="الشهر التالي">
-          <MaterialIcons name="chevron-left" size={28} color={Colors.light.tint} />
-        </TouchableOpacity>
-        <Text style={styles.monthLabel}>{formatMonthLabel(month)}</Text>
-        <TouchableOpacity
-          onPress={() => setMonth(shiftMonth(month, -1))}
-          hitSlop={10}
-          accessibilityLabel="الشهر السابق">
-          <MaterialIcons name="chevron-right" size={28} color={Colors.light.tint} />
-        </TouchableOpacity>
-      </View>
+      <MonthSwitcher month={month} onChange={setMonth} />
 
       {/* ── Month summary ── */}
       <View style={styles.summaryRow}>
@@ -155,19 +141,6 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: 16,
-  },
-
-  // Month switcher
-  monthRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  monthLabel: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: Colors.light.text,
   },
 
   // Summary & filters
