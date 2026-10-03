@@ -1,14 +1,14 @@
-import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { FundCard } from '@/components/funds/FundCard';
 import { FundSheet } from '@/components/funds/FundSheet';
 import { FUND_SECTION_TITLES } from '@/components/funds/labels';
 import { UnassignedPanel } from '@/components/funds/UnassignedPanel';
+import { Fab, FAB_CLEARANCE } from '@/components/ui/Fab';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { Screen } from '@/components/ui/Screen';
 import { Colors } from '@/constants/theme';
 import { fundsByPriority } from '@/store/selectors';
 import type { Fund } from '@/store/types';
@@ -17,7 +17,6 @@ import { useFinanceStore } from '@/store/useFinanceStore';
 const SECTION_ORDER: Fund['type'][] = ['emergency', 'goal', 'sinking'];
 
 export default function FundsScreen() {
-  const insets = useSafeAreaInsets();
   const state = useFinanceStore();
   // Type preselected in the create sheet (e.g. from the emergency hint).
   const [creating, setCreating] = useState<Fund['type'] | null>(null);
@@ -27,13 +26,10 @@ export default function FundsScreen() {
   const funds = fundsByPriority(state);
 
   return (
-    <View style={styles.root}>
-      <ScrollView
-        contentContainerStyle={[
-          styles.content,
-          { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 96 },
-        ]}
-        showsVerticalScrollIndicator={false}>
+    <Screen
+      scroll
+      contentStyle={styles.content}
+      overlay={<Fab placement="tab" onPress={() => setCreating('goal')} accessibilityLabel="صندوق جديد" />}>
         <Text style={styles.title}>الصناديق</Text>
 
         <UnassignedPanel state={state} />
@@ -63,28 +59,16 @@ export default function FundsScreen() {
             </View>
           );
         })}
-      </ScrollView>
-
-      <TouchableOpacity
-        style={[styles.fab, { bottom: insets.bottom + 24 }]}
-        onPress={() => setCreating('goal')}
-        activeOpacity={0.85}
-        accessibilityLabel="صندوق جديد">
-        <MaterialIcons name="add" size={30} color="#fff" />
-      </TouchableOpacity>
-
       {creating && <FundSheet initialType={creating} onClose={() => setCreating(null)} />}
-    </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: Colors.light.background,
-  },
   content: {
     paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: FAB_CLEARANCE,
   },
   title: {
     fontSize: 28,
@@ -123,20 +107,5 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     color: Colors.light.tint,
-  },
-  fab: {
-    position: 'absolute',
-    right: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: Colors.light.tint,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 6,
   },
 });

@@ -1,16 +1,15 @@
 import { useState } from "react";
 import {
-  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { ConfirmOccurrenceSheet } from "@/components/recurring/ConfirmOccurrenceSheet";
 import { Card } from "@/components/ui/Card";
 import { LoadingView } from "@/components/ui/LoadingView";
+import { Screen } from "@/components/ui/Screen";
 import { Colors, FinanceColors } from "@/constants/theme";
 import { dueOccurrences } from "@/store/recurring";
 import { useFinanceStore } from "@/store/useFinanceStore";
@@ -21,7 +20,6 @@ import { runAction } from "@/utils/runAction";
 // "المستحقات": due occurrences of 'confirm' rules, oldest first (missed months listed
 // separately). "تم" records it; "تخطّي" skips it.
 export default function DueScreen() {
-  const insets = useSafeAreaInsets();
   const state = useFinanceStore();
   const [confirming, setConfirming] = useState<{
     ruleId: string;
@@ -46,13 +44,7 @@ export default function DueScreen() {
     confirming && state.recurringRules.find((r) => r.id === confirming.ruleId);
 
   return (
-    <View style={styles.root}>
-      <ScrollView
-        contentContainerStyle={[
-          styles.content,
-          { paddingBottom: insets.bottom + 24 },
-        ]}
-      >
+    <Screen scroll edges={["bottom"]} contentStyle={styles.content}>
         {items.length === 0 ? (
           <Text style={styles.empty}>مفيش مستحقات دلوقتي ✓</Text>
         ) : (
@@ -112,8 +104,6 @@ export default function DueScreen() {
             </View>
           ))
         )}
-      </ScrollView>
-
       {confirmRule && confirming && (
         <ConfirmOccurrenceSheet
           key={`${confirming.ruleId}-${confirming.date}`}
@@ -122,12 +112,11 @@ export default function DueScreen() {
           onClose={() => setConfirming(null)}
         />
       )}
-    </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: Colors.light.background },
   content: { padding: 16, gap: 18 },
   section: { gap: 10 },
   sectionTitle: {

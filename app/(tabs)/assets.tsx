@@ -1,12 +1,13 @@
-import React, { useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import React, { useState } from 'react';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { EditAccountSheet } from '@/components/assets/EditAccountSheet';
 import { Card } from '@/components/ui/Card';
+import { Fab, FAB_CLEARANCE } from '@/components/ui/Fab';
 import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { Screen } from '@/components/ui/Screen';
 import { Segment } from '@/components/ui/Segment';
 import { StatCard } from '@/components/ui/StatCard';
 import { Colors, FinanceColors } from '@/constants/theme';
@@ -147,7 +148,6 @@ function HoldingRow({ holding, pnlEGP, onDelete }: HoldingRowProps) {
 // Main screen
 // ---------------------------------------------------------------------------
 export default function AssetsScreen() {
-  const insets = useSafeAreaInsets();
   const state = useFinanceStore();
   const { accounts, holdings, addAccount, addHolding, deleteAccount, deleteHolding } = state;
 
@@ -220,12 +220,10 @@ export default function AssetsScreen() {
   };
 
   return (
-    <View style={styles.root}>
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + 16 }]}
-        showsVerticalScrollIndicator={false}>
-
+    <Screen
+      scroll
+      contentStyle={styles.content}
+      overlay={<Fab placement="tab" onPress={openModal} accessibilityLabel="إضافة أصل" />}>
         {/* ── Summary row ──────────────────────────────────── */}
         <View style={styles.summaryRow}>
           <StatCard label="إجمالي الأصول" amountEGP={totalAssetsEGP(state)} accentColor={Colors.light.tint} />
@@ -273,16 +271,6 @@ export default function AssetsScreen() {
           )}
         </Card>
 
-        <View style={{ height: insets.bottom + 88 }} />
-      </ScrollView>
-
-      {/* ── FAB ──────────────────────────────────────────── */}
-      <TouchableOpacity
-        style={[styles.fab, { bottom: insets.bottom + 24 }]}
-        onPress={openModal}
-        activeOpacity={0.85}>
-        <MaterialIcons name="add" size={30} color="#fff" />
-      </TouchableOpacity>
 
       {/* ── Edit account modal ────────────────────────────── */}
       {editingAccount && (
@@ -388,7 +376,7 @@ export default function AssetsScreen() {
           </>
         )}
       </FormSheet>
-    </View>
+    </Screen>
   );
 }
 
@@ -396,15 +384,10 @@ export default function AssetsScreen() {
 // Styles
 // ---------------------------------------------------------------------------
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: Colors.light.background,
-  },
-  scroll: {
-    flex: 1,
-  },
   content: {
     paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: FAB_CLEARANCE,
   },
 
   // Summary
@@ -500,20 +483,4 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  // FAB
-  fab: {
-    position: 'absolute',
-    right: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: Colors.light.tint,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 6,
-  },
 });

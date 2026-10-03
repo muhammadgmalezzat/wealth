@@ -1,7 +1,6 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 
 import { ExportSheet } from '@/components/settings/ExportSheet';
 import { RestoreSheet } from '@/components/settings/RestoreSheet';
@@ -10,6 +9,7 @@ import { Card } from '@/components/ui/Card';
 import { FutureDateField } from '@/components/ui/DateFields';
 import { FieldLabel, FormInput } from '@/components/ui/FormSheet';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { Screen } from '@/components/ui/Screen';
 import { Colors, FinanceColors } from '@/constants/theme';
 import { openBackup, parseBackup, type BackupFile, type OpenedBackup } from '@/store/backup';
 import { useFinanceStore } from '@/store/useFinanceStore';
@@ -25,7 +25,6 @@ import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
 export default function SettingsScreen() {
-  const insets = useSafeAreaInsets();
   const state = useFinanceStore();
   const { settings } = state;
   // The Dashboard's backup reminder links here with ?export=1.
@@ -126,10 +125,7 @@ export default function SettingsScreen() {
   };
 
   return (
-    <ScrollView
-      style={styles.root}
-      contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]}
-      keyboardShouldPersistTaps="handled">
+    <Screen scroll edges={['bottom']} contentStyle={styles.content}>
       {/* ── Exchange rates ── */}
       <Text style={styles.sectionTitle}>أسعار الصرف</Text>
       <Card>
@@ -245,15 +241,11 @@ export default function SettingsScreen() {
       {restore && (
         <RestoreSheet file={restore.file} initialOpened={restore.opened} onClose={() => setRestore(null)} />
       )}
-    </ScrollView>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: Colors.light.background,
-  },
   content: {
     padding: 16,
   },

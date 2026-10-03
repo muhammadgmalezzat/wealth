@@ -116,9 +116,10 @@ components/
                             labels.ts (Arabic frequency / mode / section labels)
   settings/                 ExportSheet, RestoreSheet
   transactions/             TransactionRow (shared row), TransactionSheet (add/edit)
-  ui/                       Card, Chip/ChipRow, DateFields (Past/Future), DatePicker(.web),
-                            FormSheet/FieldLabel/FormInput, LoadingView, MonthSwitcher,
-                            ProgressBar, Segment, StatCard, icon-symbol(.ios), CurrencyText
+  ui/                       Screen (outer layout + safe area), Fab, Card, Chip/ChipRow,
+                            DateFields (Past/Future), DatePicker(.web), FormSheet/FieldLabel/
+                            FormInput, LoadingView, MonthSwitcher, ProgressBar, Segment,
+                            StatCard, icon-symbol(.ios), CurrencyText
 
 store/                      ALL business logic lives here (pure, no React)
   types.ts                  Data model
@@ -159,10 +160,45 @@ app.json / eas.json         Expo + EAS config
 
 ## 5. Navigation
 
-Root `Stack` (`app/_layout.tsx`): `(tabs)` (no header), `fund/[id]` (header, back "رجوع"),
+Root `Stack` (`app/_layout.tsx`): `(tabs)` (no header), `fund/[id]` (title "الصندوق", replaced by
+the fund name; back "رجوع"),
 `settings` (title "الإعدادات"), `recurring` ("المعاملات المتكررة"), `due` ("المستحقات"),
 `categories` ("البنود").
 `<RecurringRunner/>` (renders nothing) and `<AppLockGate/>` sit above everything.
+`<StatusBar style="dark" />` (light theme only, dark icons on the light background).
+
+### Layout & safe-area conventions
+
+Edge-to-edge is always on (SDK 57 / RN 0.86): every screen and modal is drawn under the status
+bar and the Android navigation bar, so insets must be handled explicitly. Rules:
+
+- **`components/ui/Screen.tsx` is the only way a route sets its outer layout.** Props: `scroll`,
+  `edges` (`'top' | 'bottom'`, default `['top']`), `contentStyle`, `refreshControl`, `header`
+  (fixed above the content), `overlay` (absolute layer, e.g. a Fab). It uses
+  `useSafeAreaInsets()` from `react-native-safe-area-context` (never React Native's
+  `SafeAreaView`): `'top'` → `paddingTop = insets.top + 8` on the outer view (so scrolled content
+  never slides under the status bar); `'bottom'` → `paddingBottom = insets.bottom + 16` on the
+  scroll content (or the inner view when not scrolling). Background = `Colors.light.background`.
+- **Tab screens** (`headerShown: false`): `edges={['top']}`; their own header row (e.g. the gear
+  on الرئيسية) is part of the content, so it sits below `insets.top`. No `'bottom'` edge — the tab
+  bar sits below the screen and already reserves `insets.bottom`.
+- **Stack screens** always use the **native header** (Arabic title set in `app/_layout.tsx`, back
+  "رجوع"; `fund/[id]` sets its title and "تعديل" button with `<Stack.Screen options>`). The header
+  handles the top inset, so they use `edges={['bottom']}` — no top padding (no double inset), and
+  the end of the content stays above the navigation bar / home indicator. No custom headers.
+- **Floating "+" buttons:** `components/ui/Fab.tsx`, rendered in `<Screen overlay>`.
+  `placement="tab"` → `bottom: 20` (the screen already ends at the tab bar, which includes
+  `insets.bottom`); `placement="stack"` → `bottom: insets.bottom + 20`. Lists under a Fab end with
+  `paddingBottom: FAB_CLEARANCE` (92) so the last row isn't covered.
+- **Sheets:** every `*Sheet` is built on `FormSheet` (`Modal`, `presentationStyle="pageSheet"`,
+  `statusBarTranslucent` + `navigationBarTranslucent`). `useSheetInsets()`: on Android the modal is
+  a full-height window, so the header is padded by `insets.top`; on iOS the page sheet already
+  starts below the status bar (top 0). The body always gets `paddingBottom: insets.bottom + 40`,
+  so the last field or button scrolls clear of the navigation bar / home indicator.
+- **AppLockGate:** full-screen, translucent `Modal`; content centred inside the safe area
+  (padding = all four insets).
+- Don't add hard-coded top paddings to compensate for the status bar (e.g. `paddingTop: 40`).
+  On web all insets are 0.
 
 | Route | Tab title | What it does |
 |---|---|---|
@@ -543,7 +579,8 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
   editor discards unsaved plan edits (after a confirm) because a route can't open above the modal.
 - Numbers are formatted with Western digits (`en-US`) inside an Arabic UI.
 - `AGENTS.md` points to the SDK 54 docs although the project is on SDK 57.
-- No E2E/UI tests; screens were checked manually in the web build.
+- No E2E/UI tests; screens were checked manually in the web build (where all safe-area insets
+  are 0 — inset handling must be checked on a device).
 
 ---
 

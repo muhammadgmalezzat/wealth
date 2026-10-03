@@ -1,7 +1,6 @@
 ﻿import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { router } from 'expo-router';
 
 import { BackupReminder } from '@/components/dashboard/BackupReminder';
@@ -14,6 +13,7 @@ import { TransactionRow } from '@/components/transactions/TransactionRow';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
 import { Card } from '@/components/ui/Card';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { Screen } from '@/components/ui/Screen';
 import { StatCard } from '@/components/ui/StatCard';
 import { Colors, FinanceColors } from '@/constants/theme';
 import {
@@ -36,7 +36,6 @@ type TxSheetTarget = 'add' | { id: string } | null;
 // Dashboard screen
 // ---------------------------------------------------------------------------
 export default function DashboardScreen() {
-  const insets = useSafeAreaInsets();
   const state = useFinanceStore();
   const [txSheet, setTxSheet] = useState<TxSheetTarget>(null);
 
@@ -58,11 +57,7 @@ export default function DashboardScreen() {
   });
 
   return (
-    <>
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + 16 }]}
-        showsVerticalScrollIndicator={false}>
+    <Screen scroll contentStyle={styles.content}>
         {/* ── Header ─────────────────────────────────────────────── */}
         <View style={styles.header}>
           <View>
@@ -153,14 +148,13 @@ export default function DashboardScreen() {
           </Card>
         </View>
 
-        <View style={{ height: insets.bottom + 24 }} />
-      </ScrollView>
+        <View style={styles.bottomSpacer} />
 
       {txSheet === 'add' && <TransactionSheet onClose={() => setTxSheet(null)} />}
       {editingTx && (
         <TransactionSheet key={editingTx.id} transaction={editingTx} onClose={() => setTxSheet(null)} />
       )}
-    </>
+    </Screen>
   );
 }
 
@@ -168,14 +162,11 @@ export default function DashboardScreen() {
 // Styles
 // ---------------------------------------------------------------------------
 const styles = StyleSheet.create({
-  scroll: {
-    flex: 1,
-    backgroundColor: Colors.light.background,
-  },
   content: {
     paddingHorizontal: 16,
-    paddingBottom: 0,
+    paddingTop: 8,
   },
+  bottomSpacer: { height: 24 },
 
   // Header
   headerRight: {

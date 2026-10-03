@@ -1,6 +1,7 @@
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Colors } from '@/constants/theme';
 import { useFinanceStore } from '@/store/useFinanceStore';
@@ -14,6 +15,7 @@ const RELOCK_AFTER_MS = 60_000;
 // - while the app is inactive/backgrounded it covers the screen, so the app switcher's
 //   snapshot shows no balances (iOS; Android may snapshot before the cover renders).
 export function AppLockGate() {
+  const insets = useSafeAreaInsets();
   const enabled = useFinanceStore((s) => s.hasHydrated && !!s.settings.appLockEnabled);
   const [locked, setLocked] = useState(false);
   const [covered, setCovered] = useState(false);
@@ -70,8 +72,19 @@ export function AppLockGate() {
 
   return (
     // onRequestClose: the Android back button must not dismiss the lock.
-    <Modal visible animationType="none" presentationStyle="fullScreen" onRequestClose={() => {}}>
-      <View style={styles.overlay}>
+    <Modal
+      visible
+      animationType="none"
+      presentationStyle="fullScreen"
+      statusBarTranslucent
+      navigationBarTranslucent
+      onRequestClose={() => {}}>
+      {/* Covers the whole display; the content is centred inside the safe area. */}
+      <View
+        style={[
+          styles.overlay,
+          { paddingTop: insets.top, paddingBottom: insets.bottom, paddingLeft: insets.left, paddingRight: insets.right },
+        ]}>
         <MaterialIcons name="lock" size={48} color={Colors.light.tint} />
         <Text style={styles.title}>Wealth</Text>
         {locked && (

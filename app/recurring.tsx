@@ -1,12 +1,12 @@
-import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useState } from 'react';
-import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 
 import { KIND_SECTION_TITLES, MODE_LABELS, frequencyLabel } from '@/components/recurring/labels';
 import { RuleSheet } from '@/components/recurring/RuleSheet';
 import { Card } from '@/components/ui/Card';
+import { Fab, FAB_CLEARANCE } from '@/components/ui/Fab';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { Screen } from '@/components/ui/Screen';
 import { Colors, FinanceColors } from '@/constants/theme';
 import { upcoming, type CurrencyTotals } from '@/store/recurring';
 import type { CurrencyCode, RecurringRule } from '@/store/types';
@@ -24,7 +24,6 @@ const totalsLine = (totals: CurrencyTotals) =>
     .join(' + ');
 
 export default function RecurringScreen() {
-  const insets = useSafeAreaInsets();
   const state = useFinanceStore();
   const [sheet, setSheet] = useState<'add' | { id: string } | null>(null);
 
@@ -36,8 +35,11 @@ export default function RecurringScreen() {
   const accountName = (id?: string) => state.accounts.find((a) => a.id === id)?.name ?? '—';
 
   return (
-    <View style={styles.root}>
-      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 96 }]}>
+    <Screen
+      scroll
+      edges={['bottom']}
+      contentStyle={styles.content}
+      overlay={<Fab placement="stack" onPress={() => setSheet('add')} accessibilityLabel="معاملة متكررة جديدة" />}>
         {/* ── Next 30 days ── */}
         <Text style={styles.sectionTitle}>جاي خلال 30 يوم</Text>
         <Card>
@@ -112,19 +114,10 @@ export default function RecurringScreen() {
             ضيف الإيجار والمرتب والفواتير اللي بتتكرر، والتطبيق يفكرك بيها أو يسجلها لوحده.
           </Text>
         )}
-      </ScrollView>
-
-      <TouchableOpacity
-        style={[styles.fab, { bottom: insets.bottom + 24 }]}
-        onPress={() => setSheet('add')}
-        activeOpacity={0.85}
-        accessibilityLabel="معاملة متكررة جديدة">
-        <MaterialIcons name="add" size={30} color="#fff" />
-      </TouchableOpacity>
 
       {sheet === 'add' && <RuleSheet onClose={() => setSheet(null)} />}
       {editing && <RuleSheet key={editing.id} rule={editing} onClose={() => setSheet(null)} />}
-    </View>
+    </Screen>
   );
 }
 
@@ -133,8 +126,7 @@ function amountColor(rule: RecurringRule) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: Colors.light.background },
-  content: { padding: 16 },
+  content: { padding: 16, paddingBottom: FAB_CLEARANCE },
   sectionTitle: { fontSize: 17, fontWeight: '700', color: Colors.light.text, textAlign: 'right', marginTop: 16, marginBottom: 10 },
   listCard: { padding: 0, overflow: 'hidden' },
   upcomingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 6 },
@@ -152,19 +144,4 @@ const styles = StyleSheet.create({
   amount: { fontSize: 14, fontWeight: '600' },
   muted: { fontSize: 12, color: Colors.light.icon, textAlign: 'right' },
   empty: { marginTop: 32, textAlign: 'center', lineHeight: 20 },
-  fab: {
-    position: 'absolute',
-    right: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: Colors.light.tint,
-    alignItems: 'center',
-    justifyContent: 'center',
-    elevation: 6,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-  },
 });

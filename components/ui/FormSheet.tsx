@@ -11,10 +11,19 @@ import {
   View,
   type TextInputProps,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Colors, FinanceColors } from '@/constants/theme';
 
 // Page-sheet modal with cancel / title / save header, shared by the app's edit forms.
+// Safe area: on Android the modal is a full-screen window drawn under the status and navigation
+// bars (edge-to-edge), so the header is pushed below insets.top. On iOS a page sheet already
+// starts below the status bar, so only the bottom inset (home indicator) applies. The scrolling
+// body always ends insets.bottom above the bottom edge, so the last field/button is reachable.
+export function useSheetInsets() {
+  const insets = useSafeAreaInsets();
+  return { top: Platform.OS === 'android' ? insets.top : 0, bottom: insets.bottom };
+}
 
 interface FormSheetProps {
   visible: boolean;
@@ -37,9 +46,18 @@ export function FormSheet({
   saveDisabled = false,
   children,
 }: FormSheetProps) {
+  const insets = useSheetInsets();
   return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onCancel}>
-      <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      statusBarTranslucent
+      navigationBarTranslucent
+      onRequestClose={onCancel}>
+      <KeyboardAvoidingView
+        style={[styles.root, { paddingTop: insets.top }]}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={styles.header}>
           <TouchableOpacity onPress={onCancel} hitSlop={8}>
             <Text style={styles.cancel}>إلغاء</Text>
@@ -51,7 +69,7 @@ export function FormSheet({
         </View>
         <ScrollView
           style={styles.scroll}
-          contentContainerStyle={styles.body}
+          contentContainerStyle={[styles.body, { paddingBottom: insets.bottom + 40 }]}
           keyboardShouldPersistTaps="handled">
           {children}
         </ScrollView>

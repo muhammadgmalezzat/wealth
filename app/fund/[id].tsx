@@ -1,7 +1,6 @@
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { FundSheet } from '@/components/funds/FundSheet';
 import { FREQUENCY_LABELS, FUND_TYPE_LABELS, STATUS_BADGES } from '@/components/funds/labels';
@@ -9,6 +8,7 @@ import { MoveMoneySheet } from '@/components/funds/MoveMoneySheet';
 import { PaySinkingSheet } from '@/components/funds/PaySinkingSheet';
 import { Card } from '@/components/ui/Card';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { Screen } from '@/components/ui/Screen';
 import { ProgressBar } from '@/components/ui/ProgressBar';
 import { Colors, FinanceColors } from '@/constants/theme';
 import {
@@ -28,7 +28,6 @@ type SheetKind = 'edit' | 'allocate' | 'withdraw' | 'pay' | null;
 
 export default function FundDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const insets = useSafeAreaInsets();
   const state = useFinanceStore();
   const [sheet, setSheet] = useState<SheetKind>(null);
 
@@ -37,10 +36,10 @@ export default function FundDetailScreen() {
   const fund = state.funds.find((f) => f.id === id);
   if (!fund) {
     return (
-      <View style={styles.missing}>
+      <Screen edges={['bottom']} contentStyle={styles.missing}>
         <Stack.Screen options={{ title: 'الصندوق' }} />
         <Text style={styles.muted}>الصندوق غير موجود</Text>
-      </View>
+      </Screen>
     );
   }
 
@@ -70,7 +69,7 @@ export default function FundDetailScreen() {
   ].filter((fact): fact is { label: string; value: string } => fact !== null);
 
   return (
-    <View style={styles.root}>
+    <Screen scroll edges={['bottom']} contentStyle={styles.content}>
       <Stack.Screen
         options={{
           title: fund.name,
@@ -81,7 +80,6 @@ export default function FundDetailScreen() {
           ),
         }}
       />
-      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}>
         {/* ── Summary ── */}
         <Card>
           <View style={styles.titleRow}>
@@ -157,7 +155,6 @@ export default function FundDetailScreen() {
             ))
           )}
         </Card>
-      </ScrollView>
 
       {sheet === 'edit' && (
         <FundSheet fund={fund} onClose={() => setSheet(null)} onDeleted={() => router.back()} />
@@ -166,20 +163,15 @@ export default function FundDetailScreen() {
         <MoveMoneySheet fund={fund} mode={sheet} onClose={() => setSheet(null)} />
       )}
       {sheet === 'pay' && <PaySinkingSheet fund={fund} onClose={() => setSheet(null)} />}
-    </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: Colors.light.background,
-  },
   content: {
     padding: 16,
   },
   missing: {
-    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },

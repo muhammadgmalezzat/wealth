@@ -6,6 +6,34 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-03) — 1.1.0 · data v6 (OTA update) · safe areas
+
+> JS-only (ships with `eas update` to 1.1.0 builds). No data or native changes.
+
+**For users**
+- Nothing is drawn under the status bar any more: screen titles, the settings gear and header
+  buttons sit below it on every screen; status-bar icons are dark so they're visible on the light
+  background.
+- Sheets' last fields and buttons (حفظ / حذف…) are no longer hidden behind the Android navigation
+  bar; on Android a sheet's header no longer sits under the status bar.
+- The "+" buttons sit just above the tab bar on tab screens and above the navigation bar on
+  المعاملات المتكررة / البنود.
+- The lock screen content is centred within the visible area.
+
+**Technical**
+- New `components/ui/Screen.tsx` (the only outer layout for routes: `scroll`, `edges`,
+  `contentStyle`, `refreshControl`, `header`, `overlay`) and `components/ui/Fab.tsx`
+  (`placement: 'tab' | 'stack'`, `FAB_CLEARANCE`); five duplicated FAB styles removed.
+- All routes migrated: tabs use `edges={['top']}`; stack screens use the native header +
+  `edges={['bottom']}`; `fund/[id]` gets a default title in `app/_layout.tsx`.
+- `FormSheet`: `useSheetInsets()` (Android top inset, bottom inset everywhere),
+  `statusBarTranslucent` / `navigationBarTranslucent`. `AppLockGate` pads by the insets.
+- `<StatusBar style="dark" />`. No `SafeAreaView` from `react-native`, no compensating
+  hard-coded top paddings; direct `useSafeAreaInsets()` only in Screen, Fab, FormSheet and
+  AppLockGate.
+
+---
+
 ## Unreleased (2026-10-03) — 1.1.0 · data v6 (OTA update)
 
 > JS-only: ships with `eas update` to 1.1.0 builds. No new native module, `app.json` unchanged,

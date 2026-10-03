@@ -1,13 +1,13 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { BUCKET_TITLES, PlanEditorSheet, unplannedColor } from '@/components/plan/PlanEditorSheet';
 import { Card } from '@/components/ui/Card';
 import { LoadingView } from '@/components/ui/LoadingView';
 import { MonthSwitcher } from '@/components/ui/MonthSwitcher';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { Screen } from '@/components/ui/Screen';
 import { Colors, FinanceColors } from '@/constants/theme';
 import { emptyPlan, planProgress, planSuggestion, previousPlanMonth, type LineProgress } from '@/store/planning';
 import type { CurrencyCode, ExpenseBucket } from '@/store/types';
@@ -17,7 +17,6 @@ import { formatCurrency, formatMonthLabel } from '@/utils/formatters';
 import { runAction } from '@/utils/runAction';
 
 export default function PlanScreen() {
-  const insets = useSafeAreaInsets();
   const state = useFinanceStore();
   const [month, setMonth] = useState(() => toMonthKey(new Date()));
   const [editing, setEditing] = useState(false);
@@ -40,10 +39,7 @@ export default function PlanScreen() {
   };
 
   return (
-    <View style={styles.root}>
-      <ScrollView
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 32 }]}
-        showsVerticalScrollIndicator={false}>
+    <Screen scroll contentStyle={styles.content}>
         <MonthSwitcher month={month} onChange={setMonth} />
         <TouchableOpacity onPress={() => router.push('/recurring')} style={styles.recurringLink} hitSlop={8}>
           <Text style={styles.editLink}>المعاملات المتكررة ‹</Text>
@@ -150,10 +146,8 @@ export default function PlanScreen() {
             </Card>
           </>
         )}
-      </ScrollView>
-
       {editing && progress && <PlanEditorSheet key={progress.plan.id} plan={progress.plan} onClose={() => setEditing(false)} />}
-    </View>
+    </Screen>
   );
 }
 
@@ -196,8 +190,7 @@ function SummaryItem({ label, value, color }: { label: string; value: string; co
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: Colors.light.background },
-  content: { paddingHorizontal: 16 },
+  content: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 32 },
   empty: { alignItems: 'stretch', paddingVertical: 32, gap: 12 },
   emptyTitle: { fontSize: 18, fontWeight: '700', color: Colors.light.text, textAlign: 'center' },
   emptyBody: { fontSize: 14, color: Colors.light.icon, textAlign: 'center', marginBottom: 8 },

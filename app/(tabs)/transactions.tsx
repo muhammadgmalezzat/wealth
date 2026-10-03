@@ -1,13 +1,13 @@
-import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useState } from 'react';
 import { SectionList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { TransactionRow } from '@/components/transactions/TransactionRow';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
 import { Chip, ChipRow } from '@/components/ui/Chip';
+import { Fab, FAB_CLEARANCE } from '@/components/ui/Fab';
 import { LoadingView } from '@/components/ui/LoadingView';
 import { MonthSwitcher } from '@/components/ui/MonthSwitcher';
+import { Screen } from '@/components/ui/Screen';
 import { StatCard } from '@/components/ui/StatCard';
 import { Colors, FinanceColors } from '@/constants/theme';
 import {
@@ -37,7 +37,6 @@ const signedColor = (value: number) =>
 const signed = (value: number) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${formatCurrency(Math.abs(value), 'EGP')}`;
 
 export default function TransactionsScreen() {
-  const insets = useSafeAreaInsets();
   const state = useFinanceStore();
   const [month, setMonth] = useState(() => toMonthKey(new Date()));
   const [filter, setFilter] = useState<TransactionFilter>('all');
@@ -81,12 +80,12 @@ export default function TransactionsScreen() {
   );
 
   return (
-    <View style={styles.root}>
+    <Screen overlay={<Fab placement="tab" onPress={() => setSheet('add')} accessibilityLabel="إضافة معاملة" />}>
       <SectionList
         sections={sections}
         keyExtractor={(tx) => tx.id}
         stickySectionHeadersEnabled={false}
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 96 }]}
+        contentContainerStyle={[styles.content, { paddingTop: 8, paddingBottom: FAB_CLEARANCE }]}
         ListHeaderComponent={header}
         renderSectionHeader={({ section }) => (
           <View style={styles.dayHeader}>
@@ -119,26 +118,13 @@ export default function TransactionsScreen() {
         }
       />
 
-      {/* ── FAB ── */}
-      <TouchableOpacity
-        style={[styles.fab, { bottom: insets.bottom + 24 }]}
-        onPress={() => setSheet('add')}
-        activeOpacity={0.85}
-        accessibilityLabel="إضافة معاملة">
-        <MaterialIcons name="add" size={30} color="#fff" />
-      </TouchableOpacity>
-
       {sheet === 'add' && <TransactionSheet onClose={() => setSheet(null)} />}
       {editing && <TransactionSheet key={editing.id} transaction={editing} onClose={() => setSheet(null)} />}
-    </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: Colors.light.background,
-  },
   content: {
     paddingHorizontal: 16,
   },
@@ -210,20 +196,4 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
-  // FAB
-  fab: {
-    position: 'absolute',
-    right: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: Colors.light.tint,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 6,
-  },
 });

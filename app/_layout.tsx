@@ -17,7 +17,7 @@ export default function RootLayout() {
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="fund/[id]" options={{ headerBackTitle: 'رجوع' }} />
+        <Stack.Screen name="fund/[id]" options={{ title: 'الصندوق', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="settings" options={{ title: 'الإعدادات', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="recurring" options={{ title: 'المعاملات المتكررة', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="due" options={{ title: 'المستحقات', headerBackTitle: 'رجوع' }} />
@@ -25,7 +25,8 @@ export default function RootLayout() {
       </Stack>
       <RecurringRunner />
       <AppLockGate />
-      <StatusBar style="auto" />
+      {/* Light theme only: dark status-bar icons on the light background. */}
+      <StatusBar style="dark" />
     </ThemeProvider>
   );
 }
