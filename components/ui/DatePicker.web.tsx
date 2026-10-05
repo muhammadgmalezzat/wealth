@@ -1,4 +1,4 @@
-import { Colors, FinanceColors } from '@/constants/theme';
+import { colors, radius, space, type } from '@/constants/theme';
 
 interface DatePickerProps {
   value: string; // 'YYYY-MM-DD'
@@ -21,13 +21,15 @@ export function DatePicker({ value, onChange, onClose }: DatePickerProps) {
         }
       }}
       style={{
-        marginTop: 10,
-        padding: 10,
-        fontSize: 15,
-        borderRadius: 10,
-        border: `1px solid ${FinanceColors.progressTrack}`,
-        backgroundColor: FinanceColors.cardBackground,
-        color: Colors.light.text,
+        marginTop: space.sm,
+        minHeight: 48,
+        padding: space.md,
+        fontSize: type.body.fontSize,
+        borderRadius: radius.md,
+        border: `1px solid ${colors.borderStrong}`,
+        backgroundColor: colors.surface,
+        color: colors.text,
+        direction: 'rtl',
       }}
     />
   );

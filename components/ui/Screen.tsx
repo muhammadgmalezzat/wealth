@@ -1,8 +1,8 @@
 import type { ReactElement, ReactNode } from 'react';
-import { ScrollView, StyleSheet, View, type RefreshControlProps, type StyleProp, type ViewStyle } from 'react-native';
+import { Platform, ScrollView, StyleSheet, View, type RefreshControlProps, type StyleProp, type ViewStyle } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { colors } from '@/constants/theme';
+import { colors, size } from '@/constants/theme';
 
 // The only way routes set their outer layout (edge-to-edge is always on in SDK 57).
 //
@@ -34,7 +34,11 @@ export const SCREEN_BOTTOM_GAP = 16;
 export function Screen({ scroll = false, edges = ['top'], contentStyle, refreshControl, header, overlay, children }: ScreenProps) {
   const insets = useSafeAreaInsets();
   const top = edges.includes('top') ? insets.top + SCREEN_TOP_GAP : 0;
-  const bottom = edges.includes('bottom') ? insets.bottom + SCREEN_BOTTOM_GAP : 0;
+  const bottomInset = edges.includes('bottom') ? insets.bottom + SCREEN_BOTTOM_GAP : 0;
+  // The inset is added to the screen's own bottom padding (e.g. FAB_CLEARANCE), never replaces it.
+  const own = StyleSheet.flatten(contentStyle) ?? {};
+  const ownBottom = Number(own.paddingBottom ?? own.paddingVertical ?? own.padding ?? 0) || 0;
+  const bottom = ownBottom + bottomInset;
 
   return (
     <View style={[styles.root, { paddingTop: top }]}>
@@ -42,13 +46,13 @@ export function Screen({ scroll = false, edges = ['top'], contentStyle, refreshC
       {scroll ? (
         <ScrollView
           style={styles.fill}
-          contentContainerStyle={[contentStyle, { paddingBottom: bottom }]}
+          contentContainerStyle={[styles.readable, contentStyle, { paddingBottom: bottom }]}
           refreshControl={refreshControl}
           keyboardShouldPersistTaps="handled">
           {children}
         </ScrollView>
       ) : (
-        <View style={[styles.fill, { paddingBottom: bottom }, contentStyle]}>{children}</View>
+        <View style={[styles.fill, styles.readable, contentStyle, { paddingBottom: bottom }]}>{children}</View>
       )}
       {overlay}
     </View>
@@ -58,4 +62,6 @@ export function Screen({ scroll = false, edges = ['top'], contentStyle, refreshC
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
   fill: { flex: 1 },
+  // Wide web windows: keep content at a readable width, centred.
+  readable: Platform.OS === 'web' ? { width: '100%', maxWidth: size.readableMax, alignSelf: 'center' } : {},
 });

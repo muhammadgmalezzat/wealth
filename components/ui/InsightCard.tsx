@@ -2,7 +2,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import type { ComponentProps } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
-import { colors, opacity, radius, space, type ColorToken } from '@/constants/theme';
+import { colors, type ColorToken, opacity, radius, space, weight } from '@/constants/theme';
 
 import { AppText } from './AppText';
 
@@ -53,5 +53,5 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row-reverse', alignItems: 'flex-start', gap: space.md },
   message: { flex: 1 },
   action: { alignSelf: 'flex-start', paddingVertical: space.xs },
-  actionText: { fontWeight: '700' },
+  actionText: { fontWeight: weight.bold },
 });

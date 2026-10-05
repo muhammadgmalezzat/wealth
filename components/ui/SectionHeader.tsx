@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
-import { opacity, space, size } from '@/constants/theme';
+import { opacity, size, space, weight } from '@/constants/theme';
 
 import { AppText } from './AppText';
 
@@ -46,5 +46,5 @@ const styles = StyleSheet.create({
   },
   title: { flexShrink: 1 },
   action: { minHeight: size.touchMin - 12, justifyContent: 'center' },
-  actionText: { fontWeight: '600' },
+  actionText: { fontWeight: weight.semibold },
 });

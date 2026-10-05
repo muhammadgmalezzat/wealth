@@ -312,7 +312,7 @@ const styles = StyleSheet.create({
   infoRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm, minHeight: 44 },
   infoBody: { gap: space.xs, paddingRight: space.xxl },
   addLine: { marginTop: space.md },
-  contribution: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: 6, minHeight: 64 },
+  contribution: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.xs + space.xxs, minHeight: 64 },
   pressed: { backgroundColor: colors.surfaceSubtle, opacity: opacity.pressed },
   emptyActions: { gap: space.sm, alignItems: 'center' },
 });

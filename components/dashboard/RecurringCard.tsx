@@ -5,7 +5,7 @@ import { AppText } from '@/components/ui/AppText';
 import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { Money } from '@/components/ui/Money';
 import { SectionHeader } from '@/components/ui/SectionHeader';
-import { opacity, space } from '@/constants/theme';
+import { opacity, space, weight } from '@/constants/theme';
 import { dueOccurrences } from '@/store/recurring';
 import type { FinanceState } from '@/store/types';
 import { toDateKey } from '@/utils/dates';
@@ -68,5 +68,5 @@ export function RecurringCard({ state, dueShownElsewhere = false, now = new Date
 
 const styles = StyleSheet.create({
   dueLink: { marginBottom: space.sm, alignSelf: 'flex-end' },
-  dueText: { fontWeight: '600' },
+  dueText: { fontWeight: weight.semibold },
 });

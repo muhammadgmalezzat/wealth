@@ -44,7 +44,7 @@ export function FormField({ label, helper, error, children }: FormFieldProps) {
 }
 
 const styles = StyleSheet.create({
-  field: { marginTop: space.lg, gap: 6 },
+  field: { marginTop: space.lg, gap: space.xs + space.xxs },
   inputError: { borderColor: colors.danger, backgroundColor: colors.dangerSurface },
   // RTL: icon at the start (right).
   errorRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs },

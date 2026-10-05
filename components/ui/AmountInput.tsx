@@ -2,7 +2,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import type { ComponentProps } from 'react';
 import { StyleSheet, TextInput, View } from 'react-native';
 
-import { colors, radius, space } from '@/constants/theme';
+import { colors, radius, space, type } from '@/constants/theme';
 import type { CurrencyCode } from '@/store/types';
 import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
@@ -81,9 +81,7 @@ const styles = StyleSheet.create({
   // intrinsic width (hundreds of px at 48px) and pushes the number off-screen.
   row: { flexDirection: 'row', alignItems: 'baseline', alignSelf: 'stretch', gap: space.sm },
   input: {
-    fontSize: 48,
-    lineHeight: 58,
-    fontWeight: '700',
+    ...type.amountInput,
     color: colors.text,
     flex: 1,
     minWidth: 0,
@@ -92,7 +90,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontVariant: ['tabular-nums'],
   },
-  inputSmall: { fontSize: 40, lineHeight: 50 },
+  inputSmall: { ...type.amountInputCompact },
   // RTL: icon first, on the right.
   hint: {
     flexDirection: 'row-reverse',

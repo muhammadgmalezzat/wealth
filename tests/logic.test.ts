@@ -2698,3 +2698,12 @@ describe('settings / assets UI helpers', () => {
     assert.deepEqual([g.EG.map((a) => a.id), g.SA.map((a) => a.id), g.archived.map((a) => a.id)], [['a'], ['b'], ['c']]);
   });
 });
+
+describe('parseAmount in the add-asset form', () => {
+  it('reads Arabic digits with the Arabic thousands separator', () => {
+    assert.equal(parseAmount('١٢٬٥٠٠'), 12500);
+    assert.equal(parseAmount('٠', { allowZero: true }), 0);
+    // Negative or text input is rejected (the form then asks for a valid number).
+    assert.equal(parseAmount('-500', { allowZero: true }), null);
+  });
+});

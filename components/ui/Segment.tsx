@@ -1,6 +1,6 @@
 import { Pressable, StyleSheet, View } from 'react-native';
 
-import { colors, radius, shadow, space } from '@/constants/theme';
+import { colors, radius, shadow, space, weight } from '@/constants/theme';
 
 import { AppText } from './AppText';
 
@@ -48,15 +48,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row-reverse',
     backgroundColor: colors.surfaceSubtle,
     borderRadius: radius.md,
-    padding: 3,
+    padding: space.xxs,
   },
   item: {
     flex: 1,
     minHeight: 38,
     justifyContent: 'center',
     paddingHorizontal: space.xs,
-    borderRadius: radius.md - 3,
+    borderRadius: radius.md - space.xxs,
   },
   itemActive: { backgroundColor: colors.surface, ...shadow.card },
-  textActive: { fontWeight: '700' },
+  textActive: { fontWeight: weight.bold },
 });

@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AppText } from '@/components/ui/AppText';
 import { Button } from '@/components/ui/Button';
-import { colors, space } from '@/constants/theme';
+import { colors, radius, space } from '@/constants/theme';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { authenticate } from '@/utils/appLock';
 
@@ -117,7 +117,7 @@ const styles = StyleSheet.create({
   disc: {
     width: 72,
     height: 72,
-    borderRadius: 36,
+    borderRadius: radius.pill,
     backgroundColor: colors.primary50,
     alignItems: 'center',
     justifyContent: 'center',

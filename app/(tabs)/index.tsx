@@ -113,6 +113,7 @@ export default function HomeScreen() {
               title="لسه مسجلتش معاملات."
               body="سجّل أول مصروف أو دخل عشان تبدأ تشوف صورة شهرك."
               actionLabel="سجّل معاملة"
+              actionVariant="secondary"
               onAction={() => setTxSheet('add')}
             />
           </Card>

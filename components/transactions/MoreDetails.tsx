@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { AppText } from '@/components/ui/AppText';
-import { colors, opacity, space } from '@/constants/theme';
+import { colors, opacity, space, weight } from '@/constants/theme';
 
 interface MoreDetailsProps {
   initiallyOpen: boolean;
@@ -35,5 +35,5 @@ const styles = StyleSheet.create({
   wrap: { marginTop: space.xl },
   // RTL: label on the right, chevron after it.
   toggle: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs, minHeight: 44, alignSelf: 'flex-end' },
-  label: { fontWeight: '600' },
+  label: { fontWeight: weight.semibold },
 });

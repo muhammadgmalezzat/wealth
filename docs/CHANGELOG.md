@@ -6,6 +6,57 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth redesign (summary)
+
+The whole Calm Wealth redesign in one place. JS-only: ships with `eas update` to 1.1.0 builds; no
+schema, data-version, backup-format or native change.
+
+- Phase 1 — `2165ff7` design tokens and shared primitives.
+- Phase 2 — `1c41a89` Home, tab bar, FundCard.
+- Phase 3 — `0c13844` Transactions list and sheet.
+- Phase 4 — `7dd162b` Monthly plan.
+- Domain fixes — `ce42e42`: A1 fund "pending" status (no "محتاج انتباه" on day 1), A2 transfer
+  rate re-snapshot pinned by tests, A3 `INVALID_MODE`, A4 zero-limit plan line copy.
+- Phase 5 — `1944804` Funds, Recurring, Due.
+- Phase 6 — `5b90d68` Assets, Gold, Categories, Settings, Backup, App Lock.
+- Phase 7 — polish, legacy alias removal, final QA (entry below).
+
+---
+
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 7
+
+Calm Wealth — phase 7: polish, alias removal, QA.
+
+> JS-only. No store, schema or backup change.
+
+**For users**
+- Accounts can be archived and restored from the account sheet («أرشفة الحساب» / «استرجاع الحساب»).
+- "+ حساب" and opening gold accept Arabic digits (e.g. ١٢٬٥٠٠) and show a clear message for an
+  invalid number.
+- Large amounts are never cut off: on the phone they shrink to fit; summary boxes stack on narrow
+  screens.
+- On a wide screen (web) content stays a readable width in the middle.
+- Lists under a "+" button always end above it (Recurring, Categories were partly covered).
+- One clear main button per screen ("وزّع أموالك" and empty-list actions became secondary where the
+  screen already has one).
+
+**Technical**
+- Removed `Colors`, `FinanceColors`, `Fonts` and `hooks/use-color-scheme(.web).ts`; no hex in
+  `app/` or `components/`. New tokens: `space.xxs`, `weight`, `type.amountInput`,
+  `type.amountInputCompact`, `type.sheetTitle`, `size.readableMax`. All raw spacing, radius, font
+  sizes and weights replaced by tokens; ProgressBar lost its deprecated `color`/`backgroundColor`.
+- `Screen` adds the bottom inset to the content's own bottom padding (it used to override it,
+  dropping `FAB_CLEARANCE` on stack screens) and caps width at 640 on web; `FormSheet` too.
+- `Money` never clips (native `adjustsFontSizeToFit`, web `word-break`); `MetricGroup` stacks below
+  96 px per cell; `EmptyState` gains `actionVariant`.
+- Assets add-account / opening-gold use `parseAmount` (+1 test, 164 total); EditAccountSheet uses
+  the existing `updateAccount({ archived })`.
+- QA: web at 320/360/414/1280 px and 150% zoom, no horizontal overflow, 0 unlabeled icon buttons,
+  0 console errors; tsc, lint, tests, expo-doctor and web export clean. Device checklist added to
+  TECHNICAL.md.
+
+---
+
 ## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 6
 
 Calm Wealth — phase 6: Assets, Gold, Categories, Settings, Backup, App Lock.

@@ -295,7 +295,7 @@ export default function SettingsScreen() {
 
 const styles = StyleSheet.create({
   content: { padding: space.lg, gap: space.lg },
-  helpers: { marginTop: space.md, gap: 2 },
+  helpers: { marginTop: space.md, gap: space.xxs },
   save: { marginTop: space.lg },
   listGap: { marginTop: space.md },
   backup: { gap: space.md },

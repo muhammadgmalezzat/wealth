@@ -39,7 +39,8 @@ export type ColorToken = keyof ThemeColors;
 // Single switch point for future dark mode.
 export const colors: ThemeColors = palette.light;
 
-export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 24, xxxl: 32, huge: 40 } as const;
+// xxs (2) is for hairline gaps inside dense rows; in-between values are sums (e.g. xs + xxs = 6).
+export const space = { xxs: 2, xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 24, xxxl: 32, huge: 40 } as const;
 export const radius = { sm: 8, md: 12, lg: 16, xl: 24, pill: 999 } as const;
 
 type TypeStyle = Pick<TextStyle, 'fontSize' | 'lineHeight' | 'fontWeight'>;
@@ -59,50 +60,23 @@ export const type = {
   secondary: { fontSize: 14, lineHeight: 22, fontWeight: '400' },
   caption: { fontSize: 13, lineHeight: 20, fontWeight: '500' },
   micro: { fontSize: 12, lineHeight: 18, fontWeight: '500' },
+  // The big centred amount field (AmountInput) and its compact size for long numbers.
+  amountInput: { fontSize: 48, lineHeight: 58, fontWeight: '700' },
+  amountInputCompact: { fontSize: 40, lineHeight: 50, fontWeight: '700' },
+  // FormSheet header title.
+  sheetTitle: { fontSize: 18, lineHeight: 26, fontWeight: '700' },
 } as const satisfies Record<string, TypeStyle>;
 export type TypeVariant = keyof typeof type;
 // Same object; `type` reads awkwardly in imports.
 export const typography = type;
+
+// Emphasis on top of a type style (e.g. a semibold caption). Line heights come from `type`.
+export const weight = { regular: '400', medium: '500', semibold: '600', bold: '700' } as const;
 
 export const shadow = {
   card: { shadowColor: '#17201D', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 2, elevation: 1 },
   raised: { shadowColor: '#17201D', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.12, shadowRadius: 16, elevation: 6 },
 } as const;
 export const opacity = { pressed: 0.85, disabled: 0.4 } as const;
-export const size = { touchMin: 44, fab: 56, icon: 24, progress: 8 } as const;
-
-// ---------------------------------------------------------------------------
-// Temporary aliases so screens not yet redesigned keep compiling. Values stay 6-digit hex
-// because some call sites append an alpha suffix (e.g. `Colors.light.tint + '22'`).
-// ---------------------------------------------------------------------------
-
-const legacyLight = {
-  text: colors.text,
-  background: colors.background,
-  tint: colors.primary700,
-  icon: colors.textSecondary,
-  tabIconDefault: colors.textSecondary,
-  tabIconSelected: colors.primary700,
-};
-
-/** @deprecated use colors/space/radius/type */
-export const Colors = {
-  light: legacyLight,
-  // The app is locked to the light theme.
-  dark: { ...legacyLight },
-};
-
-/** @deprecated use colors/space/radius/type */
-export const FinanceColors = {
-  primary: colors.primary700,
-  income: colors.primary700,
-  expense: colors.danger,
-  gold: colors.gold,
-  progressTrack: colors.progressTrack,
-  cardBackground: colors.surfaceSubtle,
-};
-
-/** @deprecated use colors/space/radius/type (system fonts only) */
-export const Fonts = {
-  sans: 'System',
-};
+// readableMax: content width cap on wide (web/desktop) windows; phones are narrower anyway.
+export const size = { touchMin: 44, fab: 56, icon: 24, progress: 8, readableMax: 640 } as const;

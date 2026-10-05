@@ -118,5 +118,5 @@ export function TransactionRow({ tx, state, onPress, showDate = false }: Transac
 }
 
 const styles = StyleSheet.create({
-  chips: { flexDirection: 'row-reverse', flexWrap: 'wrap', gap: space.xs, marginTop: 2 },
+  chips: { flexDirection: 'row-reverse', flexWrap: 'wrap', gap: space.xs, marginTop: space.xxs },
 });

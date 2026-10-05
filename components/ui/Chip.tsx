@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
-import { colors, opacity, radius, space } from '@/constants/theme';
+import { colors, opacity, radius, space, weight } from '@/constants/theme';
 
 import { AppText } from './AppText';
 
@@ -44,14 +44,14 @@ const styles = StyleSheet.create({
   chip: {
     minHeight: 36,
     justifyContent: 'center',
-    paddingHorizontal: 14,
+    paddingHorizontal: space.md + space.xxs,
     borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surface,
   },
   chipSelected: { backgroundColor: colors.primary50, borderColor: colors.primary700 },
-  labelSelected: { fontWeight: '600' },
+  labelSelected: { fontWeight: weight.semibold },
   pressed: { opacity: opacity.pressed },
   disabled: { opacity: opacity.disabled },
 });

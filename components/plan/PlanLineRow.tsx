@@ -68,7 +68,7 @@ export function PlanLineRow({ line, name, currency, archived = false, onPress }:
 }
 
 const styles = StyleSheet.create({
-  row: { minHeight: 64, paddingHorizontal: space.lg, paddingVertical: space.md, gap: 6 },
+  row: { minHeight: 64, paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.xs + space.xxs },
   pressed: { backgroundColor: colors.surfaceSubtle, opacity: opacity.pressed },
   line1: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm },
   line2: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm },

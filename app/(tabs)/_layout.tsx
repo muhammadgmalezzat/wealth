@@ -4,7 +4,7 @@ import { Platform, StyleSheet } from 'react-native';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
-import { colors, size, type } from '@/constants/theme';
+import { colors, size, type, space } from '@/constants/theme';
 
 export default function TabLayout() {
   return (
@@ -25,7 +25,7 @@ export default function TabLayout() {
           elevation: 0,
           shadowOpacity: 0,
           // Web has no bottom inset, so the default 48px bar clips the Arabic labels' descent.
-          ...(Platform.OS === 'web' ? { height: 58, paddingBottom: 6 } : null),
+          ...(Platform.OS === 'web' ? { height: 58, paddingBottom: space.xs + space.xxs } : null),
         },
       }}>
       <Tabs.Screen

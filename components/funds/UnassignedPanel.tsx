@@ -55,7 +55,8 @@ export function UnassignedPanel({ state }: { state: FinanceState }) {
         <Money amount={amount} currency="EGP" size="md" />
         <AppText variant="secondary">ممكن توزّع جزء منها على أهدافك القادمة.</AppText>
         <View style={styles.action}>
-          <Button label="وزّع أموالك" onPress={() => setSheet('assign')} />
+          {/* Secondary: Home and the Funds tab keep their own single primary. */}
+          <Button label="وزّع أموالك" variant="secondary" onPress={() => setSheet('assign')} />
         </View>
       </Card>
       {sheets}

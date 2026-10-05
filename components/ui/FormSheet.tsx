@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { colors, opacity, radius, space, type } from '@/constants/theme';
+import { colors, opacity, radius, space, type, size } from '@/constants/theme';
 
 // Page-sheet modal with cancel / title / save header, shared by the app's edit forms.
 // Safe area: on Android the modal is a full-screen window drawn under the status and navigation
@@ -58,7 +58,7 @@ export function FormSheet({
       <KeyboardAvoidingView
         style={[styles.root, { paddingTop: insets.top }]}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <View style={styles.header}>
+        <View style={[styles.header, styles.readable]}>
           <TouchableOpacity onPress={onCancel} hitSlop={12} accessibilityRole="button">
             <Text style={styles.cancel}>إلغاء</Text>
           </TouchableOpacity>
@@ -76,7 +76,7 @@ export function FormSheet({
         </View>
         <ScrollView
           style={styles.scroll}
-          contentContainerStyle={[styles.body, { paddingBottom: insets.bottom + 40 }]}
+          contentContainerStyle={[styles.body, styles.readable, { paddingBottom: insets.bottom + 40 }]}
           keyboardShouldPersistTaps="handled">
           {children}
         </ScrollView>
@@ -117,9 +117,7 @@ const styles = StyleSheet.create({
   },
   title: {
     flexShrink: 1,
-    fontSize: 18,
-    lineHeight: 26,
-    fontWeight: '700',
+    ...type.sheetTitle,
     color: colors.text,
   },
   cancel: {
@@ -136,6 +134,8 @@ const styles = StyleSheet.create({
   scroll: {
     flex: 1,
   },
+  // Wide web windows: same readable cap as Screen.
+  readable: Platform.OS === 'web' ? { width: '100%', maxWidth: size.readableMax, alignSelf: 'center' } : {},
   body: {
     paddingHorizontal: space.xl,
     paddingTop: space.xl,
@@ -145,7 +145,7 @@ const styles = StyleSheet.create({
     ...type.caption,
     color: colors.textSecondary,
     textAlign: 'right',
-    marginBottom: 6,
+    marginBottom: space.xs + space.xxs,
     marginTop: space.lg,
   },
   input: {
@@ -153,8 +153,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.borderStrong,
     borderRadius: radius.md,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: space.md + space.xxs,
+    paddingVertical: space.sm + space.xxs,
     ...type.body,
     color: colors.text,
     backgroundColor: colors.surface,

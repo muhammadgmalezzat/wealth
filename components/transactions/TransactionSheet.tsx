@@ -517,7 +517,7 @@ const styles = StyleSheet.create({
   note: { minHeight: 72, textAlignVertical: 'top' },
   // RTL: text on the right, switch on the left.
   switchRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.md, marginTop: space.lg },
-  switchText: { flex: 1, gap: 2 },
+  switchText: { flex: 1, gap: space.xxs },
   recurring: { marginTop: space.md },
   delete: { marginTop: space.xxxl },
 });

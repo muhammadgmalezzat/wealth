@@ -1,4 +1,4 @@
-import { StyleSheet, View } from 'react-native';
+import { Platform, StyleSheet, View, type TextStyle } from 'react-native';
 
 import type { ColorToken, TypeVariant } from '@/constants/theme';
 import type { CurrencyCode } from '@/store/types';
@@ -32,10 +32,17 @@ const TONE: Record<MoneyTone, ColorToken> = {
   muted: 'textSecondary',
 };
 
+// Amounts are never cut off: native shrinks a long figure to fit one line; the web (no
+// shrink-to-fit) lets it wrap instead, so the row grows.
+const NEVER_CLIP =
+  Platform.OS === 'web' ? {} : ({ numberOfLines: 1, adjustsFontSizeToFit: true, minimumFontScale: 0.6 } as const);
+// Web last resort: a very long figure may break between digits rather than overlap its neighbour.
+const WEB_BREAK = (Platform.OS === 'web' ? { wordBreak: 'break-all' } : {}) as TextStyle;
+
 // A money amount in tabular figures.
 export function Money({ amount, currency, size = 'row', tone = 'default', showSign = false, converted, align = 'right' }: MoneyProps) {
   const main = (
-    <AppText variant={VARIANT[size]} color={TONE[tone]} align={align} style={styles.tabular} numberOfLines={1}>
+    <AppText variant={VARIANT[size]} color={TONE[tone]} align={align} style={[styles.tabular, WEB_BREAK]} {...NEVER_CLIP}>
       {formatMoney(amount, currency, showSign)}
     </AppText>
   );

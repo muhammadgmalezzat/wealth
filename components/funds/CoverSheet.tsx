@@ -7,7 +7,7 @@ import { FormSheet } from '@/components/ui/FormSheet';
 import { formatMoney } from '@/components/ui/formatMoney';
 import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { Money } from '@/components/ui/Money';
-import { colors, space } from '@/constants/theme';
+import { colors, space, weight } from '@/constants/theme';
 import {
   defaultCoverFundId,
   fundAllocated,
@@ -93,5 +93,5 @@ export function CoverSheet({ onClose }: CoverSheetProps) {
 const styles = StyleSheet.create({
   summary: { gap: space.xs, backgroundColor: colors.dangerSurface, borderColor: colors.dangerSurface },
   hint: { marginTop: space.lg, marginBottom: space.sm },
-  result: { marginTop: space.lg, fontWeight: '600' },
+  result: { marginTop: space.lg, fontWeight: weight.semibold },
 });

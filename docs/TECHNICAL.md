@@ -162,7 +162,7 @@ utils/
   id.ts                     newId() = expo-crypto randomUUID
 
 constants/                  theme.ts (design tokens), currencies.ts (DEFAULT_RATES), market.ts
-tests/logic.test.ts         126 tests over store/* and utils/*
+tests/logic.test.ts         164 tests over store/*, utils/* and the pure UI helpers
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
 .easignore                  EAS upload filter (keeps store/seed.local.ts)
@@ -190,7 +190,9 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
   `useSafeAreaInsets()` from `react-native-safe-area-context` (never React Native's
   `SafeAreaView`): `'top'` → `paddingTop = insets.top + 8` on the outer view (so scrolled content
   never slides under the status bar); `'bottom'` → `paddingBottom = insets.bottom + 16` on the
-  scroll content (or the inner view when not scrolling). Background = `Colors.light.background`.
+  scroll content (or the inner view when not scrolling), added on top of the screen's own
+  `contentStyle` padding (so a list's `FAB_CLEARANCE` survives). Background = `colors.background`.
+  On web the content is capped at `size.readableMax` (640) and centred; native is full width.
 - **Tab screens** (`headerShown: false`): `edges={['top']}`; their own header row (e.g. the gear
   on الرئيسية) is part of the content, so it sits below `insets.top`. No `'bottom'` edge — the tab
   bar sits below the screen and already reserves `insets.bottom`.
@@ -227,29 +229,47 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 
 ### Design system (Calm Wealth)
 
-Phase 1 of the Calm Wealth redesign: tokens + shared primitives. Screens are migrated in later
-phases; until then they keep using the deprecated aliases below.
+The single source of truth for how the app looks. Every screen was migrated in phases 1–6; phase 7
+removed the legacy aliases (`Colors`, `FinanceColors`, `Fonts`), the Expo template hooks
+(`hooks/use-color-scheme*`) and all string-built alpha tints. `app/` and `components/` contain no
+hex colors and no raw font sizes, weights, radii or shadows — only the tokens below.
 
-**Tokens (`constants/theme.ts`)** — components read these, never raw hex.
-- `palette.light` → `colors` (type `ThemeColors`, keys = `ColorToken`); `colors` is the single
-  switch point for a future dark palette. Grounds: `background` #F8F7F3, `surface` #FFFFFF,
-  `surfaceSubtle`, `border`, `borderStrong`, `progressTrack`. Text: `text`, `textSecondary`,
-  `textMuted` (placeholders/disabled only — fails 4.5:1). Brand green `primary900…primary50`,
-  `onPrimary`. Gold: `gold`, `goldSurface`, `goldText`. States: `warning`/`warningSurface`,
-  `danger`/`dangerSurface`. `scrim`.
-- `space` xs 4 · sm 8 · md 12 · lg 16 · xl 20 · xxl 24 · xxxl 32 · huge 40.
-- `radius` sm 8 · md 12 · lg 16 · xl 24 · pill 999.
-- `type` (alias `typography`; keys = `TypeVariant`): moneyHero 34/44, moneyLg 24/32, moneyMd
+**Tokens (`constants/theme.ts`)**
+- **Colors** — `palette.light` → `colors` (type `ThemeColors`, keys = `ColorToken`); `colors` is
+  the single switch point for a future dark palette. Grounds: `background` #F8F7F3, `surface`
+  #FFFFFF, `surfaceSubtle`, `border`, `borderStrong`, `progressTrack`. Text: `text`,
+  `textSecondary`, `textMuted` (placeholders/disabled only — fails 4.5:1). Brand green
+  `primary900…primary50`, `onPrimary`. Gold: `gold`, `goldSurface`, `goldText`. States:
+  `warning`/`warningSurface`, `danger`/`dangerSurface`. `scrim`. Need a new tint? Add one named
+  token to the palette — never `color + '22'`.
+- **`space`** xxs 2 · xs 4 · sm 8 · md 12 · lg 16 · xl 20 · xxl 24 · xxxl 32 · huge 40. In-between
+  values are sums (`space.xs + space.xxs` = 6).
+- **`radius`** sm 8 · md 12 · lg 16 · xl 24 · pill 999 (also for dots and discs).
+- **`type`** (alias `typography`; keys = `TypeVariant`): moneyHero 34/44, moneyLg 24/32, moneyMd
   18/26, moneyRow 16/24, display 32/42, titleLg 26/36, title 22/30, section 18/26, body 16/26,
-  bodyStrong 16/26 600, secondary 14/22, caption 13/20, micro 12/18. Money styles are rendered
-  with `fontVariant: ['tabular-nums']`.
-- `shadow.card`, `shadow.raised`; `opacity` pressed 0.85 / disabled 0.4; `size` touchMin 44,
-  fab 56, icon 24, progress 8. System fonts only; icons = MaterialIcons (+ `IconSymbol`).
-- **Deprecated aliases** (`Colors`, `FinanceColors`, `Fonts`), removed in phase 7:
-  `Colors.light.text/background` → text/background, `tint`/`tabIconSelected` → primary700,
-  `icon`/`tabIconDefault` → textSecondary, `Colors.dark` = light; `FinanceColors.primary/income` →
-  primary700, `expense` → danger, `gold` → gold, `progressTrack`, `cardBackground` → surfaceSubtle.
-  They stay 6-digit hex because old call sites append alpha suffixes (`tint + '22'`).
+  bodyStrong 16/26 600, secondary 14/22, caption 13/20, micro 12/18, amountInput 48/58,
+  amountInputCompact 40/50, sheetTitle 18/26. Money is rendered with `fontVariant: ['tabular-nums']`.
+- **`weight`** regular 400 · medium 500 · semibold 600 · bold 700 (for a style that changes only
+  the weight of a `type` entry, e.g. a selected chip).
+- **`shadow.card`**, **`shadow.raised`** (the only two; the tab bar has none). `opacity` pressed
+  0.85 / disabled 0.4. **`size`** touchMin 44, fab 56, icon 24, progress 8, readableMax 640.
+- System fonts only; icons = MaterialIcons (+ `IconSymbol`).
+- Hex values exist only in `constants/theme.ts` (palette, shadowColor) and `app.json` (splash /
+  adaptive icon / notification colors, which native config needs as hex).
+
+**Color semantics.**
+- Green (`primary*`) = brand and the one primary action. Income is never green-coded, expense is
+  never red-coded: `Money` picks its tone by meaning, never by sign.
+- Gold = gold holdings only (value, gold part of a fund bar, "مربوط بـ" chip, gold metric cell).
+- Amber (`warning`) = needs attention but nothing is wrong yet (fund "محتاج انتباه", plan line
+  near its limit, overdue backup, missed due item, over-budget hint while typing).
+- Red (`danger`) only where money is actually short or input is invalid. The complete list:
+  negative unassigned (UnassignedPanel, Home cover InsightCard, CoverSheet deficit), an
+  AssignSheet / FundSheet allocation that would make unassigned negative, a plan line over its
+  limit (PlanLineRow / LineSheet "عدى الخطة", ProgressBar `over`), validation errors (FormField,
+  AccountPicker, CategoryPicker, TransactionSheet), and the `destructive` Button (delete/cover).
+- State is never conveyed by color alone: every colored state has a label (StatusChip, text) or
+  an icon.
 
 **RTL approach (one rule everywhere).** The app never enables `I18nManager` RTL (Expo's
 `supportsRTL` is off), so the layout engine is always LTR and Arabic is laid out explicitly:
@@ -265,27 +285,64 @@ reordered inside Arabic text. Inputs of numbers stay LTR (AmountInput).
 |---|---|---|
 | `AppText` | `variant` (TypeVariant, default body), `color` (ColorToken, default text), `align` (default right), + Text props | Base of all primitives |
 | `Card` | `variant` default \| subtle \| hero, `style` | default: surface, 1px border, radius.lg, padding lg, shadow.card · subtle: surfaceSubtle, flat · hero: radius.xl, padding xl |
-| `Button` | `label`, `onPress`, `variant` primary \| secondary \| tertiary \| destructive, `icon?`, `disabled`, `loading`, `block` | minHeight 48, radius.md; primary pressed → primary900 |
+| `Button` | `label`, `onPress`, `variant` primary \| secondary \| tertiary \| destructive, `icon?`, `disabled`, `loading`, `block`, `accessibilityLabel?` | minHeight 48, radius.md; primary pressed → primary900. One primary per screen or sheet (exception: each Due row's "تم") |
 | `Chip` / `ChipRow` | `label`, `selected`, `disabled`, `onPress` | pill, minHeight 36 + hitSlop → 44; selected primary50 / primary700 border / primary800 semibold |
 | `StatusChip` | `label` (required), `tone` ok \| attention \| danger \| gold \| neutral, `icon?` | Status never by color alone |
 | `Segment` | `options`, `value` (may be undefined), `onChange` | Track surfaceSubtle, active surface + shadow.card + primary800 bold |
-| `ProgressBar` | `progress`, `tone` normal \| attention \| over, `goldPortion?`, `height` (+ deprecated `color`, `backgroundColor`) | Fills primary600 / warning / danger; gold part first |
-| `Money` (+ `formatMoney` in pure `formatMoney.ts`) | `amount`, `currency`, `size` hero \| lg \| md \| row, `tone` default \| positive \| danger \| muted, `showSign?`, `converted?` {amount, currency}, `align` | Never colored by sign; tabular nums; `LRI` + symbol + `LRM` + sign + number + `PDI` (the LRM keeps "−1,250" together: digits after the Arabic symbol would otherwise resolve as Arabic numbers and the minus would jump to their right) |
-| `AmountInput` | `value`, `onChangeText`, `onChangeAmount?` (parseAmount), `currency`, `hint?` {tone neutral \| attention, text}, `allowZero`, `autoFocus` | 48 (40 when long) bold, centred |
+| `ProgressBar` | `progress` 0–1, `tone` normal \| attention \| over, `goldPortion?`, `height` | Fills primary600 / warning / danger from the right; gold part first; `accessibilityRole="progressbar"` |
+| `Money` (+ `formatMoney` in pure `formatMoney.ts`) | `amount`, `currency`, `size` hero \| lg \| md \| row, `tone` default \| positive \| danger \| muted, `showSign?`, `converted?` {amount, currency}, `align` | Never colored by sign; tabular nums; `LRI` + symbol + `LRM` + sign + number + `PDI`. Never clipped: native shrinks to fit (`adjustsFontSizeToFit`, min 0.6); web wraps (`word-break: break-all`). Use `formatMoney` for money inside a sentence |
+| `AmountInput` | `value`, `onChangeText`, `onChangeAmount?` (parseAmount), `currency`, `hint?` {tone neutral \| attention, text}, `allowZero`, `autoFocus`, `accessibilityLabel?` | type.amountInput (amountInputCompact when long), centred |
 | `FormField` | `label`, `helper?`, `error?`, children (input) | Error: danger border + dangerSurface + icon + text. `FormInput`/`FieldLabel` in FormSheet share the look: borderStrong, radius.md, minHeight 48, body, placeholder textMuted |
-| `ListRow` / `ListGroup` | `title`, `subtitle?`, `icon?`, `iconTone` neutral \| ok \| gold, `trailing?`, `chevron?`, `archived?`, `onPress?` | 36px icon tile, minHeight 56; group = surface, radius.lg, border, hairline separators |
+| `ListRow` / `ListGroup` | `title`, `subtitle?`, `subtitleLines` (2), `icon?`, `iconTone` neutral \| ok \| gold, `trailing?`, `accessory?` (chips under the subtitle), `titleColor?`, `chevron?`, `archived?`, `onPress?`, `accessibilityLabel?` | 36px icon tile, minHeight 56; group = surface, radius.lg, border, hairline separators |
 | `SectionHeader` | `title`, `actionLabel?`, `onAction?`, `trailing?` (non-pressable info) | section type + tertiary action |
-| `MetricGroup` | `metrics: {label, value, tone?: 'gold'}[]`, `accessibilityLabel?` | One grouped surface, equal cells, hairline dividers (MonthlySnapshot and the Plan summary) |
+| `MetricGroup` | `metrics: {label, value, tone?: 'gold'}[]`, `accessibilityLabel?` | One grouped surface, equal cells, hairline dividers. When a cell would be narrower than 96px it stacks into label/value rows |
 | `InsightCard` | `tone` ok \| attention \| danger, `message`, `icon?`, `actionLabel?`, `onAction?` | Grounds primary50 / warningSurface / dangerSurface |
-| `EmptyState` | `icon`, `title`, `body?`, `actionLabel?`, `onAction?` | Icon disc + primary Button |
-| `Fab` | unchanged API (`placement`, `FAB_CLEARANCE`) | primary700, pill, shadow.raised |
-| `FormSheet` | unchanged API (`useSheetInsets`) | background ground, hairline header, title 18 bold, cancel textSecondary, save primary700 |
-| `Screen` | unchanged | background = colors.background |
-| `CurrencyText`, `LoadingView`, `MonthSwitcher` (no outer margin since phase 4; screens space it) | unchanged | Tokens (StatCard was removed in phase 6) |
+| `EmptyState` | `icon`, `title`, `body?`, `actionLabel?`, `onAction?`, `actionVariant` primary \| secondary | Icon disc + Button; `secondary` when the screen already has its primary |
+| `Fab` | `onPress`, `accessibilityLabel` (required, Arabic), `placement` tab \| stack; `FAB_CLEARANCE` (92) | primary700, pill, shadow.raised |
+| `FormSheet` | `visible`, `title`, `onCancel`, `onSave`, `saveLabel` ("حفظ"), `saveDisabled`; `useSheetInsets()` | background ground, hairline header, type.sheetTitle, cancel textSecondary, save primary700; header and body capped at 640 on web |
+| `Screen` | `scroll`, `edges`, `contentStyle`, `refreshControl`, `header`, `overlay` | See "Layout & safe-area conventions"; bottom inset is added to the content's own bottom padding |
+| `MonthSwitcher`, `DateFields`, `LoadingView`, `CurrencyText` | — | Tokens only; MonthSwitcher has no outer margin (screens space it) |
 
 Pure date helper: `components/ui/formatDateAr.ts` → `formatDateAr(dateKey|iso, {year})` ("٥ أكتوبر ٢٠٢٦");
-used by redesigned components instead of `utils/formatters.formatDate` (which prints English
-month names).
+used instead of `utils/formatters.formatDate` (which prints English month names).
+
+**Copy rules.** Egyptian Arabic, short, calm. No emoji, no English in the UI (technical details in
+Settings excepted), no shaming ("محتاج انتباه", not "متأخر"/"فشلت"). Numbers are typed with
+Arabic or Western digits (`utils/parseAmount`). Empty states say what's missing and offer the next
+step. Icon-only buttons always carry an Arabic `accessibilityLabel`; every touch target is ≥ 44
+(`size.touchMin`, hitSlop allowed).
+
+**Adding a new screen — checklist.**
+1. Route in `app/`; title in `app/_layout.tsx` for stack screens (native header, back "رجوع").
+2. Wrap in `<Screen>`: tab → `edges={['top']}`; stack → `edges={['bottom']}`. No manual status-bar
+   padding.
+3. Build from the primitives above; only tokens for color, space, radius, type, shadow.
+4. One primary Button. Destructive actions → `destructive` + confirm, placed last.
+5. Money only through `Money` / `formatMoney`; never color by sign.
+6. Add-button → `Fab` with an Arabic label, and `paddingBottom: FAB_CLEARANCE` on the list.
+7. Forms → a `*Sheet` on `FormSheet`; amounts through `AmountInput`/`parseAmount`; errors in
+   `FormField error`.
+8. Empty state (`EmptyState`) and, if data loads, `LoadingView`.
+9. Labels on icon-only controls; state shown by text/icon as well as color.
+10. Check at 320 px and on a phone; update TECHNICAL / USER_GUIDE / CHANGELOG.
+
+**Device QA checklist (owner, on the phone).** Web QA covers layout at 320/360/414 px, desktop
+and 150% zoom; these need a real device (Android first):
+- Edge-to-edge: no screen or sheet content under the status bar or the navigation bar (gesture
+  and 3-button navigation); FABs sit above the navigation bar on الأصول / المعاملات / الصناديق /
+  المتكررة / البنود.
+- Keyboard: open each sheet (معاملة, بند, خطة، صندوق, توزيع, تغطية, حساب, ذهب, متكرر, تأكيد, نسخة,
+  استعادة), focus the last field — it must stay visible above the keyboard and "حفظ" reachable.
+- Back gesture / back button inside a sheet closes the sheet only (no navigation, no lost save).
+- Long sheets (معاملة with «تفاصيل أكتر», تعديل الخطة, متكرر) scroll to the last button.
+- Large font (Settings → Display → Font size max): Home hero, MetricGroups and fund cards don't
+  clip; large amounts shrink instead of "…".
+- Arabic digits typed from the keyboard (e.g. ١٢٬٥٠٠) in amount fields and in "+ حساب".
+- App lock: enable, background the app, return → lock; fingerprint/PIN unlocks; cancel keeps it
+  locked.
+- Due reminders: a confirm rule due today → notification arrives; tapping opens the app.
+- Export a backup and restore it (file picker / share sheet).
+- Pull to refresh where offered; switching tabs keeps scroll position sensible.
 
 ### Navigation theme & tab bar (Calm Wealth phase 2)
 
@@ -846,7 +903,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts` (126 tests, ~20 s; the encrypted round
+`npm run test:logic` → `tsx --test tests/logic.test.ts` (164 tests, ~20 s; the encrypted round
 trip uses the real 200k-iteration KDF). Suites: migrations (v0–v6), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,
@@ -869,7 +926,7 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 ## 15. Known limitations & tech debt
 
 - Gold prices and exchange rates are manual (`constants/market.ts` placeholders until set).
-- No UI yet for: liabilities, archiving accounts, currency holdings (only shown if present), editing an
+- No UI yet for: liabilities, currency holdings (only shown if present), editing an
   opening gold holding. Corresponding operations exist (`addLiability`, `updateHolding`, `updateFundMovement`, …).
 - `DEFAULT_RATES.lastUpdated` is computed at module load, so a fresh install shows "last updated"
   as the first launch time.
@@ -897,8 +954,14 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
   editor discards unsaved plan edits (after a confirm) because a route can't open above the modal.
 - Numbers are formatted with Western digits (`en-US`) inside an Arabic UI.
 - `AGENTS.md` points to the SDK 54 docs although the project is on SDK 57.
-- Adding an account parses amounts with `parseFloat` (Western digits only), unlike the rest of the
-  app (`parseAmount`); the delete-account error suggests archiving, which has no UI yet.
+- EditAccountSheet still parses the new balance with `parseFloat` (Western digits only) because
+  a negative balance must stay possible there; add-account / opening-gold use `parseAmount`.
+- At 320 px on web, 8-digit amounts inside a MetricGroup cell wrap onto two lines (never clipped;
+  native shrinks them instead).
+- Recurring notifications format money with `formatCurrency` (plain notification text, not the
+  `Money` isolate).
+- Android edge-to-edge, keyboard, back gesture and large font were not checked on a device
+  during the redesign — see the device QA checklist under "Design system".
 - On web, a Switch nested inside a Pressable also fires the row's press; keep switches as siblings
   of the tappable area (Recurring rows do).
 - Metro's file watcher doesn't always pick up edits on this drive during web QA; restart

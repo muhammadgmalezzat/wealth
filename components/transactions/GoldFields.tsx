@@ -4,7 +4,7 @@ import { AppText } from '@/components/ui/AppText';
 import { FormField } from '@/components/ui/FormField';
 import { FormInput } from '@/components/ui/FormSheet';
 import { Segment } from '@/components/ui/Segment';
-import { colors, space } from '@/constants/theme';
+import { colors, radius, space, weight } from '@/constants/theme';
 import type { GoldKarat, Location } from '@/store/types';
 
 export type KaratOption = `${GoldKarat}`;
@@ -68,7 +68,7 @@ export function GoldFields({ weightText, onWeightText, karat, onKarat, location,
 
 const styles = StyleSheet.create({
   section: { marginTop: space.xl },
-  titleRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: 6 },
-  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.gold },
-  title: { fontWeight: '700' },
+  titleRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs + space.xxs },
+  dot: { width: 8, height: 8, borderRadius: radius.pill, backgroundColor: colors.gold },
+  title: { fontWeight: weight.bold },
 });

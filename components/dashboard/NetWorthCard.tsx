@@ -70,7 +70,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     backgroundColor: colors.surfaceSubtle,
   },
-  part: { flex: 1, minWidth: 0, gap: 2 },
-  partLabel: { flexDirection: 'row-reverse', alignItems: 'center', gap: 6 },
-  goldDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.gold },
+  part: { flex: 1, minWidth: 0, gap: space.xxs },
+  partLabel: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs + space.xxs },
+  goldDot: { width: 8, height: 8, borderRadius: radius.pill, backgroundColor: colors.gold },
 });

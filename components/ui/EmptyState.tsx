@@ -2,7 +2,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import type { ComponentProps } from 'react';
 import { StyleSheet, View } from 'react-native';
 
-import { colors, space } from '@/constants/theme';
+import { colors, radius, space } from '@/constants/theme';
 
 import { AppText } from './AppText';
 import { Button } from './Button';
@@ -13,9 +13,11 @@ interface EmptyStateProps {
   body?: string;
   actionLabel?: string;
   onAction?: () => void;
+  // 'secondary' when the screen already has its one primary action.
+  actionVariant?: 'primary' | 'secondary';
 }
 
-export function EmptyState({ icon, title, body, actionLabel, onAction }: EmptyStateProps) {
+export function EmptyState({ icon, title, body, actionLabel, onAction, actionVariant = 'primary' }: EmptyStateProps) {
   return (
     <View style={styles.wrap}>
       <View style={styles.disc}>
@@ -31,7 +33,7 @@ export function EmptyState({ icon, title, body, actionLabel, onAction }: EmptySt
       ) : null}
       {actionLabel && onAction && (
         <View style={styles.action}>
-          <Button label={actionLabel} onPress={onAction} />
+          <Button label={actionLabel} onPress={onAction} variant={actionVariant} />
         </View>
       )}
     </View>
@@ -43,7 +45,7 @@ const styles = StyleSheet.create({
   disc: {
     width: 72,
     height: 72,
-    borderRadius: 36,
+    borderRadius: radius.pill,
     backgroundColor: colors.primary50,
     alignItems: 'center',
     justifyContent: 'center',

@@ -40,6 +40,7 @@ import { useFinanceStore } from '@/store/useFinanceStore';
 import { toEGP } from '@/utils/currency';
 import { showMessage } from '@/utils/dialogs';
 import { currencySymbol } from '@/utils/formatters';
+import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
 // ---------------------------------------------------------------------------
@@ -105,18 +106,25 @@ export default function AssetsScreen() {
       return;
     }
     const { type } = form;
+    // Arabic or Western digits (utils/parseAmount); empty stays 0 as before, anything else must parse.
+    const num = (text: string) => (text.trim() ? parseAmount(text, { allowZero: true }) : 0);
+    const fields = type === 'gold' ? [form.weightGrams, form.purchasePrice] : [form.amount];
+    if (fields.some((text) => num(text) === null)) {
+      showMessage('تنبيه', 'اكتب رقم صحيح (موجب، بالأرقام العربي أو الإنجليزي)');
+      return;
+    }
     const saved =
       type === 'gold'
         ? runAction('تعذّر الحفظ', () =>
             addHolding({
               type: 'gold',
               name,
-              weightGrams: parseFloat(form.weightGrams) || 0,
+              weightGrams: num(form.weightGrams) ?? 0,
               karat: Number(form.karat) as GoldKarat,
               location: form.location,
               // Entered in the selected currency; holdings store cost in EGP.
               purchaseCostEGP: toEGP(
-                parseFloat(form.purchasePrice) || 0,
+                num(form.purchasePrice) ?? 0,
                 form.currency,
                 state.settings.exchangeRates
               ),
@@ -127,7 +135,7 @@ export default function AssetsScreen() {
               name,
               type,
               currency: form.currency,
-              openingBalance: parseFloat(form.amount) || 0,
+              openingBalance: num(form.amount) ?? 0,
               location: form.location,
             })
           );
@@ -405,6 +413,6 @@ const styles = StyleSheet.create({
   groups: { gap: space.md },
   group: { gap: space.xs },
   toggle: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs, minHeight: 36 },
-  holdingMeta: { gap: space.xs, marginTop: 2 },
+  holdingMeta: { gap: space.xs, marginTop: space.xxs },
   tabular: { fontVariant: ['tabular-nums'] },
 });

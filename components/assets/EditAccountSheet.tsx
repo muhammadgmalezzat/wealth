@@ -20,7 +20,7 @@ interface EditAccountSheetProps {
 
 // Edits an account's name, location and current balance. The balance is derived, so saving
 // solves for the openingBalance that makes it equal what the user typed. Delete (refused while
-// the account has transactions) lives here too.
+// the account has transactions) and archive / restore (existing updateAccount) live here too.
 export function EditAccountSheet({ account, onClose }: EditAccountSheetProps) {
   const state = useFinanceStore();
   const [name, setName] = useState(account.name);
@@ -37,6 +37,11 @@ export function EditAccountSheet({ account, onClose }: EditAccountSheetProps) {
       })
     );
     if (saved) onClose();
+  };
+
+  // Archive hides the account from pickers (it stays in history and in the "مؤرشفة" group).
+  const toggleArchived = () => {
+    if (runAction('تعذّر الحفظ', () => state.updateAccount({ ...account, archived: !account.archived }))) onClose();
   };
 
   const handleDelete = () =>
@@ -68,7 +73,14 @@ export function EditAccountSheet({ account, onClose }: EditAccountSheetProps) {
       <FormField label="الرصيد الحالي" helper="اكتب الرصيد اللي في إيدك فعلاً؛ المعاملات مش بتتغير.">
         <AmountInput value={balance} onChangeText={setBalance} currency={account.currency} allowZero accessibilityLabel="الرصيد الحالي" />
       </FormField>
-      <View style={styles.delete}>
+      <View style={styles.actions}>
+        <Button
+          label={account.archived ? 'استرجاع الحساب' : 'أرشفة الحساب'}
+          variant="secondary"
+          icon={account.archived ? 'unarchive' : 'archive'}
+          block
+          onPress={toggleArchived}
+        />
         <Button label="احذف الحساب" variant="destructive" icon="delete-outline" block onPress={handleDelete} />
       </View>
     </FormSheet>
@@ -76,5 +88,5 @@ export function EditAccountSheet({ account, onClose }: EditAccountSheetProps) {
 }
 
 const styles = StyleSheet.create({
-  delete: { marginTop: space.xxxl },
+  actions: { marginTop: space.xxxl, gap: space.sm },
 });

@@ -44,7 +44,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-end',
     gap: space.xs,
     paddingHorizontal: space.sm,
-    paddingVertical: 2,
+    paddingVertical: space.xxs,
     borderRadius: radius.pill,
   },
 });

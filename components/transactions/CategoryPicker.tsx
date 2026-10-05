@@ -89,5 +89,5 @@ export function CategoryPicker({
 
 const styles = StyleSheet.create({
   wrap: { marginTop: space.lg, gap: space.sm },
-  group: { gap: 6 },
+  group: { gap: space.xs + space.xxs },
 });

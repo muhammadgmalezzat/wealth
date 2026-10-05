@@ -14,7 +14,7 @@ import { LoadingView } from '@/components/ui/LoadingView';
 import { Money } from '@/components/ui/Money';
 import { MonthSwitcher } from '@/components/ui/MonthSwitcher';
 import { Screen } from '@/components/ui/Screen';
-import { space } from '@/constants/theme';
+import { space, weight } from '@/constants/theme';
 import { groupTransactionsByDay, transactionsForMonth, type DayGroup, type TransactionFilter } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toMonthKey } from '@/utils/dates';
@@ -101,6 +101,6 @@ const styles = StyleSheet.create({
   header: { gap: space.lg, marginBottom: space.sm },
   day: { marginTop: space.lg, gap: space.sm },
   dayHeader: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', gap: space.sm },
-  dayLabel: { flexShrink: 1, fontWeight: '600' },
+  dayLabel: { flexShrink: 1, fontWeight: weight.semibold },
   noMatch: { marginTop: space.xxl },
 });
