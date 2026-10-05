@@ -1,7 +1,7 @@
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { colors, space, type } from '@/constants/theme';
+import { colors, type } from '@/constants/theme';
 import { shiftMonth } from '@/utils/dates';
 import { formatMonthLabel } from '@/utils/formatters';
 
@@ -10,7 +10,8 @@ interface MonthSwitcherProps {
   onChange: (month: string) => void;
 }
 
-// ‹ أكتوبر ٢٠٢٦ › — RTL: previous month on the right, next on the left.
+// ‹ أكتوبر ٢٠٢٦ › — RTL: previous month on the right, next on the left. No outer margin:
+// screens space it with their own gap.
 export function MonthSwitcher({ month, onChange }: MonthSwitcherProps) {
   return (
     <View style={styles.row}>
@@ -30,7 +31,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: space.lg,
   },
   arrow: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   label: {

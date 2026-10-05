@@ -158,5 +158,7 @@ const styles = StyleSheet.create({
     ...type.body,
     color: colors.text,
     backgroundColor: colors.surface,
+    // In the style too: react-native-web ignores the textAlign prop on inputs.
+    textAlign: 'right',
   },
 });

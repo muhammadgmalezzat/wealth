@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { opacity, space, size } from '@/constants/theme';
@@ -8,15 +9,18 @@ interface SectionHeaderProps {
   title: string;
   actionLabel?: string;
   onAction?: () => void;
+  // Non-pressable info on the left instead of an action (e.g. "{spent} من {planned}").
+  trailing?: ReactNode;
 }
 
 // Section title on the right, optional tertiary action on the left.
-export function SectionHeader({ title, actionLabel, onAction }: SectionHeaderProps) {
+export function SectionHeader({ title, actionLabel, onAction, trailing }: SectionHeaderProps) {
   return (
     <View style={styles.row}>
       <AppText variant="section" style={styles.title}>
         {title}
       </AppText>
+      {trailing}
       {actionLabel && onAction && (
         <Pressable
           onPress={onAction}

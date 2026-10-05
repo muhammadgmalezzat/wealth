@@ -1,31 +1,54 @@
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
-import { BUCKET_TITLES, PlanEditorSheet, unplannedColor } from '@/components/plan/PlanEditorSheet';
-import { Card } from '@/components/ui/Card';
+import { AddLineSheet, type AddedLine } from '@/components/plan/AddLineSheet';
+import { LineSheet } from '@/components/plan/LineSheet';
+import { BUCKET_TITLES } from '@/components/plan/labels';
+import { PlanEditorSheet } from '@/components/plan/PlanEditorSheet';
+import { PlanLineRow } from '@/components/plan/PlanLineRow';
+import { contributionDone, unplannedStatus, withLine, withoutLine } from '@/components/plan/planUi';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { MetricGroup } from '@/components/ui/MetricGroup';
+import { Money } from '@/components/ui/Money';
 import { MonthSwitcher } from '@/components/ui/MonthSwitcher';
 import { ProgressBar } from '@/components/ui/ProgressBar';
 import { Screen } from '@/components/ui/Screen';
-import { Colors, FinanceColors } from '@/constants/theme';
-import { emptyPlan, planProgress, planSuggestion, previousPlanMonth, type LineProgress } from '@/store/planning';
-import type { CurrencyCode, ExpenseBucket } from '@/store/types';
+import { SectionHeader } from '@/components/ui/SectionHeader';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { colors, opacity, space } from '@/constants/theme';
+import { emptyPlan, planProgress, planSuggestion, previousPlanMonth, safeToSpend } from '@/store/planning';
+import type { ExpenseBucket } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toMonthKey } from '@/utils/dates';
-import { formatCurrency, formatMonthLabel } from '@/utils/formatters';
+import { formatMonthLabel } from '@/utils/formatters';
+import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
+const BUCKETS = Object.keys(BUCKET_TITLES) as ExpenseBucket[];
+
+// "Where should this month's money go?" — read like a plan: summary (income / planned / left to
+// plan), the safe-to-spend note, lines by bucket, fund contributions, spending outside the plan,
+// add a line, recurring. Line taps open LineSheet; changes there are saved with savePlan.
 export default function PlanScreen() {
   const state = useFinanceStore();
   const [month, setMonth] = useState(() => toMonthKey(new Date()));
   const [editing, setEditing] = useState(false);
+  const [lineId, setLineId] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
 
   if (!state.hasHydrated) return <LoadingView />;
 
   const progress = planProgress(state, month);
   const previous = previousPlanMonth(state, month);
-  const categoryName = (id: string) => state.categories.find((c) => c.id === id)?.name ?? '—';
+  const category = (id: string) => state.categories.find((c) => c.id === id);
   const fundName = (id: string) => state.funds.find((f) => f.id === id)?.name ?? '—';
 
   const create = (how: 'suggest' | 'copy' | 'scratch') => {
@@ -38,190 +61,258 @@ export default function PlanScreen() {
     if (created && how === 'scratch') setEditing(true);
   };
 
+  if (!progress) {
+    return (
+      <Screen scroll contentStyle={styles.content}>
+        <MonthSwitcher month={month} onChange={setMonth} />
+        <EmptyState
+          icon="event-note"
+          title={`مفيش خطة لشهر ${formatMonthLabel(month)}`}
+          body="خطط لكل جنيه من دخلك: مصاريف ثابتة، مرنة، وتحويش."
+          actionLabel="اقترح من مصروفي"
+          onAction={() => create('suggest')}
+        />
+        <View style={styles.emptyActions}>
+          {previous && (
+            <Button label={`انسخ خطة ${formatMonthLabel(previous)}`} variant="secondary" block onPress={() => create('copy')} />
+          )}
+          <Button label="ابدأ من الصفر" variant="tertiary" onPress={() => create('scratch')} />
+        </View>
+        <RecurringLink />
+      </Screen>
+    );
+  }
+
+  const { plan } = progress;
+  const currency = plan.currency;
+  const contributionsTotal = plan.fundContributions.reduce((s, c) => s + c.amount, 0);
+  const status = unplannedStatus(progress.unplanned);
+  const safe = safeToSpend(state, month) ?? 0;
+  const selectedLine = lineId ? progress.lines.find((l) => l.categoryId === lineId) : undefined;
+  const selectedCategory = selectedLine && category(selectedLine.categoryId);
+
+  // LineSheet / AddLineSheet edits on the saved plan (the editor sheet has its own draft).
+  const saveLine = (categoryId: string, limitText: string, kind: AddedLine['kind']) => {
+    const fresh = useFinanceStore.getState();
+    const current = planProgress(fresh, month)?.plan;
+    if (!current) return false;
+    const limit = parseAmount(limitText, { allowZero: true }) ?? NaN;
+    return runAction('تعذّر حفظ الخطة', () => fresh.savePlan(withLine(current, { categoryId, limit, kind })));
+  };
+  const removeLine = (categoryId: string) => {
+    const fresh = useFinanceStore.getState();
+    const current = planProgress(fresh, month)?.plan;
+    if (current) runAction('تعذّر حفظ الخطة', () => fresh.savePlan(withoutLine(current, categoryId)));
+  };
+
   return (
     <Screen scroll contentStyle={styles.content}>
-        <MonthSwitcher month={month} onChange={setMonth} />
-        <TouchableOpacity onPress={() => router.push('/recurring')} style={styles.recurringLink} hitSlop={8}>
-          <Text style={styles.editLink}>المعاملات المتكررة ‹</Text>
-        </TouchableOpacity>
+      <MonthSwitcher month={month} onChange={setMonth} />
 
-        {!progress ? (
-          <View style={styles.empty}>
-            <Text style={styles.emptyTitle}>مفيش خطة لشهر {formatMonthLabel(month)}</Text>
-            <Text style={styles.emptyBody}>خطط لكل جنيه من دخلك: مصاريف ثابتة، مرنة، وتحويش.</Text>
-            <TouchableOpacity style={styles.primaryBtn} onPress={() => create('suggest')} activeOpacity={0.85}>
-              <Text style={styles.primaryText}>اقترح من مصروفي</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.secondaryBtn, !previous && styles.disabled]}
-              onPress={() => create('copy')}
-              disabled={!previous}
-              activeOpacity={0.85}>
-              <Text style={styles.secondaryText}>
-                {previous ? `انسخ خطة ${formatMonthLabel(previous)}` : 'انسخ خطة الشهر اللي فات'}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.secondaryBtn} onPress={() => create('scratch')} activeOpacity={0.85}>
-              <Text style={styles.secondaryText}>ابدأ من الصفر</Text>
-            </TouchableOpacity>
+      {/* ── Summary ── */}
+      <View style={styles.block}>
+        <View style={styles.titleRow}>
+          <AppText variant="section" style={styles.flex}>
+            خطة الشهر
+          </AppText>
+          <Button label="تعديل" variant="tertiary" icon="edit" onPress={() => setEditing(true)} />
+        </View>
+        <MetricGroup
+          metrics={[
+            { label: 'الدخل المتوقع', value: <Money amount={plan.expectedIncome} currency={currency} align="center" /> },
+            {
+              label: 'المخطط',
+              value: <Money amount={progress.totalPlanned + contributionsTotal} currency={currency} align="center" />,
+            },
+            { label: 'المتبقي للتخطيط', value: <Money amount={progress.unplanned} currency={currency} align="center" /> },
+          ]}
+        />
+        {status === 'balanced' ? (
+          <View style={styles.statusRow}>
+            <StatusChip label="كل الدخل متخطط له" tone="ok" />
+            <AppText variant="secondary" color="textSecondary">
+              {formatMoney(0, currency)} غير مخطط
+            </AppText>
           </View>
         ) : (
-          <>
-            {/* ── Header: income & unplanned ── */}
-            <Card>
-              <View style={styles.headerRow}>
-                <TouchableOpacity onPress={() => setEditing(true)} hitSlop={8}>
-                  <Text style={styles.editLink}>تعديل</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setEditing(true)} style={styles.headerText}>
-                  <Text style={styles.muted}>الدخل المتوقع</Text>
-                  <Text style={styles.income}>{formatCurrency(progress.plan.expectedIncome, progress.plan.currency)}</Text>
-                </TouchableOpacity>
-              </View>
-              <Text style={[styles.unplanned, { color: unplannedColor(progress.unplanned) }]}>
-                {unplannedLabel(progress.unplanned, progress.plan.currency)}
-              </Text>
-            </Card>
+          <View style={styles.statusRow}>
+            <AppText variant="secondary" color={status === 'over' ? 'warning' : 'text'} style={styles.flex}>
+              {status === 'over'
+                ? `مخطط أكتر من الدخل المتوقع بـ ${formatMoney(-progress.unplanned, currency)}`
+                : `لسه ${formatMoney(progress.unplanned, currency)} محتاجة تتخطط`}
+            </AppText>
+            <Button label={status === 'over' ? 'راجع الخطة' : 'خطّطها'} variant="tertiary" onPress={() => setEditing(true)} />
+          </View>
+        )}
+      </View>
 
-            {/* ── Lines by bucket ── */}
-            {(Object.keys(BUCKET_TITLES) as ExpenseBucket[]).map((bucket) => {
-              const lines = progress.lines.filter((l) => l.bucket === bucket);
-              if (lines.length === 0) return null;
-              const totals = progress.buckets[bucket];
+      {/* ── Safe to spend + fixed vs flexible, explained once ── */}
+      <View>
+        <Pressable
+          onPress={() => setInfoOpen((v) => !v)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: infoOpen }}
+          style={({ pressed }) => [styles.infoRow, pressed && { opacity: opacity.pressed }]}>
+          <MaterialIcons name="info-outline" size={18} color={colors.textSecondary} />
+          <AppText variant="secondary" color="textSecondary" style={styles.flex}>
+            المرن هو اللي بيتحسب في «تقدر تصرف بأمان»: {formatMoney(safe, currency)} متاح.
+          </AppText>
+          <MaterialIcons name={infoOpen ? 'expand-less' : 'expand-more'} size={20} color={colors.textSecondary} />
+        </Pressable>
+        {infoOpen && (
+          <View style={styles.infoBody}>
+            <AppText variant="secondary">ثابت: مبلغ محجوز لمصروف معروف.</AppText>
+            <AppText variant="secondary">مرن: جزء من المبلغ المتاح للصرف.</AppText>
+          </View>
+        )}
+      </View>
+
+      {/* ── Lines by bucket ── */}
+      <View>
+        {BUCKETS.map((bucket) => {
+          const lines = progress.lines.filter((l) => l.bucket === bucket);
+          if (lines.length === 0) return null;
+          const totals = progress.buckets[bucket];
+          return (
+            <View key={bucket}>
+              <SectionHeader
+                title={BUCKET_TITLES[bucket]}
+                trailing={
+                  <AppText variant="secondary" color="textSecondary">
+                    {formatMoney(totals.spent, currency)} من {formatMoney(totals.planned, currency)}
+                  </AppText>
+                }
+              />
+              <ListGroup>
+                {lines.map((line) => {
+                  const c = category(line.categoryId);
+                  return (
+                    <PlanLineRow
+                      key={line.categoryId}
+                      line={line}
+                      name={c?.name ?? '—'}
+                      archived={!!c?.archived}
+                      currency={currency}
+                      onPress={() => setLineId(line.categoryId)}
+                    />
+                  );
+                })}
+              </ListGroup>
+            </View>
+          );
+        })}
+        <View style={styles.addLine}>
+          <Button label="+ أضف بند" variant="tertiary" onPress={() => setAdding(true)} />
+        </View>
+      </View>
+
+      {/* ── Fund contributions ── */}
+      {progress.contributions.length > 0 && (
+        <View>
+          <SectionHeader title="تحويش للصناديق" />
+          <ListGroup>
+            {progress.contributions.map((c) => {
+              const done = contributionDone(c);
               return (
-                <View key={bucket} style={styles.section}>
-                  <View style={styles.sectionHeader}>
-                    <Text style={styles.muted}>
-                      {formatCurrency(totals.spent, progress.plan.currency)} / {formatCurrency(totals.planned, progress.plan.currency)}
-                    </Text>
-                    <Text style={styles.sectionTitle}>{BUCKET_TITLES[bucket]}</Text>
+                <Pressable
+                  key={c.fundId}
+                  onPress={() => router.push({ pathname: '/fund/[id]', params: { id: c.fundId } })}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${fundName(c.fundId)}، ${formatMoney(c.allocated, currency)} من ${formatMoney(c.planned, currency)}`}
+                  style={({ pressed }) => [styles.contribution, pressed && styles.pressed]}>
+                  <View style={styles.titleRow}>
+                    <AppText variant="bodyStrong" numberOfLines={1} style={styles.flex}>
+                      {fundName(c.fundId)}
+                    </AppText>
+                    {done && <StatusChip label="اتخصص" tone="ok" />}
                   </View>
-                  <Card style={styles.listCard}>
-                    {lines.map((line, i) => (
-                      <PlanLineRow
-                        key={line.categoryId}
-                        line={line}
-                        name={categoryName(line.categoryId)}
-                        currency={progress.plan.currency}
-                        isLast={i === lines.length - 1}
-                      />
-                    ))}
-                  </Card>
-                </View>
+                  <AppText variant="secondary" color="textSecondary">
+                    {formatMoney(c.allocated, currency)} من {formatMoney(c.planned, currency)}
+                  </AppText>
+                  <ProgressBar progress={c.planned > 0 ? c.allocated / c.planned : 0} height={6} />
+                </Pressable>
               );
             })}
+          </ListGroup>
+        </View>
+      )}
 
-            {progress.unplannedSpent > 0.005 && (
-              <Text style={[styles.muted, styles.offPlan]}>
-                مصروفات خارج الخطة: {formatCurrency(progress.unplannedSpent, progress.plan.currency)}
-              </Text>
-            )}
+      {/* ── Spending outside the plan ── */}
+      {progress.unplannedSpent > 0.005 && (
+        <View style={styles.titleRow}>
+          <AppText variant="secondary" color="textSecondary" style={styles.flex}>
+            مصروف خارج الخطة: {formatMoney(progress.unplannedSpent, currency)}
+          </AppText>
+          <Button label="المعاملات" variant="tertiary" onPress={() => router.push('/transactions')} />
+        </View>
+      )}
 
-            {/* ── Fund contributions ── */}
-            {progress.contributions.length > 0 && (
-              <View style={styles.section}>
-                <Text style={styles.sectionTitle}>تحويش للصناديق</Text>
-                <Card style={styles.listCard}>
-                  {progress.contributions.map((c, i) => (
-                    <View key={c.fundId} style={[styles.row, i < progress.contributions.length - 1 && styles.rowBorder]}>
-                      <Text style={[styles.value, { color: c.allocated + 0.005 >= c.planned ? FinanceColors.income : Colors.light.text }]}>
-                        {formatCurrency(c.allocated, progress.plan.currency)} / {formatCurrency(c.planned, progress.plan.currency)}
-                      </Text>
-                      <Text style={styles.lineName}>{fundName(c.fundId)}</Text>
-                    </View>
-                  ))}
-                </Card>
-              </View>
-            )}
+      <RecurringLink />
 
-            {/* ── Summary ── */}
-            <Card style={styles.summary}>
-              <SummaryItem label="مخطط" value={formatCurrency(progress.totalPlanned, progress.plan.currency)} />
-              <SummaryItem label="مصروف" value={formatCurrency(progress.totalSpent, progress.plan.currency)} />
-              <SummaryItem
-                label="متبقي"
-                value={formatCurrency(progress.totalPlanned - progress.totalSpent, progress.plan.currency)}
-                color={progress.totalPlanned - progress.totalSpent < 0 ? FinanceColors.expense : undefined}
-              />
-            </Card>
-          </>
-        )}
-      {editing && progress && <PlanEditorSheet key={progress.plan.id} plan={progress.plan} onClose={() => setEditing(false)} />}
+      {editing && <PlanEditorSheet key={plan.id} plan={plan} onClose={() => setEditing(false)} />}
+      {selectedLine && selectedCategory && (
+        <LineSheet
+          key={selectedLine.categoryId}
+          category={selectedCategory}
+          limitText={String(selectedLine.limit)}
+          kind={selectedLine.kind}
+          currency={currency}
+          progress={selectedLine}
+          onSave={({ limitText, kind }) => {
+            if (saveLine(selectedLine.categoryId, limitText, kind)) setLineId(null);
+          }}
+          onRemove={() => {
+            removeLine(selectedLine.categoryId);
+            setLineId(null);
+          }}
+          onClose={() => setLineId(null)}
+        />
+      )}
+      {adding && (
+        <AddLineSheet
+          month={month}
+          currency={currency}
+          usedIds={plan.lines.map((l) => l.categoryId)}
+          onAdd={(line) => {
+            // "بند جديد" already saved its category and line; only existing categories are added here.
+            const already = planProgress(useFinanceStore.getState(), month)?.plan.lines.some((l) => l.categoryId === line.categoryId);
+            if (already || saveLine(line.categoryId, line.limitText, line.kind)) setAdding(false);
+          }}
+          onManage={() => {
+            setAdding(false);
+            router.push('/categories');
+          }}
+          onClose={() => setAdding(false)}
+        />
+      )}
     </Screen>
   );
 }
 
-function unplannedLabel(unplanned: number, currency: CurrencyCode): string {
-  if (Math.abs(unplanned) < 0.5) return 'كل الدخل متخطط له ✓';
-  if (unplanned > 0) return `لسه ${formatCurrency(unplanned, currency)} محتاج تخطط له`;
-  return `مخطط أكتر من دخلك بـ ${formatCurrency(-unplanned, currency)}`;
-}
-
-function PlanLineRow({ line, name, currency, isLast }: { line: LineProgress; name: string; currency: CurrencyCode; isLast: boolean }) {
-  const over = line.remaining < -0.005;
+function RecurringLink() {
   return (
-    <View style={[styles.line, !isLast && styles.rowBorder]}>
-      <View style={styles.row}>
-        <Text style={[styles.value, over && styles.over]}>
-          {over ? `عدّيت بـ ${formatCurrency(-line.remaining, currency)}` : `باقي ${formatCurrency(line.remaining, currency)}`}
-        </Text>
-        <View style={styles.lineTitle}>
-          <View style={[styles.badge, line.kind === 'fixed' && styles.badgeFixed]}>
-            <Text style={styles.badgeText}>{line.kind === 'fixed' ? 'ثابت' : 'مرن'}</Text>
-          </View>
-          <Text style={styles.lineName}>{name}</Text>
-        </View>
-      </View>
-      <ProgressBar progress={line.pct} color={over ? FinanceColors.expense : Colors.light.tint} />
-      <Text style={styles.small}>
-        {formatCurrency(line.spent, currency)} من {formatCurrency(line.limit, currency)}
-      </Text>
-    </View>
-  );
-}
-
-function SummaryItem({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <View style={styles.summaryItem}>
-      <Text style={[styles.value, color ? { color } : null]}>{value}</Text>
-      <Text style={styles.muted}>{label}</Text>
-    </View>
+    <ListGroup>
+      <ListRow
+        title="المعاملات المتكررة"
+        subtitle="الإيجار والمرتب والفواتير اللي بتتكرر"
+        icon="repeat"
+        chevron
+        onPress={() => router.push('/recurring')}
+      />
+    </ListGroup>
   );
 }
 
 const styles = StyleSheet.create({
-  content: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 32 },
-  empty: { alignItems: 'stretch', paddingVertical: 32, gap: 12 },
-  emptyTitle: { fontSize: 18, fontWeight: '700', color: Colors.light.text, textAlign: 'center' },
-  emptyBody: { fontSize: 14, color: Colors.light.icon, textAlign: 'center', marginBottom: 8 },
-  primaryBtn: { paddingVertical: 14, borderRadius: 10, alignItems: 'center', backgroundColor: Colors.light.tint },
-  primaryText: { color: '#fff', fontSize: 15, fontWeight: '700' },
-  secondaryBtn: { paddingVertical: 14, borderRadius: 10, alignItems: 'center', backgroundColor: Colors.light.tint + '15' },
-  secondaryText: { color: Colors.light.tint, fontSize: 15, fontWeight: '700' },
-  disabled: { opacity: 0.4 },
-  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  headerText: { alignItems: 'flex-end', gap: 2 },
-  income: { fontSize: 22, fontWeight: '700', color: Colors.light.text },
-  recurringLink: { alignSelf: 'flex-end', marginTop: -8, marginBottom: 12 },
-  editLink: { fontSize: 15, fontWeight: '700', color: Colors.light.tint },
-  unplanned: { marginTop: 10, fontSize: 14, fontWeight: '700', textAlign: 'right' },
-  section: { marginTop: 22 },
-  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  sectionTitle: { fontSize: 17, fontWeight: '700', color: Colors.light.text, textAlign: 'right', marginBottom: 8 },
-  listCard: { padding: 0, overflow: 'hidden' },
-  line: { paddingHorizontal: 16, paddingVertical: 12, gap: 6 },
-  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 0 },
-  rowBorder: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: FinanceColors.progressTrack },
-  lineTitle: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  lineName: { fontSize: 15, fontWeight: '600', color: Colors.light.text, textAlign: 'right' },
-  badge: { borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1, backgroundColor: Colors.light.tint + '18' },
-  badgeFixed: { backgroundColor: Colors.light.icon + '22' },
-  badgeText: { fontSize: 10, fontWeight: '700', color: Colors.light.icon },
-  value: { fontSize: 13, fontWeight: '600', color: Colors.light.text },
-  over: { color: FinanceColors.expense },
-  small: { fontSize: 11, color: Colors.light.icon, textAlign: 'right' },
-  muted: { fontSize: 13, color: Colors.light.icon, textAlign: 'right' },
-  offPlan: { marginTop: 12 },
-  summary: { marginTop: 22, flexDirection: 'row', justifyContent: 'space-around' },
-  summaryItem: { alignItems: 'center', gap: 2 },
+  content: { paddingHorizontal: space.lg, paddingTop: space.sm, paddingBottom: space.xxxl, gap: space.xl },
+  block: { gap: space.md },
+  titleRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm },
+  statusRow: { flexDirection: 'row-reverse', alignItems: 'center', flexWrap: 'wrap', gap: space.sm },
+  flex: { flex: 1 },
+  infoRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm, minHeight: 44 },
+  infoBody: { gap: space.xs, paddingRight: space.xxl },
+  addLine: { marginTop: space.md },
+  contribution: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: 6, minHeight: 64 },
+  pressed: { backgroundColor: colors.surfaceSubtle, opacity: opacity.pressed },
+  emptyActions: { gap: space.sm, alignItems: 'center' },
 });

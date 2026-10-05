@@ -1,9 +1,16 @@
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { ProgressBar } from '@/components/ui/ProgressBar';
 import { Segment } from '@/components/ui/Segment';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { space } from '@/constants/theme';
+import type { LineProgress } from '@/store/planning';
 import type { Category, CurrencyCode, ExpenseBucket, PlanLineKind } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { showMessage } from '@/utils/dialogs';
@@ -12,12 +19,15 @@ import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
 import { BUCKET_TITLES, KIND_OPTIONS } from './labels';
+import { lineSentence, lineState } from './planUi';
 
 interface LineSheetProps {
   category: Category;
   limitText: string;
   kind: PlanLineKind;
   currency: CurrencyCode;
+  // This month's progress on the saved line, when there is one.
+  progress?: LineProgress;
   onSave: (patch: { limitText: string; kind: PlanLineKind }) => void;
   onRemove: () => void;
   onClose: () => void;
@@ -28,9 +38,18 @@ const BUCKET_OPTIONS = (Object.keys(BUCKET_TITLES) as ExpenseBucket[]).map((valu
   value,
 }));
 
-// One plan line in edit mode: limit and fixed/flexible (draft, saved with the plan), and
-// "نقل لـ" which moves the category itself to another bucket right away.
-export function LineSheet({ category, limitText: initialLimit, kind: initialKind, currency, onSave, onRemove, onClose }: LineSheetProps) {
+// One plan line: where it stands this month, then limit and fixed/flexible, "نقل لـ" (moves the
+// category itself to another bucket right away) and "شيل من الخطة".
+export function LineSheet({
+  category,
+  limitText: initialLimit,
+  kind: initialKind,
+  currency,
+  progress,
+  onSave,
+  onRemove,
+  onClose,
+}: LineSheetProps) {
   const updateCategory = useFinanceStore((s) => s.updateCategory);
   const [limitText, setLimitText] = useState(initialLimit);
   const [kind, setKind] = useState(initialKind);
@@ -45,31 +64,46 @@ export function LineSheet({ category, limitText: initialLimit, kind: initialKind
     onSave({ limitText, kind });
   };
 
+  const state = progress && lineState(progress);
+
   return (
     <FormSheet visible title={category.name} onCancel={onClose} onSave={handleSave}>
-      <FieldLabel>الحد ({currencySymbol(currency)})</FieldLabel>
-      <FormInput value={limitText} onChangeText={setLimitText} keyboardType="decimal-pad" placeholder="0" />
-      <FieldLabel>ثابت ولا مرن؟</FieldLabel>
-      <Segment<PlanLineKind> options={KIND_OPTIONS} value={kind} onChange={setKind} />
-      <FieldLabel>نقل لـ</FieldLabel>
-      <Segment<ExpenseBucket> options={BUCKET_OPTIONS} value={bucket} onChange={setBucket} />
-      <Text style={styles.hint}>تغيير النوع بيأثر على كل معاملات البند ده، القديمة والجديدة</Text>
+      <StatusChip label={initialKind === 'fixed' ? 'ثابت' : 'مرن'} tone="neutral" />
 
-      <TouchableOpacity style={styles.removeBtn} onPress={onRemove} activeOpacity={0.8}>
-        <Text style={styles.removeText}>شيل من الخطة</Text>
-      </TouchableOpacity>
+      {progress && (
+        <View style={styles.progress}>
+          <AppText variant="bodyStrong">
+            {formatMoney(progress.spent, currency)} من {formatMoney(progress.limit, currency)}
+          </AppText>
+          <ProgressBar
+            progress={progress.pct}
+            height={6}
+            tone={state === 'over' ? 'over' : state === 'approaching' ? 'attention' : 'normal'}
+          />
+          <AppText variant="secondary" color={state === 'over' ? 'danger' : 'textSecondary'}>
+            {lineSentence(progress, category.name, currency)}
+          </AppText>
+        </View>
+      )}
+
+      <FormField label={`الحد (${currencySymbol(currency)})`}>
+        <FormInput value={limitText} onChangeText={setLimitText} keyboardType="decimal-pad" placeholder="0" />
+      </FormField>
+      <FormField label="ثابت ولا مرن؟" helper="ثابت: مبلغ محجوز لمصروف معروف. مرن: جزء من المبلغ المتاح للصرف.">
+        <Segment<PlanLineKind> options={KIND_OPTIONS} value={kind} onChange={setKind} />
+      </FormField>
+      <FormField label="نقل لـ" helper="تغيير النوع بيأثر على كل معاملات البند ده، القديمة والجديدة.">
+        <Segment<ExpenseBucket> options={BUCKET_OPTIONS} value={bucket} onChange={setBucket} />
+      </FormField>
+
+      <View style={styles.remove}>
+        <Button label="شيل من الخطة" variant="destructive" icon="remove-circle-outline" block onPress={onRemove} />
+      </View>
     </FormSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  hint: { marginTop: 8, fontSize: 12, color: Colors.light.icon, textAlign: 'right' },
-  removeBtn: {
-    marginTop: 28,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: FinanceColors.expense + '15',
-  },
-  removeText: { fontSize: 16, fontWeight: '700', color: FinanceColors.expense },
+  progress: { marginTop: space.lg, gap: space.sm },
+  remove: { marginTop: space.xxxl },
 });

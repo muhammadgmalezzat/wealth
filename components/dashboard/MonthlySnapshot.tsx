@@ -1,10 +1,10 @@
 import { router } from 'expo-router';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Pressable, View } from 'react-native';
 
-import { AppText } from '@/components/ui/AppText';
+import { MetricGroup } from '@/components/ui/MetricGroup';
 import { Money } from '@/components/ui/Money';
 import { SectionHeader } from '@/components/ui/SectionHeader';
-import { colors, opacity, radius, space } from '@/constants/theme';
+import { opacity } from '@/constants/theme';
 import { monthSummary } from '@/store/selectors';
 import type { FinanceState } from '@/store/types';
 import { toMonthKey } from '@/utils/dates';
@@ -19,38 +19,29 @@ interface MonthlySnapshotProps {
   linkToTransactions?: boolean;
 }
 
-// "هذا الشهر": income / expense / net for a month (EGP, snapshot rates) in one grouped
-// surface. Expense is plain text, not red; net is green with "+" when ≥ 0.
+// "هذا الشهر": income / expense / net for a month (EGP, snapshot rates) in one MetricGroup.
+// Expense is plain text, not red; net is green with "+" when ≥ 0.
 export function MonthlySnapshot({ state, now = new Date(), month, linkToTransactions = true }: MonthlySnapshotProps) {
   const current = toMonthKey(now);
   const shown = month ?? current;
   const summary = monthSummary(state, shown);
-  const openTransactions = () => router.push('/transactions');
   const net = summary.netCashFlow;
-  const cells = (
-    <>
-      <Cell label="دخل">
-        <Money amount={summary.incomeEGP} currency="EGP" size="row" align="center" />
-      </Cell>
-      <View style={styles.divider} />
-      <Cell label="مصروف">
-        <Money amount={summary.expenseEGP} currency="EGP" size="row" align="center" />
-      </Cell>
-      <View style={styles.divider} />
-      <Cell label="صافي">
-        <Money amount={net} currency="EGP" size="row" align="center" showSign tone={net >= 0 ? 'positive' : 'default'} />
-      </Cell>
-    </>
-  );
+  const metrics = [
+    { label: 'دخل', value: <Money amount={summary.incomeEGP} currency="EGP" size="row" align="center" /> },
+    { label: 'مصروف', value: <Money amount={summary.expenseEGP} currency="EGP" size="row" align="center" /> },
+    {
+      label: 'صافي',
+      value: <Money amount={net} currency="EGP" size="row" align="center" showSign tone={net >= 0 ? 'positive' : 'default'} />,
+    },
+  ];
 
   if (!linkToTransactions) {
     return (
-      <View style={styles.group} accessibilityLabel={`ملخص ${shown === current ? 'هذا الشهر' : formatMonthLabel(shown)}`}>
-        {cells}
-      </View>
+      <MetricGroup metrics={metrics} accessibilityLabel={`ملخص ${shown === current ? 'هذا الشهر' : formatMonthLabel(shown)}`} />
     );
   }
 
+  const openTransactions = () => router.push('/transactions');
   return (
     <View>
       <SectionHeader title="هذا الشهر" actionLabel="كل المعاملات" onAction={openTransactions} />
@@ -58,34 +49,9 @@ export function MonthlySnapshot({ state, now = new Date(), month, linkToTransact
         onPress={openTransactions}
         accessibilityRole="button"
         accessibilityLabel="ملخص الشهر، يفتح المعاملات"
-        style={({ pressed }) => [styles.group, pressed && { opacity: opacity.pressed }]}>
-        {cells}
+        style={({ pressed }) => pressed && { opacity: opacity.pressed }}>
+        <MetricGroup metrics={metrics} />
       </Pressable>
     </View>
   );
 }
-
-function Cell({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <View style={styles.cell}>
-      <AppText variant="caption" color="textSecondary" align="center">
-        {label}
-      </AppText>
-      {children}
-    </View>
-  );
-}
-
-const styles = StyleSheet.create({
-  // RTL: دخل on the right.
-  group: {
-    flexDirection: 'row-reverse',
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingVertical: space.md,
-  },
-  cell: { flex: 1, minWidth: 0, alignItems: 'center', gap: 2, paddingHorizontal: space.xs },
-  divider: { width: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginVertical: space.xs },
-});

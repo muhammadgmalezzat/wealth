@@ -1,24 +1,33 @@
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { AmountInput } from '@/components/ui/AmountInput';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { SectionHeader } from '@/components/ui/SectionHeader';
 import { Segment } from '@/components/ui/Segment';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { colors, opacity, radius, space } from '@/constants/theme';
 import type { PlanInput } from '@/store/operations';
-import { unplannedAmount } from '@/store/planning';
+import { planProgress, unplannedAmount } from '@/store/planning';
 import { fundsByPriority } from '@/store/selectors';
 import type { CurrencyCode, ExpenseBucket, MonthlyPlan, PlanLineKind } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { fromEGP, toEGP } from '@/utils/currency';
 import { confirmAction } from '@/utils/dialogs';
-import { currencySymbol, formatCurrency, formatMonthLabel } from '@/utils/formatters';
+import { formatMonthLabel } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
 import { AddLineSheet, type AddedLine } from './AddLineSheet';
 import { BUCKET_TITLES } from './labels';
 import { LineSheet } from './LineSheet';
+import { unplannedStatus } from './planUi';
 
 export { BUCKET_TITLES };
 
@@ -37,6 +46,8 @@ interface PlanEditorSheetProps {
 
 // Edit mode for a month's plan: income, currency, limits, fixed/flexible, categories and
 // fund contributions. Changing the currency converts every amount at current rates.
+// Layout: live "المتبقي للتخطيط" at the top · currency · expected income (big) · lines by bucket
+// (name → LineSheet, ثابت/مرن, limit, remove) · "+ أضف بند" · fund contributions · delete plan.
 export function PlanEditorSheet({ plan, onClose }: PlanEditorSheetProps) {
   const state = useFinanceStore();
   const funds = fundsByPriority(state);
@@ -119,90 +130,135 @@ export function PlanEditorSheet({ plan, onClose }: PlanEditorSheetProps) {
     });
 
   const categoryById = new Map(expenseCategories.map((c) => [c.id, c]));
-  const symbol = currencySymbol(currency);
+  const savedProgress = planProgress(state, plan.month);
+  const status = unplanned === null ? null : unplannedStatus(unplanned);
 
   return (
     <FormSheet visible title={`خطة ${formatMonthLabel(plan.month)}`} onCancel={onClose} onSave={handleSave}>
-      <FieldLabel>العملة</FieldLabel>
-      <Segment<CurrencyCode>
-        options={[
-          { label: 'ر.س', value: 'SAR' },
-          { label: 'ج.م', value: 'EGP' },
-          { label: '$', value: 'USD' },
-        ]}
-        value={currency}
-        onChange={changeCurrency}
-      />
+      {/* Live summary at the top of the content. */}
+      <View style={styles.summary}>
+        <AppText variant="secondary" color="textSecondary">
+          المتبقي للتخطيط
+        </AppText>
+        {unplanned === null ? (
+          <AppText variant="bodyStrong" color="textSecondary">
+            —
+          </AppText>
+        ) : status === 'balanced' ? (
+          <StatusChip label="كل الدخل متخطط له" tone="ok" />
+        ) : (
+          <AppText variant="bodyStrong" color={status === 'over' ? 'warning' : 'text'}>
+            {status === 'over' ? `مخطط أكتر من الدخل بـ ${formatMoney(-unplanned, currency)}` : formatMoney(unplanned, currency)}
+          </AppText>
+        )}
+      </View>
 
-      <FieldLabel>الدخل المتوقع ({symbol})</FieldLabel>
-      <FormInput value={incomeText} onChangeText={setIncomeText} keyboardType="decimal-pad" />
+      <FormField label="العملة">
+        <Segment<CurrencyCode>
+          options={[
+            { label: 'ر.س', value: 'SAR' },
+            { label: 'ج.م', value: 'EGP' },
+            { label: '$', value: 'USD' },
+          ]}
+          value={currency}
+          onChange={changeCurrency}
+        />
+      </FormField>
 
-      {unplanned !== null && (
-        <Text style={[styles.unplanned, { color: unplannedColor(unplanned) }]}>
-          غير مخطط: {formatCurrency(unplanned, currency)}
-        </Text>
-      )}
+      <FormField label="الدخل المتوقع">
+        <AmountInput value={incomeText} onChangeText={setIncomeText} currency={currency} allowZero accessibilityLabel="الدخل المتوقع" />
+      </FormField>
 
       {(Object.keys(BUCKET_TITLES) as ExpenseBucket[]).map((bucket) => {
         const bucketLines = lines.filter((l) => categoryById.get(l.categoryId)?.bucket === bucket);
+        if (bucketLines.length === 0) return null;
         return (
           <View key={bucket}>
-            <Text style={styles.bucketTitle}>{BUCKET_TITLES[bucket]}</Text>
-            {bucketLines.length === 0 && <Text style={styles.hint}>مفيش بنود</Text>}
-            {bucketLines.map((line) => {
-              const limit = amountOf(line.limitText);
-              return (
-                <TouchableOpacity
-                  key={line.categoryId}
-                  style={styles.lineRow}
-                  onPress={() => setSheet({ categoryId: line.categoryId })}
-                  activeOpacity={0.7}>
-                  <Text style={styles.chevron}>‹</Text>
-                  <Text style={styles.lineLimit}>{limit === null ? '—' : formatCurrency(limit, currency)}</Text>
-                  <View style={[styles.kindBadge, line.kind === 'fixed' && styles.kindFixed]}>
-                    <Text style={styles.kindText}>{line.kind === 'fixed' ? 'ثابت' : 'مرن'}</Text>
+            <SectionHeader title={BUCKET_TITLES[bucket]} />
+            <View style={styles.group}>
+              {bucketLines.map((line, i) => {
+                const category = categoryById.get(line.categoryId);
+                const name = category?.name ?? '—';
+                return (
+                  <View key={line.categoryId} style={[styles.lineRow, i > 0 && styles.lineBorder]}>
+                    <View style={styles.lineTop}>
+                      <Pressable
+                        onPress={() => setSheet({ categoryId: line.categoryId })}
+                        accessibilityRole="button"
+                        accessibilityLabel={`تفاصيل ${name}`}
+                        style={({ pressed }) => [styles.lineName, pressed && { opacity: opacity.pressed }]}>
+                        <AppText variant="bodyStrong" color={category?.archived ? 'textMuted' : 'text'} numberOfLines={1} style={styles.flex}>
+                          {name}
+                        </AppText>
+                        <MaterialIcons name="chevron-left" size={20} color={colors.textSecondary} />
+                      </Pressable>
+                      <Pressable
+                        onPress={() => removeLine(line.categoryId)}
+                        hitSlop={10}
+                        accessibilityRole="button"
+                        accessibilityLabel={`شيل ${name} من الخطة`}
+                        style={({ pressed }) => [styles.remove, pressed && { opacity: opacity.pressed }]}>
+                        <MaterialIcons name="remove-circle-outline" size={22} color={colors.textSecondary} />
+                      </Pressable>
+                    </View>
+                    <View style={styles.lineBottom}>
+                      <View style={styles.kind}>
+                        <Segment<PlanLineKind>
+                          options={[
+                            { label: 'ثابت', value: 'fixed' },
+                            { label: 'مرن', value: 'flexible' },
+                          ]}
+                          value={line.kind}
+                          onChange={(kind) => updateLine(line.categoryId, { kind })}
+                        />
+                      </View>
+                      <FormInput
+                        value={line.limitText}
+                        onChangeText={(text) => updateLine(line.categoryId, { limitText: text })}
+                        keyboardType="decimal-pad"
+                        placeholder="0"
+                        accessibilityLabel={`حد ${name}`}
+                        style={styles.limitInput}
+                      />
+                    </View>
                   </View>
-                  <Text style={styles.lineName} numberOfLines={1}>
-                    {categoryById.get(line.categoryId)?.name ?? '—'}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+                );
+              })}
+            </View>
           </View>
         );
       })}
 
-      <TouchableOpacity style={styles.addBtn} onPress={() => setSheet('add')} activeOpacity={0.8}>
-        <Text style={styles.addText}>+ أضف بند</Text>
-      </TouchableOpacity>
+      <View style={styles.add}>
+        <Button label="+ أضف بند" variant="tertiary" onPress={() => setSheet('add')} />
+      </View>
 
       {funds.length > 0 && (
         <>
-          <Text style={styles.bucketTitle}>تحويش للصناديق</Text>
-          {funds.map((fund) => (
-            <View key={fund.id} style={styles.lineRow}>
-              <FormInput
-                value={contributions[fund.id] ?? ''}
-                onChangeText={(text) => setContributions((prev) => ({ ...prev, [fund.id]: text }))}
-                keyboardType="decimal-pad"
-                placeholder="0"
-                style={styles.limitInput}
-              />
-              <Text style={styles.lineName} numberOfLines={1}>
-                {fund.name}
-              </Text>
-            </View>
-          ))}
+          <SectionHeader title="تحويش للصناديق" />
+          <View style={styles.group}>
+            {funds.map((fund, i) => (
+              <View key={fund.id} style={[styles.fundRow, i > 0 && styles.lineBorder]}>
+                <AppText variant="bodyStrong" numberOfLines={1} style={styles.flex}>
+                  {fund.name}
+                </AppText>
+                <FormInput
+                  value={contributions[fund.id] ?? ''}
+                  onChangeText={(text) => setContributions((prev) => ({ ...prev, [fund.id]: text }))}
+                  keyboardType="decimal-pad"
+                  placeholder="0"
+                  accessibilityLabel={`تحويش ${fund.name}`}
+                  style={styles.limitInput}
+                />
+              </View>
+            ))}
+          </View>
         </>
       )}
 
-      <Text style={styles.hint}>
-        «ثابت» للفواتير اللي مبلغها محدد (إيجار، إنترنت)؛ «مرن» هو اللي بيتحسب في «تقدر تصرف بأمان».
-      </Text>
-
-      <TouchableOpacity style={styles.deleteBtn} onPress={handleDelete} activeOpacity={0.8}>
-        <Text style={styles.deleteText}>حذف الخطة</Text>
-      </TouchableOpacity>
+      <View style={styles.delete}>
+        <Button label="احذف الخطة" variant="destructive" icon="delete-outline" block onPress={handleDelete} />
+      </View>
 
       {sheet === 'add' && (
         <AddLineSheet
@@ -224,6 +280,7 @@ export function PlanEditorSheet({ plan, onClose }: PlanEditorSheetProps) {
           limitText={editingLine.limitText}
           kind={editingLine.kind}
           currency={currency}
+          progress={currency === plan.currency ? savedProgress?.lines.find((l) => l.categoryId === editingLine.categoryId) : undefined}
           onSave={(patch) => {
             updateLine(editingLine.categoryId, patch);
             setSheet(null);
@@ -239,73 +296,33 @@ export function PlanEditorSheet({ plan, onClose }: PlanEditorSheetProps) {
   );
 }
 
-export function unplannedColor(unplanned: number): string {
-  if (Math.abs(unplanned) < 0.5) return FinanceColors.income;
-  return unplanned > 0 ? FinanceColors.gold : FinanceColors.expense;
-}
-
 const styles = StyleSheet.create({
-  unplanned: {
-    marginTop: 10,
-    fontSize: 14,
-    fontWeight: '700',
-    textAlign: 'right',
-  },
-  bucketTitle: {
-    marginTop: 22,
-    marginBottom: 6,
-    fontSize: 15,
-    fontWeight: '700',
-    color: Colors.light.text,
-    textAlign: 'right',
-  },
-  lineRow: {
-    flexDirection: 'row',
+  summary: {
+    flexDirection: 'row-reverse',
     alignItems: 'center',
-    gap: 8,
-    paddingVertical: 4,
+    justifyContent: 'space-between',
+    gap: space.sm,
+    padding: space.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceSubtle,
   },
-  chevron: { fontSize: 18, color: Colors.light.icon },
-  lineLimit: { fontSize: 14, fontWeight: '600', color: Colors.light.text, minWidth: 90 },
-  kindBadge: { borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1, backgroundColor: Colors.light.icon + '22' },
-  kindFixed: { backgroundColor: Colors.light.tint + '22' },
-  kindText: { fontSize: 11, fontWeight: '700', color: Colors.light.icon },
-  addBtn: {
-    marginTop: 16,
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
+  group: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
     borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: Colors.light.tint,
+    borderColor: colors.border,
+    overflow: 'hidden',
   },
-  addText: { fontSize: 15, fontWeight: '700', color: Colors.light.tint },
-  lineName: {
-    flex: 1,
-    fontSize: 14,
-    color: Colors.light.text,
-    textAlign: 'right',
-  },
-  limitInput: {
-    width: 100,
-    paddingVertical: 8,
-  },
-  hint: {
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'right',
-    marginTop: 8,
-  },
-  deleteBtn: {
-    marginTop: 28,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: FinanceColors.expense + '15',
-  },
-  deleteText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: FinanceColors.expense,
-  },
+  lineRow: { paddingHorizontal: space.md, paddingVertical: space.md, gap: space.sm },
+  lineBorder: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  lineTop: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm },
+  lineName: { flex: 1, flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs, minHeight: 36 },
+  remove: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+  lineBottom: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.md },
+  kind: { flex: 1 },
+  limitInput: { width: 120, textAlign: 'right' },
+  fundRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.md, padding: space.md },
+  flex: { flex: 1 },
+  add: { marginTop: space.md },
+  delete: { marginTop: space.xxxl },
 });

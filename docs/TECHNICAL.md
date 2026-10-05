@@ -109,7 +109,10 @@ components/
   funds/                    FundCard, FundSheet (create/edit), AssignSheet (وزّعها),
                             CoverSheet (غطّيها), MoveMoneySheet (إضافة/سحب),
                             PaySinkingSheet (اتدفعت), UnassignedPanel, labels.ts
-  plan/PlanEditorSheet      Edit a month's plan (lines are tappable rows)
+  plan/PlanEditorSheet      Edit a month's plan (live summary, lines by bucket with kind/limit/remove)
+  plan/PlanLineRow          One plan line on the Plan screen (states via planUi.lineState)
+  plan/planUi.ts            Pure: lineState, lineSentence, unplannedStatus, contributionDone,
+                            planInputOf / withLine / withoutLine (savePlan inputs)
   plan/AddLineSheet         "أضف بند": من الموجود (search, by bucket) / بند جديد
   plan/LineSheet            One line: limit, ثابت/مرن, "نقل لـ" bucket, شيل من الخطة
   plan/labels.ts            BUCKET_TITLES, KIND_OPTIONS
@@ -211,7 +214,7 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 |---|---|---|
 | `/` (`index`) | الرئيسية | Calm Wealth Home (see "Home" below): greeting + date + settings icon; safe to spend (hero) → /plan; one next-best-action insight; هذا الشهر snapshot → /transactions; جاي قريب → /recurring, /due; up to 3 funds → /fund/[id], "عرض كل الصناديق" → /goals; money available to plan (Assign/Cover sheets); net worth; backup nudge → /settings?export=1; last 5 transactions (tap to edit, "+ معاملة"). |
 | `/transactions` | المعاملات | MonthSwitcher; MonthlySnapshot for the selected month (no link); filter chips الكل/مصروف/دخل/تحويل/ذهب (UI-only, by type); days (FlatList), each a header row (day label · day net in textSecondary, never red) and one ListGroup of TransactionRows (tap → edit); EmptyState for an empty month, a one-line message for a filter with no match; "+" FAB → TransactionSheet. |
-| `/plan` | الخطة | Month switcher; empty state (اقترح من مصروفي / انسخ خطة … / ابدأ من الصفر); income + unplanned header; lines by bucket with progress; fund contributions vs allocated; off-plan spending; planned/spent/remaining summary; "تعديل" → PlanEditorSheet (tap a line → LineSheet; "+ أضف بند" → AddLineSheet, whose "إدارة البنود" asks to discard unsaved edits, closes the editor and opens `/categories`); "المعاملات المتكررة ‹" link → `/recurring`. |
+| `/plan` | الخطة | Calm Wealth plan (see "Plan" below): MonthSwitcher; "خطة الشهر" + تعديل; MetricGroup الدخل المتوقع / المخطط / المتبقي للتخطيط + status line; safe-to-spend info row (ثابت/مرن explained); PlanLineRows by bucket (tap → LineSheet, saved via savePlan); "+ أضف بند" (AddLineSheet); fund contributions (tap → fund); spending outside the plan → /transactions; المعاملات المتكررة row. No plan: EmptyState + اقترح من مصروفي / انسخ خطة … / ابدأ من الصفر. |
 | `/assets` | الأصول | Summary (إجمالي الأصول / السيولة / الاستثمارات); accounts (tap → EditAccountSheet, delete); holdings with P&L (delete); "+" → add account (cash/bank/wallet) or gold (opening asset). |
 | `/goals` | الصناديق | UnassignedPanel; sections الطوارئ / الأهداف / مصاريف دورية (by priority); emergency empty hint; "+" → FundSheet. |
 | `/fund/[id]` | (stack) | Fund summary (progress, status, due date, months left, required monthly, cash), إضافة / سحب, اتدفعت (sinking), linked gold, movement history; header "تعديل" → FundSheet (edit/delete). |
@@ -269,13 +272,14 @@ reordered inside Arabic text. Inputs of numbers stay LTR (AmountInput).
 | `AmountInput` | `value`, `onChangeText`, `onChangeAmount?` (parseAmount), `currency`, `hint?` {tone neutral \| attention, text}, `allowZero`, `autoFocus` | 48 (40 when long) bold, centred |
 | `FormField` | `label`, `helper?`, `error?`, children (input) | Error: danger border + dangerSurface + icon + text. `FormInput`/`FieldLabel` in FormSheet share the look: borderStrong, radius.md, minHeight 48, body, placeholder textMuted |
 | `ListRow` / `ListGroup` | `title`, `subtitle?`, `icon?`, `iconTone` neutral \| ok \| gold, `trailing?`, `chevron?`, `archived?`, `onPress?` | 36px icon tile, minHeight 56; group = surface, radius.lg, border, hairline separators |
-| `SectionHeader` | `title`, `actionLabel?`, `onAction?` | section type + tertiary action |
+| `SectionHeader` | `title`, `actionLabel?`, `onAction?`, `trailing?` (non-pressable info) | section type + tertiary action |
+| `MetricGroup` | `metrics: {label, value}[]`, `accessibilityLabel?` | One grouped surface, equal cells, hairline dividers (MonthlySnapshot and the Plan summary) |
 | `InsightCard` | `tone` ok \| attention \| danger, `message`, `icon?`, `actionLabel?`, `onAction?` | Grounds primary50 / warningSurface / dangerSurface |
 | `EmptyState` | `icon`, `title`, `body?`, `actionLabel?`, `onAction?` | Icon disc + primary Button |
 | `Fab` | unchanged API (`placement`, `FAB_CLEARANCE`) | primary700, pill, shadow.raised |
 | `FormSheet` | unchanged API (`useSheetInsets`) | background ground, hairline header, title 18 bold, cancel textSecondary, save primary700 |
 | `Screen` | unchanged | background = colors.background |
-| `StatCard`, `CurrencyText`, `LoadingView`, `MonthSwitcher` | unchanged (StatCard `accentColor` now ignored) | Tokens; StatCard is a plain metric tile |
+| `StatCard`, `CurrencyText`, `LoadingView`, `MonthSwitcher` (no outer margin since phase 4; screens space it) | unchanged (StatCard `accentColor` now ignored) | Tokens; StatCard is a plain metric tile |
 
 Pure date helper: `components/ui/formatDateAr.ts` → `formatDateAr(dateKey|iso, {year})` ("٥ أكتوبر ٢٠٢٦");
 used by redesigned components instead of `utils/formatters.formatDate` (which prints English
@@ -356,6 +360,54 @@ percent · "الموعد: …". Status mapping (`components/funds/labels.ts` →
 | behind | attention "محتاج انتباه" (never red) | محتاج {fundRequiredMonthly} هذا الشهر للحاق بالخطة (hidden if ≤ 0) |
 | no_deadline | neutral "بدون موعد" | لسه محتاج {target − current} للوصول للهدف / وصلت للهدف |
 
+### Plan (Calm Wealth phase 4)
+
+**Screen** (`app/(tabs)/plan.tsx`) — "where should this month's money go?":
+1. MonthSwitcher; "خطة الشهر" + tertiary تعديل (PlanEditorSheet).
+2. `MetricGroup`: الدخل المتوقع · المخطط (line limits + contributions) · المتبقي للتخطيط (`unplanned`),
+   all in the plan currency. Status (`unplannedStatus`, tolerance 0.5): balanced → ok chip "كل الدخل
+   متخطط له" + "0 … غير مخطط"; under → "لسه X محتاجة تتخطط" + خطّطها; over → attention "مخطط أكتر من
+   الدخل المتوقع بـ X" + راجع الخطة (both open the editor).
+3. Info row "المرن هو اللي بيتحسب في «تقدر تصرف بأمان»: {safeToSpend} متاح." — expands (component
+   state) to "ثابت: مبلغ محجوز لمصروف معروف." / "مرن: جزء من المبلغ المتاح للصرف.". Same
+   `safeToSpend` as Home.
+4. Buckets أساسيات · رفاهيات · عطاء (skipped when empty): SectionHeader with "{spent} من {planned}" as
+   `trailing`, then one ListGroup of `PlanLineRow`; "+ أضف بند" (AddLineSheet) after them.
+5. تحويش للصناديق: rows "{allocated} من {planned}" + thin ProgressBar; "اتخصص" chip when
+   `contributionDone`; tap → /fund/[id]; never red.
+6. "مصروف خارج الخطة: X" (`unplannedSpent`) + المعاملات → /transactions; neutral.
+7. المعاملات المتكررة ListRow → /recurring.
+No plan: EmptyState "مفيش خطة لشهر …" with primary اقترح من مصروفي, secondary انسخ خطة {previous}
+(only when `previousPlanMonth` exists), tertiary ابدأ من الصفر — same create calls and messages.
+
+Screen-level line edits: tapping a line opens `LineSheet` (with `progress`); its save calls
+`savePlan(withLine(plan, …))`, its remove `savePlan(withoutLine(plan, id))`. "+ أضف بند" saves an
+existing category the same way; a "بند جديد" is already saved by `addCategoryWithPlanLine`, so the
+screen doesn't add it twice. The editor keeps its own draft as before.
+
+**PlanLineRow** (`lineState` in `components/plan/planUi.ts`):
+
+| State | Condition | Shows |
+|---|---|---|
+| normal | otherwise | "{spent} من {limit}" · "متبقي X" · bar normal |
+| approaching | flexible, limit > 0, pct ≥ 0.85, not over | amber "قرب الحد" chip · bar attention |
+| over | spent > limit (+0.005) | red ⓘ "عدى الخطة بـ {spent − limit}" · bar over (the one red state) |
+| paid | fixed, limit > 0, limit − 0.005 ≤ spent ≤ limit + 0.5 | ok "اتدفع" chip, no warning |
+
+Line 1 name (muted when the category is archived) + ثابت/مرن chip; line 2 amounts; line 3 bar
+(height 6); minHeight 64, the whole row is the hit area. `lineSentence` gives LineSheet's sentence
+("صرف … عدى الخطة بـ X." / "اتدفع." / "قرب الحد: متبقي X." / "متبقي X.").
+
+**Sheets** (logic unchanged; the editor's logic section diffs only by a comment):
+PlanEditorSheet — live "المتبقي للتخطيط" at the top of the content (same tone rules), currency
+Segment, expected income as AmountInput, lines by bucket (name → LineSheet, ثابت/مرن Segment,
+right-aligned limit, remove icon with an accessibility label; no confirm, as before), "+ أضف بند",
+fund contributions, احذف الخطة. AddLineSheet — search + CategoryPicker (grouped when expanded),
+limit as AmountInput, ثابت/مرن with a one-line helper, إدارة البنود. LineSheet — kind chip, "{spent}
+من {limit}" + bar + sentence (when the saved line has progress), limit, kind, نقل لـ, شيل من الخطة.
+It doesn't list transactions (it didn't before). `FormInput` now right-aligns via style (web
+ignored the prop).
+
 ### Transactions (Calm Wealth phase 3)
 
 **Screen** (`app/(tabs)/transactions.tsx`) — "what happened?", built for scanning 10–20 rows:
@@ -390,7 +442,9 @@ copy of three validation messages was added); the parts are presentational:
    ✓ "هيفضل {remainingAfter} في {category}" or attention ⓘ "المبلغ ده هيعدّي ميزانية {category}
    بـ {overBy}" (plan currency). Never blocks saving.
 3. `CategoryPicker` (income/expense): `quickCategories` — last-used first, then picker order, max
-   6, the selected one always shown — and "كل البنود" expanding the full list inline.
+   6, the selected one always shown — and "كل البنود" expanding the full list inline, grouped under
+   أساسيات / رفاهيات / عطاء for expense categories (quick chips stay flat). Also used by
+   AddLineSheet (with `forceExpanded` while searching and `label={null}`).
 4. `AccountPicker`: one line "من / في / دفعت من {account} · {currency}" that expands account
    chips; transfers have من and إلى; a cross-currency transfer adds the "المبلغ المستلم" FormField
    pre-filled with the converted amount (as before).

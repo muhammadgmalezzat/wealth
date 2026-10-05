@@ -6,6 +6,38 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 4
+
+Calm Wealth — phase 4: Monthly Plan.
+
+> JS-only (ships with `eas update` to 1.1.0 builds). No store, data, schema or native changes;
+> saved plans keep exactly the same shape.
+
+**For users**
+- The plan reads like a plan: a summary (expected income / planned / left to plan) with one clear
+  status line, the safe-to-spend amount with fixed vs flexible explained once, lines grouped by
+  أساسيات / رفاهيات / عطاء, fund contributions, spending outside the plan, and the recurring link.
+- Each line: spent of limit, remaining, and a thin bar; "قرب الحد" (amber) for a flexible line at
+  85 %+, "عدى الخطة بـ X" (red) only when really over, "اتدفع" for a paid fixed bill.
+- Tap a line on the Plan screen to see where it stands and change its limit, kind or bucket, or
+  remove it — saved right away. "+ أضف بند" works from the Plan screen too.
+- Editing the plan: a live "المتبقي للتخطيط" at the top, a big expected-income field, and per line
+  a ثابت/مرن switch, the limit and a remove button.
+- "كل البنود" now groups categories under أساسيات / رفاهيات / عطاء (plan and transactions).
+- No emoji or "✓" in the plan anymore.
+
+**Technical**
+- New `components/plan/PlanLineRow.tsx`, `components/plan/planUi.ts` (pure, tested),
+  `components/ui/MetricGroup.tsx` (MonthlySnapshot now uses it).
+- `SectionHeader` gains `trailing`; `MonthSwitcher` lost its outer margin (screens space it);
+  `CategoryPicker` groups the expanded expense list and gains `forceExpanded` / `label`;
+  `LineSheet` gains `progress`; `FormInput` right-aligns via style (web fix).
+- PlanEditorSheet / AddLineSheet / LineSheet restyled with their logic unchanged; the Plan screen
+  saves single-line edits through the existing `savePlan` (`withLine` / `withoutLine`).
+- Tests: 145 (+6 for planUi).
+
+---
+
 ## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 3
 
 Calm Wealth — phase 3: Transactions screen, TransactionRow, TransactionSheet.

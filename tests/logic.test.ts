@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import * as home from '@/components/dashboard/homeInsights';
+import * as planUi from '@/components/plan/planUi';
 import * as txUi from '@/components/transactions/transactionUi';
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
@@ -2393,5 +2394,81 @@ describe('transactions UI: filters and titles', () => {
   it('builds an RTL-safe "from ← to" transfer title', () => {
     const RLM = String.fromCharCode(0x200f);
     assert.equal(txUi.transferTitle('Cash SAR', 'بنك مصر'), `${RLM}Cash SAR${RLM} ← ${RLM}بنك مصر${RLM}`);
+  });
+});
+
+// --- Plan UI helpers (Calm Wealth phase 4) --------------------------------------
+
+describe('plan UI: lineState', () => {
+  const line = (kind: 'fixed' | 'flexible', limit: number, spent: number) => ({
+    kind,
+    limit,
+    spent,
+    pct: limit > 0 ? spent / limit : spent > 0 ? 1 : 0,
+  });
+
+  it('flexible: normal below 85 %, approaching from 85 % up to the limit, over past it', () => {
+    assert.equal(planUi.lineState(line('flexible', 1000, 0)), 'normal');
+    assert.equal(planUi.lineState(line('flexible', 1000, 849)), 'normal');
+    assert.equal(planUi.lineState(line('flexible', 1000, 850)), 'approaching');
+    assert.equal(planUi.lineState(line('flexible', 1000, 1000)), 'approaching');
+    assert.equal(planUi.lineState(line('flexible', 1000, 1000.3)), 'over');
+    assert.equal(planUi.lineState(line('flexible', 0, 10)), 'over');
+    assert.equal(planUi.lineState(line('flexible', 0, 0)), 'normal');
+  });
+
+  it('fixed: never "approaching"; paid at the limit (within 0.5); over beyond that', () => {
+    assert.equal(planUi.lineState(line('fixed', 7000, 6900)), 'normal');
+    assert.equal(planUi.lineState(line('fixed', 7000, 7000)), 'paid');
+    assert.equal(planUi.lineState(line('fixed', 7000, 7000.4)), 'paid');
+    assert.equal(planUi.lineState(line('fixed', 7000, 7001)), 'over');
+    assert.equal(planUi.lineState(line('fixed', 0, 0)), 'normal');
+  });
+
+  it('describes a line factually', () => {
+    const over = { categoryId: 'c', bucket: 'lifestyle' as const, kind: 'flexible' as const, limit: 500, spent: 620, remaining: -120, pct: 1.24 };
+    assert.ok(planUi.lineSentence(over, 'خروجات', 'SAR').startsWith('صرف خروجات عدى الخطة بـ '));
+    assert.equal(planUi.lineSentence({ ...over, kind: 'fixed', limit: 620, remaining: 0, pct: 1 }, 'إيجار', 'SAR'), 'اتدفع.');
+  });
+});
+
+describe('plan UI: statuses and plan inputs', () => {
+  it('unplanned status uses a 0.5 tolerance', () => {
+    assert.equal(planUi.unplannedStatus(0.4), 'balanced');
+    assert.equal(planUi.unplannedStatus(-0.4), 'balanced');
+    assert.equal(planUi.unplannedStatus(120), 'under');
+    assert.equal(planUi.unplannedStatus(-1), 'over');
+  });
+
+  it('a contribution is done once the allocation reaches the plan', () => {
+    assert.equal(planUi.contributionDone({ planned: 500, allocated: 499.999 }), true);
+    assert.equal(planUi.contributionDone({ planned: 500, allocated: 300 }), false);
+    assert.equal(planUi.contributionDone({ planned: 0, allocated: 0 }), false);
+  });
+
+  it('builds savePlan input from the saved plan, replacing / appending / removing one line', () => {
+    const plan = {
+      id: 'plan-2026-10',
+      month: '2026-10',
+      currency: 'SAR' as const,
+      expectedIncome: 3000,
+      lines: [
+        { categoryId: 'a', limit: 100, kind: 'fixed' as const },
+        { categoryId: 'b', limit: 200, kind: 'flexible' as const },
+      ],
+      fundContributions: [{ fundId: 'f', amount: 50 }],
+      createdAt: T0,
+      updatedAt: T0,
+    };
+    const input = planUi.planInputOf(plan);
+    assert.deepEqual(Object.keys(input).sort(), ['currency', 'expectedIncome', 'fundContributions', 'lines', 'month']);
+    assert.deepEqual(planUi.withLine(plan, { categoryId: 'b', limit: 250, kind: 'fixed' }).lines, [
+      { categoryId: 'a', limit: 100, kind: 'fixed' },
+      { categoryId: 'b', limit: 250, kind: 'fixed' },
+    ]);
+    assert.equal(planUi.withLine(plan, { categoryId: 'c', limit: 1, kind: 'flexible' }).lines.length, 3);
+    assert.deepEqual(planUi.withoutLine(plan, 'a').lines, [{ categoryId: 'b', limit: 200, kind: 'flexible' }]);
+    // The plan object itself is untouched.
+    assert.equal(plan.lines.length, 2);
   });
 });

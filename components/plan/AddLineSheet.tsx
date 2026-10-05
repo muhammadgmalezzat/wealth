@@ -1,17 +1,20 @@
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
-import { Chip, ChipRow } from '@/components/ui/Chip';
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { CategoryPicker } from '@/components/transactions/CategoryPicker';
+import { AmountInput } from '@/components/ui/AmountInput';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { Segment } from '@/components/ui/Segment';
-import { Colors } from '@/constants/theme';
+import { space } from '@/constants/theme';
 import { FIXED_CATEGORY_IDS } from '@/store/defaultCategories';
 import { pickerCategories } from '@/store/selectors';
 import type { CurrencyCode, ExpenseBucket, PlanLineKind } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { fromEGP, toEGP } from '@/utils/currency';
 import { showMessage } from '@/utils/dialogs';
-import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
@@ -94,10 +97,10 @@ export function AddLineSheet({ month, currency, usedIds, onAdd, onManage, onClos
 
   const limitFields = (
     <>
-      <FieldLabel>الحد ({currencySymbol(currency)})</FieldLabel>
-      <FormInput value={limitText} onChangeText={setLimitText} keyboardType="decimal-pad" placeholder="0" />
-      <FieldLabel>ثابت ولا مرن؟</FieldLabel>
-      <Segment<PlanLineKind> options={KIND_OPTIONS} value={kind} onChange={setKind} />
+      <AmountInput value={limitText} onChangeText={setLimitText} currency={currency} allowZero accessibilityLabel="حد البند" />
+      <FormField label="ثابت ولا مرن؟" helper="ثابت: مبلغ محجوز لمصروف معروف. مرن: جزء من المبلغ المتاح للصرف.">
+        <Segment<PlanLineKind> options={KIND_OPTIONS} value={kind} onChange={setKind} />
+      </FormField>
     </>
   );
 
@@ -118,43 +121,42 @@ export function AddLineSheet({ month, currency, usedIds, onAdd, onManage, onClos
       {tab === 'existing' ? (
         <>
           <FormInput value={search} onChangeText={setSearch} placeholder="دوّر على بند…" style={styles.search} />
-          {available.length === 0 && <Text style={styles.hint}>مفيش بنود تانية؛ اعمل «بند جديد».</Text>}
-          {BUCKET_OPTIONS.map(({ value: b, label }) => {
-            const inBucket = available.filter((c) => c.bucket === b);
-            if (inBucket.length === 0) return null;
-            return (
-              <View key={b}>
-                <FieldLabel>{label}</FieldLabel>
-                <ChipRow>
-                  {inBucket.map((c) => (
-                    <Chip key={c.id} label={c.name} selected={c.id === selectedId} onPress={() => select(c.id)} />
-                  ))}
-                </ChipRow>
-              </View>
-            );
-          })}
+          {available.length === 0 ? (
+            <AppText variant="secondary" color="textSecondary" style={styles.hint}>
+              مفيش بنود تانية؛ اعمل «بند جديد».
+            </AppText>
+          ) : (
+            <CategoryPicker
+              categories={available}
+              selectedId={selectedId ?? ''}
+              onSelect={select}
+              forceExpanded={query !== ''}
+              label={null}
+            />
+          )}
           {selectedId && limitFields}
         </>
       ) : (
         <>
-          <FieldLabel>اسم البند</FieldLabel>
-          <FormInput value={name} onChangeText={setName} placeholder="مثال: جيم" />
-          <FieldLabel>النوع</FieldLabel>
-          <Segment<ExpenseBucket> options={BUCKET_OPTIONS} value={bucket} onChange={setBucket} />
+          <FormField label="اسم البند">
+            <FormInput value={name} onChangeText={setName} placeholder="مثال: جيم" />
+          </FormField>
+          <FormField label="النوع">
+            <Segment<ExpenseBucket> options={BUCKET_OPTIONS} value={bucket} onChange={setBucket} />
+          </FormField>
           {limitFields}
         </>
       )}
 
-      <TouchableOpacity onPress={onManage} style={styles.manage} hitSlop={8}>
-        <Text style={styles.manageText}>إدارة البنود ‹</Text>
-      </TouchableOpacity>
+      <View style={styles.manage}>
+        <Button label="إدارة البنود" variant="tertiary" icon="tune" onPress={onManage} />
+      </View>
     </FormSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  search: { marginTop: 14 },
-  hint: { marginTop: 12, fontSize: 13, color: Colors.light.icon, textAlign: 'right' },
-  manage: { marginTop: 28, alignSelf: 'center' },
-  manageText: { fontSize: 15, fontWeight: '600', color: Colors.light.tint },
+  search: { marginTop: space.lg },
+  hint: { marginTop: space.md },
+  manage: { marginTop: space.xxl, alignItems: 'center' },
 });
