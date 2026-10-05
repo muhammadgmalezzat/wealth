@@ -63,6 +63,7 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   INVALID_MONTH: () => 'الشهر يجب أن يكون بصيغة YYYY-MM',
   INVALID_KARAT: () => 'العيار يجب أن يكون 18 أو 21 أو 24',
   INVALID_FREQUENCY: () => 'التكرار غير صالح',
+  INVALID_MODE: () => 'طريقة التسجيل غير صالحة',
   CURRENCY_MISMATCH: (d) => `العملة يجب أن تطابق عملة ${entity(d)}`,
   CATEGORY_KIND_MISMATCH: () => 'نوع التصنيف لا يطابق نوع المعاملة',
   CATEGORY_BUCKET_MISMATCH: () => 'تصنيفات الدخل فقط تستخدم بند الدخل',

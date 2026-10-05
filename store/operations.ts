@@ -888,7 +888,7 @@ function validateRecurringRule(state: State, rule: NewRecurringRule) {
     assertDate(rule.endDate, 'endDate');
     if (rule.endDate < rule.startDate) fail('INVALID_DATE', { field: 'endDate' });
   }
-  if (rule.mode !== 'auto' && rule.mode !== 'confirm') fail('INVALID_FREQUENCY');
+  if (rule.mode !== 'auto' && rule.mode !== 'confirm') fail('INVALID_MODE');
   const account = requireById(state.accounts, rule.accountId, 'account');
   if (rule.currency !== account.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
   if (rule.kind === 'transfer') {

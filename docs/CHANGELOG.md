@@ -6,6 +6,35 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Fixes
+
+> JS-only. No schema, data-version or persisted-shape change.
+
+**Fixes**
+- A1 — Funds are no longer "محتاج انتباه" from the first day of every month. New status
+  **pending** ("الشهر ده"): this month's contribution isn't in yet but there's still time — more
+  than 7 days left in the month, or the fund was created this month. Only the last 7 days turn a
+  shortfall into **behind**. Home's next step only reacts to behind; Home orders funds behind →
+  pending → nearest due.
+- A2 — Transfer edits re-snapshot `rateToEGP` when the from-account currency changes. On
+  inspection the store already did this (`updateTransaction` compares the from-account currency for
+  transfers); new tests now pin both directions, no code change was needed.
+- A3 — An invalid recurring mode reports the new `INVALID_MODE` ("طريقة التسجيل غير صالحة")
+  instead of `INVALID_FREQUENCY`.
+- A4 — A plan line with a 0 limit and spending says "مفيش ميزانية للبند ده: اتصرف X" (still the
+  "over" state).
+- Two existing tests were updated for the approved A1 behavior change (they asserted the old
+  "behind from day 1" rule): the fundStatus test and the "fund behind" next-step test.
+
+**Technical**
+- `FundStatus` gains `'pending'`; `BEHIND_DAYS_LEFT = 7`; `fundStatus` uses `daysLeftInMonth`
+  from planning.ts (circular import, used only at call time). `FUND_STATUS`, `STATUS_BADGES`,
+  `fundStatusSentence`, `homeFunds` updated.
+- `INVALID_MODE` error code + Arabic message; `lineSentence` zero-limit wording.
+- Tests: 155 (+10 incl. the 7-vs-8-days boundary and "created this month").
+
+---
+
 ## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 4
 
 Calm Wealth — phase 4: Monthly Plan.

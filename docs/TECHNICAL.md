@@ -340,11 +340,11 @@ Content padding `space.lg`, section gap `space.xxl`. Order (`app/(tabs)/index.ts
 | 1 | `unassignedEGP < −0.005` | danger | استخدمت جزء من فلوس الصناديق. | غطّي الفرق → CoverSheet |
 | 2 | `dueOccurrences(today, 'confirm')` not empty | attention | عندك {N: مستحق واحد / مستحقين / N مستحقات / N مستحق} محتاج… مراجعة. | راجعهم → /due |
 | 3 | first of `upcoming(3 days)` | attention | {name} مستحق خلال {يوم / يومين / N أيام}. | راجع المستحقات → /recurring |
-| 4 | first fund (priority order) with `fundStatus = behind` and `fundRequiredMonthly > 0` | attention | {fund} محتاج {amount} هذا الشهر عشان يفضل على المسار. | خصص الآن → /fund/[id] |
+| 4 | first fund (priority order) with `fundStatus = behind` (never `pending`) and `fundRequiredMonthly > 0` | attention | {fund} محتاج {amount} هذا الشهر عشان يفضل على المسار. | خصص الآن → /fund/[id] |
 | 5 | `unassignedEGP > 0.005` | ok | عندك {amount} لسه محتاجة تتوزع. | وزّع أموالك → AssignSheet |
 | — | otherwise | | null | |
 
-`homeFunds(state, now, max = 3)`: behind first, then nearest due date (funds with a due date
+`homeFunds(state, now, max = 3)`: behind first, then pending, then nearest due date (funds with a due date
 before those without), then `fundsByPriority` order. `upcomingItems(state, now, max = 3)`: the
 first items of `upcoming(30 days)`. Helpers `dueCountPhrase`, `withinDaysPhrase`, `daysBetween`.
 
@@ -357,6 +357,7 @@ percent · "الموعد: …". Status mapping (`components/funds/labels.ts` →
 |---|---|---|
 | ahead | ok "متقدم" | — |
 | on_track | ok "على المسار" | ماشي على الخطة |
+| pending | neutral "الشهر ده" | محتاج {fundRequiredMonthly} الشهر ده (hidden if ≤ 0) |
 | behind | attention "محتاج انتباه" (never red) | محتاج {fundRequiredMonthly} هذا الشهر للحاق بالخطة (hidden if ≤ 0) |
 | no_deadline | neutral "بدون موعد" | لسه محتاج {target − current} للوصول للهدف / وصلت للهدف |
 
@@ -572,7 +573,8 @@ Key validation rules:
   liability payments must be expenses in the liability's currency.
 - Transfer: both accounts exist and differ; `toAmount` defaults to the converted amount.
 - `updateTransaction`: keeps `createdAt`; keeps `rateToEGP` unless the currency changes
-  (then re-snapshots); a gold purchase can't change type (`ASSET_PURCHASE_TYPE_LOCKED`).
+  (then re-snapshots at the current rate) — for transfers the currency is the from-account's, so
+  moving a transfer to a from-account in another currency re-snapshots too; a gold purchase can't change type (`ASSET_PURCHASE_TYPE_LOCKED`).
 - Accounts: currency locked once used; delete refused when referenced (`ACCOUNT_IN_USE`).
 - Categories: name trimmed, required and **unique among active categories** (case-insensitive,
   `CATEGORY_NAME_TAKEN`; archived names are free); income kind ⇔ income bucket; `updateCategory`
@@ -622,7 +624,7 @@ Error codes (`store/errors.ts`) → Arabic in `utils/errorMessages.ts` (`errorMe
 entity/field labels interpolated (e.g. `NOT_POSITIVE` + field `weightGrams` → "الوزن يجب أن يكون أكبر من صفر"):
 
 `NAME_REQUIRED, NOT_FOUND, NOT_POSITIVE, NEGATIVE, NOT_A_NUMBER, INVALID_DATE, INVALID_MONTH,
-INVALID_KARAT, INVALID_FREQUENCY, CURRENCY_MISMATCH, CATEGORY_KIND_MISMATCH,
+INVALID_KARAT, INVALID_FREQUENCY, INVALID_MODE, CURRENCY_MISMATCH, CATEGORY_KIND_MISMATCH,
 CATEGORY_BUCKET_MISMATCH, LIABILITY_PAYMENT_NOT_EXPENSE, SAME_ACCOUNT_TRANSFER, ACCOUNT_IN_USE,
 ACCOUNT_CURRENCY_LOCKED, CATEGORY_IN_USE, LIABILITY_IN_USE, LIABILITY_CURRENCY_LOCKED,
 WITHDRAW_EXCEEDS_FUND, HOLDING_ALREADY_LINKED, INSUFFICIENT_UNASSIGNED, NOTHING_SELECTED,
@@ -664,7 +666,7 @@ each transaction's `rateToEGP` snapshot**.
 - `monthsUntil(due, now) = max(1, (dy−ny)·12 + (dm−nm) + 1)` (`utils/dates.ts`, current month counts)
 - `fundRequiredMonthly = max(0, target − current) / monthsUntil(due)`; null without due date
 - `sinkingMonthlySuggestion = target / monthsUntil(nextDueDate)` (ignores savings so far)
-- `fundStatus`: required = `max(0, target − (current − allocatedThisMonth)) / monthsUntil`; `no_deadline` without due date; `ahead` if required ≤ 0 or allocatedThisMonth > 1.1 × required; `behind` if < required; else `on_track`
+- `fundStatus`: required = `max(0, target − (current − allocatedThisMonth)) / monthsUntil`; `no_deadline` without due date; `ahead` if required ≤ 0 or allocatedThisMonth > 1.1 × required; `on_track` if ≥ required; below required → `pending` while `daysLeftInMonth(month, now) > 7` (today counts: in a 31-day month day 24 leaves 8, day 25 leaves 7) or when the fund's `createdAt` is in the current month, otherwise `behind` (`BEHIND_DAYS_LEFT = 7`)
 - `fundSuggestedMonthly = min(requiredMonthly ?? monthlyContribution ?? 0, target − current)`
 - `unassignedEGP = liquidTotalEGP − Σ toEGP(movement, fund.currency)` (linked gold is not cash)
 - `unassignedEGPWithFundCash(cash)` = preview after setting a fund's cash allocation
@@ -807,18 +809,20 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 - `DEFAULT_TRACKING_START_DATE` is the owner's date ('2026-08-05') for every install.
 - `fundStatus` counts any movement dated this month — e.g. a migrated opening allocation — as
   this month's contribution.
+- `planProgress` puts a line whose category is missing into أساسيات (default bucket).
+- A plan line with a 0 limit and any spending is "over" (pct = 1); the UI says "مفيش ميزانية
+  للبند ده: اتصرف X" instead of an over-by amount.
 - Plan "fixed" suggestion averages over all window months (a bill paid for 3 months shows ⅓/month).
 - Cover withdrawals round up → unassigned can land at +0.01.
 - PBKDF2 (pure JS) speed on Hermes not measured on a device; Android app-switcher preview may
   show content (no `FLAG_SECURE`).
 - Unused code: `components/ui/CurrencyText.tsx`, `CURRENCIES`, `CURRENCY_LABELS`,
-  `liquidByCurrency`/`goldTotals` (tested only), `updateRates` action; lint warnings for BOM
-  characters and an unused import in `NetWorthCard.tsx`.
+  `liquidByCurrency`/`goldTotals` (tested only), `updateRates` action.
 - Recurring: `processDue` runs only while the app is open (launch / foreground) — there is no
   background task, so an auto item is recorded the next time the app is opened. A rule with a
   past `startDate` catches up on every missed occurrence (auto: recorded; confirm: inbox).
   `nextDate` only looks forward from today (a missed confirm item shows in the inbox, not as
-  `nextDate`). Invalid `mode` reuses the `INVALID_FREQUENCY` error code. Reminders are scheduled
+  `nextDate`). Reminders are scheduled
   60 days ahead and refreshed whenever the app runs.
 - Plan editor: "بند جديد" writes the category **and** its line to the saved plan immediately (so
   it stays even if the editor is then cancelled); "نقل لـ" also applies at once (it edits the

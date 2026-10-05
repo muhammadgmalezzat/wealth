@@ -48,7 +48,7 @@ export function daysBetween(from: string, to: string): number {
 // 1. fund money was spent (unassigned < 0) → cover
 // 2. 'confirm' recurring items are due → review them
 // 3. an item is due within 3 days → look at what's coming
-// 4. a fund is behind and needs money this month → allocate
+// 4. a fund is behind (≤ 7 days left in the month) and needs money → allocate; 'pending' never
 // 5. money without a job (unassigned > 0) → assign
 export function nextBestAction(state: FinanceState, now: Date = new Date()): HomeAction | null {
   const today = toDateKey(now);
@@ -97,15 +97,21 @@ export function nextBestAction(state: FinanceState, now: Date = new Date()): Hom
   return null;
 }
 
-// Funds for Home: behind first, then the nearest due date, then priority order.
+// Funds for Home: behind first, then pending (this month's contribution not in yet), then the
+// nearest due date, then priority order.
 export function homeFunds(state: FinanceState, now: Date = new Date(), max = 3): Fund[] {
   const ordered = fundsByPriority(state);
   const rank = new Map(ordered.map((f, i) => [f.id, i]));
-  const behind = new Set(ordered.filter((f) => fundStatus(state, f.id, now) === 'behind').map((f) => f.id));
+  const urgency = new Map(
+    ordered.map((f) => {
+      const status = fundStatus(state, f.id, now);
+      return [f.id, status === 'behind' ? 2 : status === 'pending' ? 1 : 0];
+    })
+  );
   return [...ordered]
     .sort((a, b) => {
-      const byBehind = Number(behind.has(b.id)) - Number(behind.has(a.id));
-      if (byBehind !== 0) return byBehind;
+      const byUrgency = (urgency.get(b.id) ?? 0) - (urgency.get(a.id) ?? 0);
+      if (byUrgency !== 0) return byUrgency;
       const dueA = fundDueDate(a);
       const dueB = fundDueDate(b);
       if (dueA && dueB && dueA !== dueB) return dueA < dueB ? -1 : 1;

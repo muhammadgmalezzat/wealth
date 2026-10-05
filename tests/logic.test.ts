@@ -361,8 +361,14 @@ describe('funds', () => {
     // At month start: 70,000 of 100,000 → 10,000/month required.
     const allocate = (amount: number) => apply(base, ops.allocateToFund(base, 'f', amount, undefined, ctx));
 
-    assert.equal(fundStatus(base, 'f', NOW), 'behind');
-    assert.equal(fundStatus(allocate(5000), 'f', NOW), 'behind');
+    // NOW = 15 Oct (17 days left): not done yet, but there's still time → pending.
+    assert.equal(fundStatus(base, 'f', NOW), 'pending');
+    assert.equal(fundStatus(allocate(5000), 'f', NOW), 'pending');
+    // 26 Oct (6 days left): the same shortfall is now behind. The fixture fund was created in
+    // January, so the "created this month" rule doesn't apply.
+    const OCT_26 = new Date(2026, 9, 26, 12);
+    assert.equal(fundStatus(base, 'f', OCT_26), 'behind');
+    assert.equal(fundStatus(allocate(5000), 'f', OCT_26), 'behind');
     assert.equal(fundStatus(allocate(10000), 'f', NOW), 'on_track');
     assert.equal(fundStatus(allocate(12000), 'f', NOW), 'ahead');
     assert.equal(fundStatus(base, 'open', NOW), 'no_deadline');
@@ -2282,11 +2288,17 @@ describe('home: nextBestAction', () => {
   });
 
   it('then a fund that is behind, before assigning money', () => {
+    // No recurring rules in this fixture, so nothing due/upcoming can outrank the fund step.
     const s = base({ funds: [behindFund()] });
-    const action = home.nextBestAction(s, NOW)!;
+    const OCT_26 = new Date(2026, 9, 26, 12);
+    assert.deepEqual(recurring.dueOccurrences(s, '2026-10-26'), []);
+    assert.deepEqual(recurring.upcoming(s, 3, '2026-10-26').items, []);
+    const action = home.nextBestAction(s, OCT_26)!;
     assert.equal(action.kind, 'fund');
     assert.equal(action.fundId, 'goal');
     assert.ok(action.message.startsWith('جواز محتاج '));
+    // Mid-month (NOW, 17 days left) the fund is only pending: no fund step.
+    assert.equal(home.nextBestAction(s, NOW)!.kind, 'assign');
   });
 
   it('then money without a job', () => {
@@ -2470,5 +2482,111 @@ describe('plan UI: statuses and plan inputs', () => {
     assert.deepEqual(planUi.withoutLine(plan, 'a').lines, [{ categoryId: 'b', limit: 200, kind: 'flexible' }]);
     // The plan object itself is untouched.
     assert.equal(plan.lines.length, 2);
+  });
+});
+
+// --- Domain fixes (phase 5, Part A) ----------------------------------------------
+
+describe('A1: fundStatus pending vs behind', () => {
+  // daysLeftInMonth counts today: in October (31 days) day d leaves 31 − d + 1 days.
+  const at = (day: number) => new Date(2026, 9, day, 12);
+  const state = (fundOverrides: Partial<Fund> = {}, movements: FinanceState['fundMovements'] = []): FinanceState => ({
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 1000000)],
+    // 30,000 by 31 Dec → 10,000 required each of Oct, Nov, Dec.
+    funds: [fund({ id: 'f', targetAmount: 30000, deadline: '2026-12-31', ...fundOverrides })],
+    fundMovements: movements,
+  });
+
+  it('day 1 with nothing allocated → pending', () => {
+    assert.equal(fundStatus(state(), 'f', at(1)), 'pending');
+  });
+
+  it('boundary: 8 days left → pending, exactly 7 days left → behind, 5 days left → behind', () => {
+    assert.equal(fundStatus(state(), 'f', at(24)), 'pending'); // 31 − 24 + 1 = 8
+    assert.equal(fundStatus(state(), 'f', at(25)), 'behind'); // 7
+    assert.equal(fundStatus(state(), 'f', at(27)), 'behind'); // 5
+  });
+
+  it('partially allocated with 10 days left → pending', () => {
+    const partial = state({}, [{ id: 'm', fundId: 'f', amount: 4000, date: '2026-10-05', updatedAt: T0 }]);
+    assert.equal(fundStatus(partial, 'f', at(22)), 'pending'); // 10 days left
+  });
+
+  it('a fund created this month is never behind this month', () => {
+    const fresh = { createdAt: '2026-10-10T09:00:00.000Z' };
+    assert.equal(fundStatus(state(fresh), 'f', at(26)), 'pending');
+    assert.equal(fundStatus(state(fresh), 'f', at(29)), 'pending'); // 3 days left
+  });
+
+  it('ahead / on_track / no_deadline are unchanged', () => {
+    const done = (amount: number) => state({}, [{ id: 'm', fundId: 'f', amount, date: '2026-10-02', updatedAt: T0 }]);
+    assert.equal(fundStatus(done(10000), 'f', at(26)), 'on_track');
+    assert.equal(fundStatus(done(12000), 'f', at(26)), 'ahead');
+    assert.equal(fundStatus(state({ deadline: undefined }), 'f', at(26)), 'no_deadline');
+  });
+
+  it('homeFunds orders behind, then pending, then nearest due', () => {
+    const s: FinanceState = {
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 1000000)],
+      funds: [
+        fund({ id: 'pendingNear', priority: 1, targetAmount: 30000, deadline: '2026-12-31', createdAt: '2026-10-20T00:00:00.000Z' }),
+        fund({ id: 'behind', priority: 2, targetAmount: 30000, deadline: '2027-06-30' }),
+        fund({ id: 'okNear', priority: 3, targetAmount: 100, deadline: '2026-11-30' }),
+      ],
+      fundMovements: [{ id: 'm', fundId: 'okNear', amount: 100, date: '2026-10-02', updatedAt: T0 }],
+    };
+    assert.deepEqual(
+      home.homeFunds(s, at(26), 3).map((f) => f.id),
+      ['behind', 'pendingNear', 'okNear']
+    );
+  });
+});
+
+describe('A2: transfer edits re-snapshot the rate when the from-currency changes', () => {
+  const setup = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [account('sar', 'SAR', 10000, 'SA'), account('egp', 'EGP', 100000), account('egp2', 'EGP', 0)],
+    transactions: [
+      { id: 't', type: 'transfer', fromAccountId: 'sar', toAccountId: 'egp', amount: 100, toAmount: 1100, date: '2026-10-02', rateToEGP: 11, createdAt: T0, updatedAt: T0 },
+    ],
+  });
+
+  it('keeps the snapshot when the from-account currency is unchanged', () => {
+    const s = setup();
+    const tx = s.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
+    const after = apply(s, ops.updateTransaction(s, { ...tx, amount: 120, toAmount: 1320 }, makeCtx()));
+    assert.equal(after.transactions[0].rateToEGP, 11);
+  });
+
+  it('takes the current rate of the new from-currency', () => {
+    const s = setup();
+    const tx = s.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
+    const toEgp = apply(s, ops.updateTransaction(s, { ...tx, fromAccountId: 'egp', toAccountId: 'egp2', toAmount: 100 }, makeCtx()));
+    assert.equal(toEgp.transactions[0].rateToEGP, 1);
+    const back = toEgp.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
+    const toSar = apply(toEgp, ops.updateTransaction(toEgp, { ...back, fromAccountId: 'sar', toAccountId: 'egp', toAmount: 1250 }, makeCtx()));
+    assert.equal(toSar.transactions[0].rateToEGP, 12.5); // RATES.SAR_EGP
+  });
+});
+
+describe('A3: invalid recurring mode', () => {
+  it('fails with INVALID_MODE', () => {
+    const s = recurringState();
+    const { id: _i, updatedAt: _u, createdAt: _c, nextDate: _n, skippedDates: _s, ...input } = rule({ id: 'x' });
+    assert.throws(
+      () => ops.addRecurringRule(s, { ...input, mode: 'x' as RecurringRule['mode'] }, makeCtx()),
+      { code: 'INVALID_MODE' }
+    );
+    assert.equal(errorMessage(new FinanceValidationError('INVALID_MODE' as never)), 'طريقة التسجيل غير صالحة');
+  });
+});
+
+describe('A4: zero-limit line with spending', () => {
+  it('stays "over" but explains there is no budget', () => {
+    const line = { categoryId: 'c', bucket: 'lifestyle' as const, kind: 'flexible' as const, limit: 0, spent: 75, remaining: -75, pct: 1 };
+    assert.equal(planUi.lineState(line), 'over');
+    assert.ok(planUi.lineSentence(line, 'خروجات', 'SAR').startsWith('مفيش ميزانية للبند ده: اتصرف '));
   });
 });

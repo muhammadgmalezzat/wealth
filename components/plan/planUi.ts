@@ -28,7 +28,10 @@ export function lineState(line: Pick<LineProgress, 'kind' | 'limit' | 'spent' | 
 export function lineSentence(line: LineProgress, name: string, currency: CurrencyCode): string {
   switch (lineState(line)) {
     case 'over':
-      return `صرف ${name} عدى الخطة بـ ${formatMoney(line.spent - line.limit, currency)}.`;
+      // A 0 limit has no budget to exceed: say what was spent instead.
+      return line.limit === 0
+        ? `مفيش ميزانية للبند ده: اتصرف ${formatMoney(line.spent, currency)}.`
+        : `صرف ${name} عدى الخطة بـ ${formatMoney(line.spent - line.limit, currency)}.`;
     case 'paid':
       return 'اتدفع.';
     case 'approaching':

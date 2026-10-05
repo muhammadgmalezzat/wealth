@@ -26,6 +26,8 @@ export const FREQUENCY_LABELS: Record<SinkingFrequency, string> = {
 export const FUND_STATUS: Record<FundStatus, { label: string; tone: StatusTone }> = {
   ahead: { label: 'متقدم', tone: 'ok' },
   on_track: { label: 'على المسار', tone: 'ok' },
+  // This month's contribution isn't in yet, but there's still time.
+  pending: { label: 'الشهر ده', tone: 'neutral' },
   behind: { label: 'محتاج انتباه', tone: 'attention' },
   no_deadline: { label: 'بدون موعد', tone: 'neutral' },
 };
@@ -42,6 +44,7 @@ const TONE_COLOR: Record<StatusTone, string> = {
 export const STATUS_BADGES: Record<FundStatus, { label: string; color: string }> = {
   ahead: { label: FUND_STATUS.ahead.label, color: TONE_COLOR[FUND_STATUS.ahead.tone] },
   on_track: { label: FUND_STATUS.on_track.label, color: TONE_COLOR[FUND_STATUS.on_track.tone] },
+  pending: { label: FUND_STATUS.pending.label, color: TONE_COLOR[FUND_STATUS.pending.tone] },
   behind: { label: FUND_STATUS.behind.label, color: TONE_COLOR[FUND_STATUS.behind.tone] },
   no_deadline: { label: FUND_STATUS.no_deadline.label, color: TONE_COLOR[FUND_STATUS.no_deadline.tone] },
 };
@@ -54,6 +57,8 @@ export function fundStatusSentence(
   switch (status) {
     case 'on_track':
       return 'ماشي على الخطة';
+    case 'pending':
+      return requiredMonthly && requiredMonthly > 0.005 ? `محتاج ${formatMoney(requiredMonthly, currency)} الشهر ده` : null;
     case 'behind':
       return requiredMonthly && requiredMonthly > 0.005
         ? `محتاج ${formatMoney(requiredMonthly, currency)} هذا الشهر للحاق بالخطة`

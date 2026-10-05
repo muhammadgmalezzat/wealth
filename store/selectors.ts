@@ -1,5 +1,7 @@
 import { fromEGP, toEGP } from '@/utils/currency';
 import { monthOf, monthsUntil, shiftMonth, toMonthKey } from '@/utils/dates';
+// planning.ts imports this module too; daysLeftInMonth is only used at call time, so the cycle is safe.
+import { daysLeftInMonth } from './planning';
 import type {
   Account,
   Category,
@@ -226,11 +228,16 @@ export function sinkingMonthlySuggestion(
   return fund.targetAmount / monthsUntil(fund.nextDueDate, now);
 }
 
-export type FundStatus = 'ahead' | 'on_track' | 'behind' | 'no_deadline';
+export type FundStatus = 'ahead' | 'on_track' | 'pending' | 'behind' | 'no_deadline';
+
+// The last this-many days of a month (today included) turn a shortfall from pending to behind.
+export const BEHIND_DAYS_LEFT = 7;
 
 // Compares this month's net allocations with what was required at the START of the month
 // (so allocating this month doesn't shrink its own requirement).
-// behind: < required · on_track: required…110% · ahead: > 110% or target already reached.
+// ahead: > 110% or target already reached · on_track: required…110% ·
+// below required: pending while more than 7 days are left in the month (today counts) or when
+// the fund was created this month, behind otherwise.
 export function fundStatus(state: State, fundId: string, now: Date = new Date()): FundStatus {
   const fund = findFund(state, fundId);
   const due = fund && fundDueDate(fund);
@@ -247,7 +254,10 @@ export function fundStatus(state: State, fundId: string, now: Date = new Date())
   const required = remainingAtMonthStart / monthsUntil(due, now);
 
   if (required <= 0) return 'ahead';
-  if (allocatedThisMonth < required) return 'behind';
+  if (allocatedThisMonth < required) {
+    const createdThisMonth = toMonthKey(new Date(fund.createdAt)) === month;
+    return createdThisMonth || daysLeftInMonth(month, now) > BEHIND_DAYS_LEFT ? 'pending' : 'behind';
+  }
   return allocatedThisMonth > required * 1.1 ? 'ahead' : 'on_track';
 }
 
