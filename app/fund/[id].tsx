@@ -1,31 +1,56 @@
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useState, type ComponentProps } from 'react';
+import { Pressable, StyleSheet, View } from 'react-native';
 
 import { FundSheet } from '@/components/funds/FundSheet';
-import { FREQUENCY_LABELS, FUND_TYPE_LABELS, STATUS_BADGES } from '@/components/funds/labels';
+import { fundNextStep, movementKind } from '@/components/funds/fundsUi';
+import { FREQUENCY_LABELS, FUND_STATUS, FUND_TYPE_LABELS } from '@/components/funds/labels';
 import { MoveMoneySheet } from '@/components/funds/MoveMoneySheet';
 import { PaySinkingSheet } from '@/components/funds/PaySinkingSheet';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { formatDateAr } from '@/components/ui/formatDateAr';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { InsightCard } from '@/components/ui/InsightCard';
+import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { LoadingView } from '@/components/ui/LoadingView';
-import { Screen } from '@/components/ui/Screen';
+import { Money } from '@/components/ui/Money';
 import { ProgressBar } from '@/components/ui/ProgressBar';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { Screen } from '@/components/ui/Screen';
+import { SectionHeader } from '@/components/ui/SectionHeader';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { colors, opacity, space } from '@/constants/theme';
 import {
   fundAllocated,
   fundCurrent,
   fundDueDate,
+  fundLinkedValue,
   fundProgress,
   fundRequiredMonthly,
   fundStatus,
   holdingValueEGP,
+  linkableHoldings,
 } from '@/store/selectors';
+import type { Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { monthsUntil } from '@/utils/dates';
-import { formatCurrency, formatDate } from '@/utils/formatters';
 
 type SheetKind = 'edit' | 'allocate' | 'withdraw' | 'pay' | null;
 
+// "فاضل شهر" · "فاضل شهرين" · "فاضل 3 شهور" · "فاضل 14 شهر".
+const monthsLeftPhrase = (n: number) =>
+  n === 1 ? 'فاضل شهر' : n === 2 ? 'فاضل شهرين' : n <= 10 ? `فاضل ${n} شهور` : `فاضل ${n} شهر`;
+
+const TYPE_ICONS: Record<Fund['type'], ComponentProps<typeof MaterialIcons>['name']> = {
+  emergency: 'shield',
+  goal: 'track-changes',
+  sinking: 'event-repeat',
+};
+
+// Progress and the next action first, history last: hero · next step · actions · facts · linked
+// gold · movements. "تعديل" in the header opens FundSheet (edit / delete).
 export default function FundDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const state = useFinanceStore();
@@ -38,15 +63,23 @@ export default function FundDetailScreen() {
     return (
       <Screen edges={['bottom']} contentStyle={styles.missing}>
         <Stack.Screen options={{ title: 'الصندوق' }} />
-        <Text style={styles.muted}>الصندوق غير موجود</Text>
+        <AppText variant="secondary" color="textSecondary" align="center">
+          الصندوق غير موجود
+        </AppText>
       </Screen>
     );
   }
 
+  const now = new Date();
+  const status = fundStatus(state, fund.id, now);
+  const chip = FUND_STATUS[status];
+  const current = fundCurrent(state, fund.id);
   const progress = fundProgress(state, fund.id);
-  const status = STATUS_BADGES[fundStatus(state, fund.id)];
+  const linkedValue = fundLinkedValue(state, fund.id);
   const due = fundDueDate(fund);
-  const requiredMonthly = fundRequiredMonthly(state, fund.id);
+  const requiredMonthly = fundRequiredMonthly(state, fund.id, now);
+  const step = fundNextStep(state, fund, now);
+  const sinking = fund.type === 'sinking';
   const movements = state.fundMovements
     .map((m, index) => ({ m, index }))
     .filter(({ m }) => m.fundId === fund.id)
@@ -54,19 +87,15 @@ export default function FundDetailScreen() {
     .sort((a, b) => (a.m.date !== b.m.date ? (a.m.date < b.m.date ? 1 : -1) : b.index - a.index))
     .map(({ m }) => m);
   const linkedHoldings = state.holdings.filter((h) => fund.linkedHoldingIds.includes(h.id));
+  const canLinkGold = linkableHoldings(state, fund.id).some((h) => h.type === 'gold' && !fund.linkedHoldingIds.includes(h.id));
 
-  const facts = [
-    { label: 'النوع', value: FUND_TYPE_LABELS[fund.type] },
-    fund.type === 'sinking' && fund.frequency
-      ? { label: 'التكرار', value: FREQUENCY_LABELS[fund.frequency] }
-      : null,
-    due ? { label: fund.type === 'sinking' ? 'الاستحقاق القادم' : 'الموعد', value: formatDate(due) } : null,
-    due ? { label: 'الشهور المتبقية', value: String(monthsUntil(due, new Date())) } : null,
-    requiredMonthly !== null
-      ? { label: 'مطلوب شهرياً', value: formatCurrency(requiredMonthly, fund.currency) }
-      : null,
-    { label: 'نقداً في الصندوق', value: formatCurrency(fundAllocated(state, fund.id), fund.currency) },
-  ].filter((fact): fact is { label: string; value: string } => fact !== null);
+  const facts: { label: string; value: string }[] = [
+    requiredMonthly !== null ? { label: 'مطلوب شهرياً', value: formatMoney(requiredMonthly, fund.currency) } : null,
+    { label: 'نقداً في الصندوق', value: formatMoney(fundAllocated(state, fund.id), fund.currency) },
+    linkedValue > 0 ? { label: 'قيمة الذهب المربوط', value: formatMoney(linkedValue, fund.currency) } : null,
+    due ? { label: sinking ? 'الاستحقاق القادم' : 'الموعد', value: formatDateAr(due) } : null,
+    sinking && fund.frequency ? { label: 'التكرار', value: FREQUENCY_LABELS[fund.frequency] } : null,
+  ].filter((f): f is { label: string; value: string } => f !== null);
 
   return (
     <Screen scroll edges={['bottom']} contentStyle={styles.content}>
@@ -74,91 +103,161 @@ export default function FundDetailScreen() {
         options={{
           title: fund.name,
           headerRight: () => (
-            <TouchableOpacity onPress={() => setSheet('edit')} hitSlop={8}>
-              <Text style={styles.headerAction}>تعديل</Text>
-            </TouchableOpacity>
+            <Pressable
+              onPress={() => setSheet('edit')}
+              hitSlop={10}
+              accessibilityRole="button"
+              style={({ pressed }) => pressed && { opacity: opacity.pressed }}>
+              <AppText variant="bodyStrong" color="primary700">
+                تعديل
+              </AppText>
+            </Pressable>
           ),
         }}
       />
-        {/* ── Summary ── */}
-        <Card>
-          <View style={styles.titleRow}>
-            <View style={[styles.badge, { backgroundColor: status.color + '1F' }]}>
-              <Text style={[styles.badgeText, { color: status.color }]}>{status.label}</Text>
-            </View>
-            <Text style={styles.percent}>{Math.round(progress * 100)}%</Text>
-          </View>
-          <ProgressBar progress={progress} height={10} />
-          <Text style={styles.amounts}>
-            {formatCurrency(fundCurrent(state, fund.id), fund.currency)} /{' '}
-            {formatCurrency(fund.targetAmount, fund.currency)}
-          </Text>
-          {facts.map((fact) => (
-            <View key={fact.label} style={styles.factRow}>
-              <Text style={styles.factValue}>{fact.value}</Text>
-              <Text style={styles.muted}>{fact.label}</Text>
-            </View>
-          ))}
-        </Card>
 
-        {/* ── Actions ── */}
-        <View style={styles.actions}>
-          <TouchableOpacity style={[styles.action, styles.actionSecondary]} onPress={() => setSheet('withdraw')}>
-            <Text style={[styles.actionText, styles.actionTextSecondary]}>سحب</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.action} onPress={() => setSheet('allocate')}>
-            <Text style={styles.actionText}>إضافة</Text>
-          </TouchableOpacity>
+      {/* ── Hero ── */}
+      <Card variant="hero" style={styles.hero}>
+        <View style={styles.typeRow}>
+          <MaterialIcons name={TYPE_ICONS[fund.type]} size={18} color={colors.textSecondary} />
+          <AppText variant="secondary" color="textSecondary">
+            {FUND_TYPE_LABELS[fund.type]}
+          </AppText>
         </View>
-        {fund.type === 'sinking' && (
-          <TouchableOpacity style={[styles.action, styles.payAction]} onPress={() => setSheet('pay')}>
-            <Text style={styles.actionText}>اتدفعت</Text>
-          </TouchableOpacity>
+        <View style={styles.amounts}>
+          <Money amount={current} currency={fund.currency} size="lg" />
+          <AppText variant="secondary" color="textSecondary">
+            من {formatMoney(fund.targetAmount, fund.currency)}
+          </AppText>
+        </View>
+        <ProgressBar
+          progress={progress}
+          tone={status === 'behind' ? 'attention' : 'normal'}
+          goldPortion={linkedValue > 0 && fund.targetAmount > 0 ? linkedValue / fund.targetAmount : 0}
+        />
+        <View style={styles.statusRow}>
+          <StatusChip label={chip.label} tone={chip.tone} />
+          <AppText variant="caption" color="textSecondary" style={styles.tabular}>
+            {`\u2066${Math.round(progress * 100)}%\u2069`}
+          </AppText>
+        </View>
+        {due && (
+          <AppText variant="secondary" color="textSecondary">
+            {sinking ? 'الاستحقاق القادم' : 'الموعد'}: {formatDateAr(due)} · {monthsLeftPhrase(monthsUntil(due, now))}
+          </AppText>
         )}
+      </Card>
 
-        {/* ── Linked holdings ── */}
-        {linkedHoldings.length > 0 && (
+      {/* ── Next step ── */}
+      {step.tone === 'attention' ? (
+        <InsightCard tone="attention" message={step.text} />
+      ) : (
+        <Card variant="subtle" style={styles.step}>
+          <MaterialIcons
+            name={step.tone === 'ok' ? 'check-circle-outline' : 'schedule'}
+            size={20}
+            color={step.tone === 'ok' ? colors.primary700 : colors.textSecondary}
+          />
+          <AppText variant="secondary" style={styles.flex}>
+            {step.text}
+          </AppText>
+        </Card>
+      )}
+
+      {/* ── Actions: one primary ── */}
+      <View style={styles.actions}>
+        {sinking ? (
           <>
-            <Text style={styles.sectionTitle}>الذهب المربوط</Text>
-            <Card style={styles.listCard}>
-              {linkedHoldings.map((h, i) => (
-                <View key={h.id} style={[styles.listRow, i < linkedHoldings.length - 1 && styles.rowBorder]}>
-                  <Text style={styles.factValue}>{formatCurrency(holdingValueEGP(state, h), 'EGP')}</Text>
-                  <Text style={styles.listTitle}>{h.name}</Text>
-                </View>
-              ))}
-            </Card>
+            <Button label="اتدفعت" block onPress={() => setSheet('pay')} />
+            <Button label="إضافة مبلغ" variant="secondary" block onPress={() => setSheet('allocate')} />
+            <Button label="سحب مبلغ" variant="tertiary" onPress={() => setSheet('withdraw')} />
+          </>
+        ) : (
+          <>
+            <Button label="إضافة مبلغ" block onPress={() => setSheet('allocate')} />
+            <Button label="سحب مبلغ" variant="secondary" block onPress={() => setSheet('withdraw')} />
           </>
         )}
+      </View>
 
-        {/* ── Movements ── */}
-        <Text style={styles.sectionTitle}>الحركات</Text>
-        <Card style={styles.listCard}>
-          {movements.length === 0 ? (
-            <Text style={[styles.muted, styles.empty]}>لا توجد حركات بعد</Text>
-          ) : (
-            movements.map((m, i) => (
-              <View key={m.id} style={[styles.listRow, i < movements.length - 1 && styles.rowBorder]}>
-                <Text
-                  style={[
-                    styles.factValue,
-                    { color: m.amount >= 0 ? FinanceColors.income : FinanceColors.expense },
-                  ]}>
-                  {m.amount >= 0 ? '+' : '−'}
-                  {formatCurrency(Math.abs(m.amount), fund.currency)}
-                </Text>
-                <View style={styles.movementText}>
-                  <Text style={styles.listTitle}>{formatDate(m.date)}</Text>
-                  {m.note ? <Text style={styles.muted}>{m.note}</Text> : null}
-                </View>
-              </View>
-            ))
+      {/* ── Facts ── */}
+      <ListGroup>
+        {facts.map((f) => (
+          <ListRow
+            key={f.label}
+            title={f.label}
+            trailing={
+              <AppText variant="bodyStrong" align="left" style={styles.tabular}>
+                {f.value}
+              </AppText>
+            }
+          />
+        ))}
+      </ListGroup>
+
+      {/* ── Linked gold ── */}
+      {(linkedHoldings.length > 0 || canLinkGold) && (
+        <View>
+          <SectionHeader
+            title="الذهب المربوط"
+            {...(canLinkGold ? { actionLabel: 'ربط ذهب', onAction: () => setSheet('edit') } : {})}
+          />
+          {linkedHoldings.length > 0 && (
+            <ListGroup>
+              {linkedHoldings.map((h) => (
+                <ListRow
+                  key={h.id}
+                  title={h.name}
+                  icon="diamond"
+                  iconTone="gold"
+                  trailing={
+                    <AppText variant="moneyRow" color="goldText" align="left" style={styles.tabular}>
+                      {formatMoney(holdingValueEGP(state, h), 'EGP')}
+                    </AppText>
+                  }
+                />
+              ))}
+            </ListGroup>
           )}
-        </Card>
-
-      {sheet === 'edit' && (
-        <FundSheet fund={fund} onClose={() => setSheet(null)} onDeleted={() => router.back()} />
+        </View>
       )}
+
+      {/* ── Movements (last) ── */}
+      <View>
+        <SectionHeader title="الحركات" />
+        {movements.length === 0 ? (
+          <AppText variant="secondary" color="textSecondary">
+            لسه مفيش حركات.
+          </AppText>
+        ) : (
+          <ListGroup>
+            {movements.map((m) => {
+              const kind = movementKind(m);
+              return (
+                <ListRow
+                  key={m.id}
+                  title={kind === 'allocation' ? 'إضافة' : kind === 'payment' ? 'اتدفعت' : 'سحب'}
+                  subtitle={[formatDateAr(m.date), kind === 'payment' ? null : m.note].filter(Boolean).join(' · ')}
+                  subtitleLines={1}
+                  icon={kind === 'allocation' ? 'south-west' : kind === 'payment' ? 'receipt-long' : 'north-east'}
+                  iconTone={kind === 'allocation' ? 'ok' : 'neutral'}
+                  trailing={
+                    <Money
+                      amount={m.amount}
+                      currency={fund.currency}
+                      showSign
+                      align="left"
+                      tone={kind === 'allocation' ? 'positive' : kind === 'payment' ? 'muted' : 'default'}
+                    />
+                  }
+                />
+              );
+            })}
+          </ListGroup>
+        )}
+      </View>
+
+      {sheet === 'edit' && <FundSheet fund={fund} onClose={() => setSheet(null)} onDeleted={() => router.back()} />}
       {(sheet === 'allocate' || sheet === 'withdraw') && (
         <MoveMoneySheet fund={fund} mode={sheet} onClose={() => setSheet(null)} />
       )}
@@ -168,123 +267,14 @@ export default function FundDetailScreen() {
 }
 
 const styles = StyleSheet.create({
-  content: {
-    padding: 16,
-  },
-  missing: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerAction: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: Colors.light.tint,
-  },
-  titleRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  badge: {
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  badgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  percent: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: Colors.light.tint,
-  },
-  amounts: {
-    marginTop: 8,
-    marginBottom: 6,
-    fontSize: 14,
-    color: Colors.light.text,
-    textAlign: 'right',
-  },
-  factRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 4,
-  },
-  factValue: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: Colors.light.text,
-  },
-  muted: {
-    fontSize: 13,
-    color: Colors.light.icon,
-    textAlign: 'right',
-  },
-  actions: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 16,
-  },
-  action: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: Colors.light.tint,
-  },
-  actionSecondary: {
-    backgroundColor: Colors.light.tint + '15',
-  },
-  payAction: {
-    flex: 0,
-    marginTop: 10,
-    backgroundColor: FinanceColors.income,
-  },
-  actionText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#fff',
-  },
-  actionTextSecondary: {
-    color: Colors.light.tint,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: Colors.light.text,
-    textAlign: 'right',
-    marginTop: 24,
-    marginBottom: 10,
-  },
-  listCard: {
-    padding: 0,
-    overflow: 'hidden',
-  },
-  listRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-  },
-  rowBorder: {
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: FinanceColors.progressTrack,
-  },
-  listTitle: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: Colors.light.text,
-    textAlign: 'right',
-  },
-  movementText: {
-    alignItems: 'flex-end',
-    gap: 2,
-  },
-  empty: {
-    textAlign: 'center',
-    paddingVertical: 24,
-  },
+  content: { padding: space.lg, gap: space.xl },
+  missing: { alignItems: 'center', justifyContent: 'center' },
+  hero: { gap: space.sm },
+  typeRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs },
+  amounts: { flexDirection: 'row-reverse', alignItems: 'baseline', flexWrap: 'wrap', gap: space.sm },
+  statusRow: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between' },
+  tabular: { fontVariant: ['tabular-nums'] },
+  step: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.md },
+  flex: { flex: 1 },
+  actions: { gap: space.sm, alignItems: 'center' },
 });

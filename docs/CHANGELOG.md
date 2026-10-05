@@ -6,6 +6,38 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 5
+
+Calm Wealth — phase 5: Funds, Fund detail, Recurring, Due.
+
+> JS-only (ships with `eas update` to 1.1.0 builds). No store, data, schema or native changes;
+> saved funds, fund movements and recurring rules keep exactly the same shape.
+
+**For users**
+- Funds tab: money to plan, then totals (reserved / needed this month / count), then funds by
+  type; a clear empty state with "أنشئ صندوق طوارئ".
+- Fund detail puts progress and the next step first (e.g. "محتاج X الشهر ده"), one main action
+  (إضافة مبلغ, or اتدفعت for recurring bills), the key numbers, linked gold, and the history last
+  — withdrawals are no longer red.
+- Fund, add/withdraw, pay, distribute and cover sheets use the big amount field and calmer copy
+  ("غطّي الفرق من الصناديق دي").
+- Recurring: the next 30 days as a list with totals per currency, rules grouped by income /
+  expenses / transfers with clear tags (تلقائي / بتأكيد / متوقف / انتهى). Turning a rule off no
+  longer opens it.
+- The recurring sheet asks the essentials first; end date and note are under "تفاصيل أكتر".
+- Due inbox: missed items marked "فات ميعاده" (amber, not red), "تم" and "تخطّي" on every row,
+  and "مفيش حاجة مستنياك." when it's empty.
+
+**Technical**
+- New pure helpers `components/funds/fundsUi.ts` and `components/recurring/recurringUi.ts`
+  (+5 tests; 160 total).
+- Rebuilt `app/(tabs)/goals.tsx`, `app/fund/[id].tsx`, `app/recurring.tsx`, `app/due.tsx`;
+  restyled FundSheet, MoveMoneySheet (adds an إضافة/سحب segment), PaySinkingSheet, AssignSheet,
+  CoverSheet, RuleSheet, ConfirmOccurrenceSheet with their logic sections unchanged.
+- Recurring rows keep the Switch outside the Pressable (web fired both).
+
+---
+
 ## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Fixes
 
 > JS-only. No schema, data-version or persisted-shape change.

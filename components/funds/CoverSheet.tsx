@@ -1,8 +1,13 @@
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { StyleSheet } from 'react-native';
 
+import { AppText } from '@/components/ui/AppText';
+import { Card } from '@/components/ui/Card';
 import { FormSheet } from '@/components/ui/FormSheet';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { ListGroup, ListRow } from '@/components/ui/ListRow';
+import { Money } from '@/components/ui/Money';
+import { colors, space } from '@/constants/theme';
 import {
   defaultCoverFundId,
   fundAllocated,
@@ -11,7 +16,6 @@ import {
   unassignedEGP,
 } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { formatCurrency } from '@/utils/formatters';
 import { runAction } from '@/utils/runAction';
 
 interface CoverSheetProps {
@@ -40,99 +44,54 @@ export function CoverSheet({ onClose }: CoverSheetProps) {
   };
 
   return (
-    <FormSheet visible title="غطّي المصروف" onCancel={onClose} onSave={handleSave}>
-      <View style={styles.summary}>
-        <Text style={styles.summaryLabel}>صرفت من فلوس مخصصة لصناديق</Text>
-        <Text style={styles.summaryAmount}>{formatCurrency(deficitEGP, 'EGP')}</Text>
-      </View>
+    <FormSheet visible title="غطّي الفرق" onCancel={onClose} onSave={handleSave}>
+      <Card style={styles.summary}>
+        <AppText variant="secondary" color="danger">
+          استخدمت جزء من فلوس الصناديق.
+        </AppText>
+        <Money amount={deficitEGP} currency="EGP" size="md" tone="danger" />
+      </Card>
 
-      <Text style={styles.hint}>اختار الصناديق اللي هتسحب منها:</Text>
-      {candidates.length === 0 && <Text style={styles.hint}>مفيش صناديق فيها فلوس نقدية</Text>}
-      {candidates.map((fund) => {
-        const isSelected = selected.includes(fund.id);
-        const take = withdrawalFor(fund.id);
-        return (
-          <TouchableOpacity
-            key={fund.id}
-            style={[styles.row, isSelected && styles.rowSelected]}
-            onPress={() => toggle(fund.id)}
-            activeOpacity={0.8}>
-            <Text style={styles.take}>{take ? `−${formatCurrency(take, fund.currency)}` : ''}</Text>
-            <View style={styles.rowText}>
-              <Text style={styles.name}>{fund.name}</Text>
-              <Text style={styles.hint}>
-                نقداً: {formatCurrency(fundAllocated(state, fund.id), fund.currency)}
-              </Text>
-            </View>
-          </TouchableOpacity>
-        );
-      })}
+      <AppText variant="secondary" color="textSecondary" style={styles.hint}>
+        غطّي الفرق من الصناديق دي:
+      </AppText>
+      {candidates.length === 0 ? (
+        <AppText variant="secondary" color="textSecondary">
+          مفيش صناديق فيها فلوس نقدية.
+        </AppText>
+      ) : (
+        <ListGroup>
+          {candidates.map((fund) => {
+            const isSelected = selected.includes(fund.id);
+            const take = withdrawalFor(fund.id);
+            return (
+              <ListRow
+                key={fund.id}
+                title={fund.name}
+                subtitle={`نقداً: ${formatMoney(fundAllocated(state, fund.id), fund.currency)}`}
+                subtitleLines={1}
+                icon={isSelected ? 'check-circle' : 'radio-button-unchecked'}
+                iconTone={isSelected ? 'ok' : 'neutral'}
+                trailing={take ? <Money amount={-take} currency={fund.currency} showSign align="left" /> : undefined}
+                onPress={() => toggle(fund.id)}
+                accessibilityLabel={`${fund.name}${isSelected ? '، مختار' : ''}`}
+              />
+            );
+          })}
+        </ListGroup>
+      )}
 
-      <Text style={[styles.result, plan.remainingEGP > 0.005 && { color: FinanceColors.expense }]}>
+      <AppText variant="secondary" color={plan.remainingEGP > 0.005 ? 'warning' : 'primary700'} style={styles.result}>
         {plan.remainingEGP > 0.005
-          ? `لسه فاضل ${formatCurrency(plan.remainingEGP, 'EGP')} — اختار صندوق تاني`
-          : 'هيتغطى المبلغ بالكامل'}
-      </Text>
+          ? `لسه فاضل ${formatMoney(plan.remainingEGP, 'EGP')}، اختار صندوق تاني.`
+          : 'هيتغطى المبلغ بالكامل.'}
+      </AppText>
     </FormSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  summary: {
-    padding: 14,
-    borderRadius: 10,
-    backgroundColor: FinanceColors.expense + '12',
-    alignItems: 'flex-end',
-    gap: 4,
-    marginBottom: 14,
-  },
-  summaryLabel: {
-    fontSize: 13,
-    color: FinanceColors.expense,
-  },
-  summaryAmount: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: FinanceColors.expense,
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 12,
-    marginTop: 8,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: FinanceColors.progressTrack,
-  },
-  rowSelected: {
-    borderColor: Colors.light.tint,
-    backgroundColor: Colors.light.tint + '10',
-  },
-  rowText: {
-    flex: 1,
-    alignItems: 'flex-end',
-    gap: 2,
-  },
-  name: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.light.text,
-  },
-  take: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: FinanceColors.expense,
-  },
-  hint: {
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'right',
-  },
-  result: {
-    marginTop: 16,
-    fontSize: 13,
-    fontWeight: '600',
-    color: FinanceColors.income,
-    textAlign: 'right',
-  },
+  summary: { gap: space.xs, backgroundColor: colors.dangerSurface, borderColor: colors.dangerSurface },
+  hint: { marginTop: space.lg, marginBottom: space.sm },
+  result: { marginTop: space.lg, fontWeight: '600' },
 });

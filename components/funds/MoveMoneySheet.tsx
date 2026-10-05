@@ -1,25 +1,32 @@
 import { useState } from 'react';
-import { StyleSheet, Text } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
-import { Colors } from '@/constants/theme';
+import { AmountInput } from '@/components/ui/AmountInput';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { Segment } from '@/components/ui/Segment';
+import { space } from '@/constants/theme';
 import { fundAllocated, unassignedEGP } from '@/store/selectors';
 import type { Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { fromEGP } from '@/utils/currency';
-import { formatCurrency } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
+type Mode = 'allocate' | 'withdraw';
+
 interface MoveMoneySheetProps {
   fund: Fund;
-  mode: 'allocate' | 'withdraw';
+  // The side the sheet opens on; the segment can switch it.
+  mode: Mode;
   onClose: () => void;
 }
 
 // Adds unassigned money to a fund ("إضافة") or returns fund cash to unassigned ("سحب").
-export function MoveMoneySheet({ fund, mode, onClose }: MoveMoneySheetProps) {
+export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySheetProps) {
   const state = useFinanceStore();
+  const [mode, setMode] = useState<Mode>(initialMode);
   const [amountText, setAmountText] = useState('');
   const [note, setNote] = useState('');
 
@@ -41,26 +48,34 @@ export function MoveMoneySheet({ fund, mode, onClose }: MoveMoneySheetProps) {
   };
 
   return (
-    <FormSheet
-      visible
-      title={mode === 'allocate' ? `إضافة إلى ${fund.name}` : `سحب من ${fund.name}`}
-      onCancel={onClose}
-      onSave={handleSave}>
-      <Text style={styles.available}>
-        {mode === 'allocate' ? 'متاح بدون وظيفة' : 'في الصندوق نقداً'}: {formatCurrency(available, fund.currency)}
-      </Text>
-      <FieldLabel>المبلغ ({fund.currency})</FieldLabel>
-      <FormInput value={amountText} onChangeText={setAmountText} placeholder="0" keyboardType="decimal-pad" />
-      <FieldLabel>ملاحظة (اختياري)</FieldLabel>
-      <FormInput value={note} onChangeText={setNote} />
+    <FormSheet visible title={fund.name} onCancel={onClose} onSave={handleSave}>
+      <Segment<Mode>
+        options={[
+          { label: 'إضافة', value: 'allocate' },
+          { label: 'سحب', value: 'withdraw' },
+        ]}
+        value={mode}
+        onChange={setMode}
+      />
+      <AmountInput
+        value={amountText}
+        onChangeText={setAmountText}
+        currency={fund.currency}
+        autoFocus
+        hint={{
+          tone: 'neutral',
+          text: `${mode === 'allocate' ? 'المتاح للتخطيط' : 'في الصندوق نقداً'}: ${formatMoney(available, fund.currency)}`,
+        }}
+      />
+      <View style={styles.note}>
+        <FormField label="ملاحظة (اختياري)">
+          <FormInput value={note} onChangeText={setNote} />
+        </FormField>
+      </View>
     </FormSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  available: {
-    fontSize: 13,
-    color: Colors.light.icon,
-    textAlign: 'right',
-  },
+  note: { marginTop: space.sm },
 });

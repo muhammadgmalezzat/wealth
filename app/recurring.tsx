@@ -1,28 +1,39 @@
 import { useState } from 'react';
-import { StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet, Switch, View } from 'react-native';
 
 import { KIND_SECTION_TITLES, MODE_LABELS, frequencyLabel } from '@/components/recurring/labels';
+import { ruleState } from '@/components/recurring/recurringUi';
 import { RuleSheet } from '@/components/recurring/RuleSheet';
-import { Card } from '@/components/ui/Card';
+import { AppText } from '@/components/ui/AppText';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { Fab, FAB_CLEARANCE } from '@/components/ui/Fab';
+import { formatDateAr } from '@/components/ui/formatDateAr';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { MetricGroup } from '@/components/ui/MetricGroup';
+import { Money } from '@/components/ui/Money';
 import { Screen } from '@/components/ui/Screen';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { SectionHeader } from '@/components/ui/SectionHeader';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { colors, opacity, space } from '@/constants/theme';
 import { upcoming, type CurrencyTotals } from '@/store/recurring';
 import type { CurrencyCode, RecurringRule } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toDateKey } from '@/utils/dates';
-import { formatCurrency, formatDate } from '@/utils/formatters';
+import { formatDayLabel } from '@/utils/formatters';
 import { runAction } from '@/utils/runAction';
 
 const KINDS: RecurringRule['kind'][] = ['income', 'expense', 'transfer'];
 
+// Per-currency totals as one line ("ر.س 9,000 + ج.م 1,200"), or "—".
 const totalsLine = (totals: CurrencyTotals) =>
   (Object.entries(totals) as [CurrencyCode, number][])
     .filter(([, v]) => v > 0)
-    .map(([currency, v]) => formatCurrency(v, currency))
-    .join(' + ');
+    .map(([currency, v]) => formatMoney(v, currency))
+    .join(' + ') || '—';
 
+// "What will happen again?": the next 30 days (with totals), then rules by kind.
 export default function RecurringScreen() {
   const state = useFinanceStore();
   const [sheet, setSheet] = useState<'add' | { id: string } | null>(null);
@@ -40,80 +51,127 @@ export default function RecurringScreen() {
       edges={['bottom']}
       contentStyle={styles.content}
       overlay={<Fab placement="stack" onPress={() => setSheet('add')} accessibilityLabel="معاملة متكررة جديدة" />}>
-        {/* ── Next 30 days ── */}
-        <Text style={styles.sectionTitle}>جاي خلال 30 يوم</Text>
-        <Card>
-          {next30.items.length === 0 ? (
-            <Text style={styles.muted}>مفيش حاجة جاية</Text>
-          ) : (
-            <>
-              {next30.items.slice(0, 12).map(({ rule, date }) => (
-                <View key={`${rule.id}-${date}`} style={styles.upcomingRow}>
-                  <Text style={[styles.amount, { color: amountColor(rule) }]}>{formatCurrency(rule.amount, rule.currency)}</Text>
-                  <Text style={styles.upcomingName}>
-                    {rule.name} · {formatDate(date)}
-                  </Text>
-                </View>
-              ))}
-              {totalsLine(next30.income) ? <Text style={styles.total}>دخل: {totalsLine(next30.income)}</Text> : null}
-              {totalsLine(next30.expense) ? <Text style={styles.total}>مصروفات: {totalsLine(next30.expense)}</Text> : null}
-            </>
-          )}
-        </Card>
-
-        {/* ── Rules by kind ── */}
-        {KINDS.map((kind) => {
-          const rules = state.recurringRules.filter((r) => r.kind === kind);
-          if (rules.length === 0) return null;
-          return (
-            <View key={kind}>
-              <Text style={styles.sectionTitle}>{KIND_SECTION_TITLES[kind]}</Text>
-              <Card style={styles.listCard}>
-                {rules.map((rule, i) => (
-                  <TouchableOpacity
-                    key={rule.id}
-                    style={[styles.ruleRow, i < rules.length - 1 && styles.rowBorder, !rule.active && styles.paused]}
-                    onPress={() => setSheet({ id: rule.id })}
-                    activeOpacity={0.8}>
-                    <Switch
-                      value={rule.active}
-                      onValueChange={(active) => {
-                        runAction('تعذّر التعديل', () => state.setRecurringActive(rule.id, active));
-                      }}
+      {state.recurringRules.length === 0 ? (
+        <EmptyState
+          icon="repeat"
+          title="مفيش معاملات متكررة."
+          body="سجّل الإيجار أو المرتب مرة واحدة، والتطبيق يفكرك بيهم."
+          actionLabel="أضف معاملة متكررة"
+          onAction={() => setSheet('add')}
+        />
+      ) : (
+        <>
+          {/* ── Next 30 days ── */}
+          <View style={styles.block}>
+            <SectionHeader title="جاي خلال 30 يوم" />
+            {next30.items.length === 0 ? (
+              <AppText variant="secondary" color="textSecondary">
+                مفيش حاجة جاية.
+              </AppText>
+            ) : (
+              <>
+                <ListGroup>
+                  {next30.items.slice(0, 12).map(({ rule, date }) => (
+                    <ListRow
+                      key={`${rule.id}-${date}`}
+                      title={rule.name}
+                      subtitle={formatDayLabel(date)}
+                      subtitleLines={1}
+                      trailing={<RuleAmount rule={rule} />}
+                      onPress={() => setSheet({ id: rule.id })}
                     />
-                    <View style={styles.ruleText}>
-                      <View style={styles.ruleTitle}>
-                        <View style={[styles.badge, rule.mode === 'auto' && styles.badgeAuto]}>
-                          <Text style={styles.badgeText}>{MODE_LABELS[rule.mode]}</Text>
-                        </View>
-                        <Text style={styles.ruleName}>{rule.name}</Text>
-                      </View>
-                      <Text style={[styles.amount, { color: amountColor(rule) }]}>
-                        {formatCurrency(rule.amount, rule.currency)}
-                        {rule.variableAmount ? ' (تقريباً)' : ''}
-                      </Text>
-                      <Text style={styles.muted}>
-                        {frequencyLabel(rule)} ·{' '}
-                        {kind === 'transfer'
-                          ? `من ${accountName(rule.accountId)} إلى ${accountName(rule.toAccountId)}`
-                          : accountName(rule.accountId)}
-                      </Text>
-                      <Text style={styles.muted}>
-                        {!rule.active ? 'متوقف' : rule.nextDate ? `الجاي: ${formatDate(rule.nextDate)}` : 'انتهى'}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                ))}
-              </Card>
-            </View>
-          );
-        })}
+                  ))}
+                </ListGroup>
+                <MetricGroup
+                  metrics={[
+                    {
+                      label: 'دخل',
+                      value: (
+                        <AppText variant="moneyRow" align="center">
+                          {totalsLine(next30.income)}
+                        </AppText>
+                      ),
+                    },
+                    {
+                      label: 'مصروف',
+                      value: (
+                        <AppText variant="moneyRow" align="center">
+                          {totalsLine(next30.expense)}
+                        </AppText>
+                      ),
+                    },
+                  ]}
+                />
+              </>
+            )}
+          </View>
 
-        {state.recurringRules.length === 0 && (
-          <Text style={[styles.muted, styles.empty]}>
-            ضيف الإيجار والمرتب والفواتير اللي بتتكرر، والتطبيق يفكرك بيها أو يسجلها لوحده.
-          </Text>
-        )}
+          {/* ── Rules by kind ── */}
+          {KINDS.map((kind) => {
+            const rules = state.recurringRules.filter((r) => r.kind === kind);
+            if (rules.length === 0) return null;
+            return (
+              <View key={kind}>
+                <SectionHeader title={KIND_SECTION_TITLES[kind]} />
+                <ListGroup>
+                  {rules.map((rule) => {
+                    const st = ruleState(rule);
+                    const accounts =
+                      kind === 'transfer'
+                        ? `من ${accountName(rule.accountId)} إلى ${accountName(rule.toAccountId)}`
+                        : accountName(rule.accountId);
+                    const next = st === 'active' ? `الجاية: ${formatDateAr(rule.nextDate, { year: false })}` : null;
+                    return (
+                      // The switch is a sibling of the tappable area, so toggling it never opens the sheet.
+                      <View key={rule.id} style={styles.ruleRow}>
+                        <Pressable
+                          onPress={() => setSheet({ id: rule.id })}
+                          accessibilityRole="button"
+                          accessibilityLabel={`${rule.name}، ${formatMoney(rule.amount, rule.currency)}`}
+                          style={({ pressed }) => [styles.ruleTap, pressed && styles.pressed]}>
+                          <View style={styles.flex}>
+                            <View style={styles.line}>
+                              <AppText
+                                variant="bodyStrong"
+                                color={st === 'active' ? 'text' : 'textMuted'}
+                                numberOfLines={1}
+                                style={styles.flex}>
+                                {rule.name}
+                              </AppText>
+                              <RuleAmount rule={rule} />
+                            </View>
+                            <AppText variant="secondary" color="textSecondary" numberOfLines={2}>
+                              {[frequencyLabel(rule), accounts, next].filter(Boolean).join(' · ')}
+                            </AppText>
+                            <View style={styles.chips}>
+                              <StatusChip label={MODE_LABELS[rule.mode]} tone="neutral" />
+                              {st === 'paused' && <StatusChip label="متوقف" tone="neutral" />}
+                              {st === 'ended' && <StatusChip label="انتهى" tone="neutral" />}
+                            </View>
+                          </View>
+                        </Pressable>
+                        <Switch
+                          value={rule.active}
+                          onValueChange={(active) => {
+                            runAction('تعذّر التعديل', () => state.setRecurringActive(rule.id, active));
+                          }}
+                          trackColor={{
+                            true: colors.primary600,
+                            false: colors.borderStrong,
+                          }}
+                          thumbColor={colors.surface}
+                          accessibilityLabel={rule.active ? `إيقاف ${rule.name}` : `تشغيل ${rule.name}`}
+                          style={styles.switch}
+                        />
+                      </View>
+                    );
+                  })}
+                </ListGroup>
+              </View>
+            );
+          })}
+        </>
+      )}
 
       {sheet === 'add' && <RuleSheet onClose={() => setSheet(null)} />}
       {editing && <RuleSheet key={editing.id} rule={editing} onClose={() => setSheet(null)} />}
@@ -121,27 +179,55 @@ export default function RecurringScreen() {
   );
 }
 
-function amountColor(rule: RecurringRule) {
-  return rule.kind === 'income' ? FinanceColors.income : rule.kind === 'expense' ? FinanceColors.expense : Colors.light.text;
+// Expenses and transfers in the text color, income green with "+"; "تقريباً" for variable amounts.
+function RuleAmount({ rule }: { rule: RecurringRule }) {
+  const income = rule.kind === 'income';
+  return (
+    <View style={styles.amount}>
+      {rule.variableAmount && (
+        <AppText variant="caption" color="textSecondary">
+          تقريباً
+        </AppText>
+      )}
+      <Money
+        amount={rule.amount}
+        currency={rule.currency}
+        tone={income ? 'positive' : 'default'}
+        showSign={income}
+        align="left"
+      />
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
-  content: { padding: 16, paddingBottom: FAB_CLEARANCE },
-  sectionTitle: { fontSize: 17, fontWeight: '700', color: Colors.light.text, textAlign: 'right', marginTop: 16, marginBottom: 10 },
-  listCard: { padding: 0, overflow: 'hidden' },
-  upcomingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 6 },
-  upcomingName: { fontSize: 14, color: Colors.light.text, textAlign: 'right', flex: 1, marginLeft: 8 },
-  total: { marginTop: 8, fontSize: 13, fontWeight: '600', color: Colors.light.text, textAlign: 'right' },
-  ruleRow: { flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 },
-  rowBorder: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: FinanceColors.progressTrack },
-  paused: { opacity: 0.55 },
-  ruleText: { flex: 1, alignItems: 'flex-end', gap: 2 },
-  ruleTitle: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  ruleName: { fontSize: 15, fontWeight: '600', color: Colors.light.text },
-  badge: { borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1, backgroundColor: Colors.light.icon + '22' },
-  badgeAuto: { backgroundColor: Colors.light.tint + '22' },
-  badgeText: { fontSize: 10, fontWeight: '700', color: Colors.light.icon },
-  amount: { fontSize: 14, fontWeight: '600' },
-  muted: { fontSize: 12, color: Colors.light.icon, textAlign: 'right' },
-  empty: { marginTop: 32, textAlign: 'center', lineHeight: 20 },
+  content: { padding: space.lg, paddingBottom: FAB_CLEARANCE, gap: space.md },
+  block: { gap: space.md },
+  flex: { flex: 1 },
+  // RTL: details on the right, switch on the left.
+  ruleRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    minHeight: 64,
+  },
+  ruleTap: {
+    flex: 1,
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    padding: space.lg,
+  },
+  switch: { marginLeft: space.lg },
+  pressed: { backgroundColor: colors.surfaceSubtle, opacity: opacity.pressed },
+  line: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm },
+  chips: {
+    flexDirection: 'row-reverse',
+    flexWrap: 'wrap',
+    gap: space.xs,
+    marginTop: space.xs,
+  },
+  amount: {
+    flexDirection: 'row-reverse',
+    alignItems: 'baseline',
+    gap: space.xs,
+  },
 });

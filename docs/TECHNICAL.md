@@ -106,7 +106,7 @@ components/
   categories/CategorySheet  Add / edit / archive / restore / delete a category
   dashboard/                SafeToSpendCard, MonthlySnapshot, RecurringCard (جاي قريب),
                             NetWorthCard, BackupReminder, homeInsights.ts (pure Home logic)
-  funds/                    FundCard, FundSheet (create/edit), AssignSheet (وزّعها),
+  funds/                    fundsUi.ts (pure: fundsSummary, fundNextStep, movementKind), FundCard, FundSheet (create/edit), AssignSheet (وزّعها),
                             CoverSheet (غطّيها), MoveMoneySheet (إضافة/سحب),
                             PaySinkingSheet (اتدفعت), UnassignedPanel, labels.ts
   plan/PlanEditorSheet      Edit a month's plan (live summary, lines by bucket with kind/limit/remove)
@@ -116,7 +116,7 @@ components/
   plan/AddLineSheet         "أضف بند": من الموجود (search, by bucket) / بند جديد
   plan/LineSheet            One line: limit, ثابت/مرن, "نقل لـ" bucket, شيل من الخطة
   plan/labels.ts            BUCKET_TITLES, KIND_OPTIONS
-  recurring/                RuleSheet (add/edit/delete rule), ConfirmOccurrenceSheet (تم),
+  recurring/                recurringUi.ts (pure: ruleState, ruleDetailsOpen), RuleSheet (add/edit/delete rule), ConfirmOccurrenceSheet (تم),
                             labels.ts (Arabic frequency / mode / section labels)
   settings/                 ExportSheet, RestoreSheet
   transactions/             TransactionRow (shared row), TransactionSheet (add/edit) and its
@@ -216,11 +216,11 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 | `/transactions` | المعاملات | MonthSwitcher; MonthlySnapshot for the selected month (no link); filter chips الكل/مصروف/دخل/تحويل/ذهب (UI-only, by type); days (FlatList), each a header row (day label · day net in textSecondary, never red) and one ListGroup of TransactionRows (tap → edit); EmptyState for an empty month, a one-line message for a filter with no match; "+" FAB → TransactionSheet. |
 | `/plan` | الخطة | Calm Wealth plan (see "Plan" below): MonthSwitcher; "خطة الشهر" + تعديل; MetricGroup الدخل المتوقع / المخطط / المتبقي للتخطيط + status line; safe-to-spend info row (ثابت/مرن explained); PlanLineRows by bucket (tap → LineSheet, saved via savePlan); "+ أضف بند" (AddLineSheet); fund contributions (tap → fund); spending outside the plan → /transactions; المعاملات المتكررة row. No plan: EmptyState + اقترح من مصروفي / انسخ خطة … / ابدأ من الصفر. |
 | `/assets` | الأصول | Summary (إجمالي الأصول / السيولة / الاستثمارات); accounts (tap → EditAccountSheet, delete); holdings with P&L (delete); "+" → add account (cash/bank/wallet) or gold (opening asset). |
-| `/goals` | الصناديق | UnassignedPanel; sections الطوارئ / الأهداف / مصاريف دورية (by priority); emergency empty hint; "+" → FundSheet. |
-| `/fund/[id]` | (stack) | Fund summary (progress, status, due date, months left, required monthly, cash), إضافة / سحب, اتدفعت (sinking), linked gold, movement history; header "تعديل" → FundSheet (edit/delete). |
+| `/goals` | الصناديق | Calm Wealth funds (see "Funds, Recurring, Due" below): title; UnassignedPanel; MetricGroup إجمالي المحجوز / مطلوب الشهر ده / صناديق; sections الطوارئ · الأهداف · مصاريف دورية (empty ones skipped) of FundCards; EmptyState "لسه معندكش صناديق." + أنشئ صندوق طوارئ (FundSheet with emergency preselected); "+" FAB → FundSheet (goal). |
+| `/fund/[id]` | (stack) | Hero (type + icon, current من target, bar with gold part, % + status chip, due + months left) · next step · actions (one primary: إضافة مبلغ, or اتدفعت for sinking) · facts ListGroup · linked gold (+ "ربط ذهب" → FundSheet when gold is linkable) · movements (newest first, last); header "تعديل" → FundSheet (edit / delete). |
 | `/settings` | (stack) | Exchange rates, gold prices (24k/21k, 18k derived), tracking start, save; backups (export/restore, last backup); البنود ("إدارة البنود" → `/categories`); المعاملات المتكررة (link to `/recurring`, "تنبيهات المستحقات" switch, off by default, disabled on web); app lock toggle; "استيراد البيانات الافتتاحية"; version/runtime/update line. `?export=1` opens the export sheet. |
-| `/recurring` | (stack) | "جاي خلال 30 يوم" (up to 12 items + income/expense totals per currency); sections دخل / مصروفات / تحويلات; each rule shows mode badge (تلقائي / بتأكيد), amount ("تقريباً" if variable), Arabic frequency, account(s), next date / متوقف / انتهى, and a pause/resume switch; tap → RuleSheet (edit/delete); "+" FAB → RuleSheet (new). |
-| `/due` | (stack) | Due inbox for `confirm` rules: "فات ومتسجلش" (missed, earlier months) listed first, then "المستحق الشهر ده", each oldest first with a count; each item has **تم** (ConfirmOccurrenceSheet: amount, received amount for cross-currency transfers, account, date, note) and **تخطّي**. |
+| `/recurring` | (stack) | "جاي خلال 30 يوم": ListGroup of up to 12 items + MetricGroup دخل / مصروف (per-currency totals from `upcoming`); groups دخل · مصروفات · تحويلات; rows: name + amount, frequency · account(s) · الجاية, chips تلقائي/بتأكيد · متوقف · انتهى (muted title when not active), pause/resume Switch beside (not inside) the tappable area; tap → RuleSheet; EmptyState; "+" FAB (stack). |
+| `/due` | (stack) | Due inbox for `confirm` rules (oldest first): "فات ومتسجلش" (earlier months, amber "فات ميعاده" chip) and "المستحق الشهر ده"; rows in a ListGroup: name, amount (تقريباً), date · account, primary "تم" (ConfirmOccurrenceSheet) + tertiary "تخطّي"; EmptyState "مفيش حاجة مستنياك." + link to /recurring. |
 | `/categories` | (stack) | Sections مصروفات (by bucket: أساسيات / رفاهيات / عطاء) and دخل with active categories ("أساسي" badge on defaults), then مؤرشفة; tap → CategorySheet (rename; bucket for expenses; أرشفة / استرجاع / حذف); "+" FAB → CategorySheet (name, مصروف/دخل, bucket required for expenses). |
 
 ### Design system (Calm Wealth)
@@ -360,6 +360,49 @@ percent · "الموعد: …". Status mapping (`components/funds/labels.ts` →
 | pending | neutral "الشهر ده" | محتاج {fundRequiredMonthly} الشهر ده (hidden if ≤ 0) |
 | behind | attention "محتاج انتباه" (never red) | محتاج {fundRequiredMonthly} هذا الشهر للحاق بالخطة (hidden if ≤ 0) |
 | no_deadline | neutral "بدون موعد" | لسه محتاج {target − current} للوصول للهدف / وصلت للهدف |
+
+### Funds, Recurring, Due (Calm Wealth phase 5)
+
+**Funds tab** — "what am I preparing for?". `fundsSummary` (pure): إجمالي المحجوز = Σ `fundCurrent`
+in EGP, مطلوب الشهر ده = Σ `fundRequiredMonthly` (funds with a due date) in EGP, both converted at
+current rates with `toEGP`; صناديق = count of active funds. Archived funds aren't shown (as before;
+there is no archive action in FundSheet).
+
+**Fund detail** order — hero → next step → actions → facts → linked gold → history:
+- Next step (`fundNextStep`): behind → attention InsightCard "خصص {required} هذا الشهر للبقاء على
+  المسار."; pending → neutral "محتاج {required} الشهر ده."; on track / ahead → ok "ماشي على
+  الخطة."; no deadline → "لسه محتاج {remaining} للوصول للهدف."; reached → ok "وصلت للهدف.".
+- Actions: إضافة مبلغ (primary) + سحب مبلغ (secondary); sinking: اتدفعت (primary) + إضافة
+  (secondary) + سحب (tertiary). Both money buttons open MoveMoneySheet on that side.
+- Facts: مطلوب شهرياً, نقداً في الصندوق, قيمة الذهب المربوط, الموعد / الاستحقاق القادم, التكرار —
+  only those that apply.
+- History (`movementKind`): allocation "+X" green; withdrawal "−X" text color (not red); sinking
+  payment (note "اتدفعت: …") labelled اتدفعت, muted.
+
+**Fund sheets** (logic unchanged — the logic sections diff empty):
+FundSheet — type Segment (الطوارئ / هدف / مصاريف دورية), name, target as AmountInput (the fund
+keeps its currency; there is no currency choice today), emergency suggestions as tertiary
+"استخدم المقترح (٣ / ٦ شهور): X", deadline (FutureDateField, "بدون موعد"), sinking frequency +
+next due date (+ suggested monthly), priority, linked gold chips, edit: cash allocation + "فلوس
+متاحة للتخطيط بعد الحفظ" preview, احذف الصندوق. MoveMoneySheet — إضافة / سحب Segment (starts on
+the side that opened it), AmountInput with "المتاح للتخطيط" / "في الصندوق نقداً" hint, note (there
+is no date field). PaySinkingSheet — AmountInput, AccountPicker, CategoryPicker, date, note, one
+line about the withdrawal and the next due date. AssignSheet — live "هتوزّع X من Y" + what stays
+available, "وزّع المقترح" (fills `suggestAllocation`, as before), fund ListRows with an amount input
+on the end side. CoverSheet — deficit card, "غطّي الفرق من الصناديق دي:", selectable fund rows with
+the `planCover` withdrawal, result line (amber when something is still uncovered).
+
+**Recurring** — see the route table. `ruleState`: paused (inactive) · ended (no `nextDate`) · active.
+
+**RuleSheet** disclosure order: kind (دخل · مصروف · تحويل) · AmountInput + "المبلغ بيتغير"
+switch · name · CategoryPicker + AccountPicker (or من / إلى, plus "المبلغ المستلم" when the
+currencies differ — required, so it stays in the main flow) · frequency Segment (أسبوعي · شهري ·
+سنوي) + interval / day of month side by side · start date · mode Segment (تلقائي "بيتسجل لوحده في
+ميعاده." / بتأكيد "بيستناك تأكده من المستحقات.") · "تفاصيل أكتر" (end date, note; open when editing
+a rule that has one — `ruleDetailsOpen`) · احذف المتكرر. Logic unchanged.
+
+**Due** — see the route table. ConfirmOccurrenceSheet: AmountInput (hint for variable amounts),
+received amount for cross-currency transfers, AccountPicker, date, note; save label "سجّل".
 
 ### Plan (Calm Wealth phase 4)
 
@@ -830,6 +873,8 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
   editor discards unsaved plan edits (after a confirm) because a route can't open above the modal.
 - Numbers are formatted with Western digits (`en-US`) inside an Arabic UI.
 - `AGENTS.md` points to the SDK 54 docs although the project is on SDK 57.
+- On web, a Switch nested inside a Pressable also fires the row's press; keep switches as siblings
+  of the tappable area (Recurring rows do).
 - Metro's file watcher doesn't always pick up edits on this drive during web QA; restart
   `expo start` after changes before trusting what the browser shows.
 - No E2E/UI tests; screens were checked manually in the web build (where all safe-area insets

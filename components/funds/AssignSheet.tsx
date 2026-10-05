@@ -1,8 +1,13 @@
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
+import { Card } from '@/components/ui/Card';
 import { FormInput, FormSheet } from '@/components/ui/FormSheet';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { ListGroup, ListRow } from '@/components/ui/ListRow';
+import { space } from '@/constants/theme';
 import {
   fundAmountsEGP,
   fundsByPriority,
@@ -12,7 +17,6 @@ import {
   type FundAmount,
 } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { formatCurrency } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
@@ -45,93 +49,60 @@ export function AssignSheet({ onClose }: AssignSheetProps) {
     if (runAction('تعذّر التوزيع', () => state.allocateMany(entries, 'توزيع'))) onClose();
   };
 
+  const available = unassignedEGP(state);
+  const assigning = available - remainingEGP;
+
   return (
     <FormSheet visible title="وزّع الفلوس" onCancel={onClose} onSave={handleSave}>
-      <View style={styles.summary}>
-        <Text style={styles.summaryLabel}>فلوس بدون وظيفة</Text>
-        <Text style={[styles.summaryAmount, remainingEGP < -0.005 && { color: FinanceColors.expense }]}>
-          {formatCurrency(remainingEGP, 'EGP')}
-        </Text>
-      </View>
+      <Card variant="subtle" style={styles.summary}>
+        <AppText variant="secondary" color="textSecondary">
+          هتوزّع {formatMoney(assigning, 'EGP')} من {formatMoney(available, 'EGP')}
+        </AppText>
+        <AppText variant="caption" color={remainingEGP < -0.005 ? 'danger' : 'textSecondary'}>
+          {remainingEGP < -0.005
+            ? `أكتر من المتاح بـ ${formatMoney(-remainingEGP, 'EGP')}`
+            : `هيفضل متاح للتخطيط: ${formatMoney(remainingEGP, 'EGP')}`}
+        </AppText>
+      </Card>
 
-      <TouchableOpacity style={styles.suggestBtn} onPress={fillSuggested} activeOpacity={0.8}>
-        <Text style={styles.suggestText}>وزّع المقترح</Text>
-      </TouchableOpacity>
-
-      {funds.length === 0 && <Text style={styles.hint}>أنشئ صندوقاً أولاً</Text>}
-      {funds.map((fund) => (
-        <View key={fund.id} style={styles.row}>
-          <View style={styles.rowText}>
-            <Text style={styles.name}>{fund.name}</Text>
-            <Text style={styles.hint}>
-              المقترح: {formatCurrency(fundSuggestedMonthly(state, fund.id), fund.currency)}
-            </Text>
+      {funds.length === 0 ? (
+        <AppText variant="secondary" color="textSecondary" style={styles.hint}>
+          أنشئ صندوق الأول.
+        </AppText>
+      ) : (
+        <>
+          <View style={styles.suggest}>
+            <Button label="وزّع المقترح" variant="secondary" icon="auto-awesome" block onPress={fillSuggested} />
           </View>
-          <FormInput
-            value={amounts[fund.id] ?? ''}
-            onChangeText={(text) => setAmounts((prev) => ({ ...prev, [fund.id]: text }))}
-            placeholder="0"
-            keyboardType="decimal-pad"
-            style={styles.input}
-          />
-        </View>
-      ))}
+          <ListGroup>
+            {funds.map((fund) => (
+              <ListRow
+                key={fund.id}
+                title={fund.name}
+                subtitle={`المقترح: ${formatMoney(fundSuggestedMonthly(state, fund.id), fund.currency)}`}
+                subtitleLines={1}
+                trailing={
+                  <FormInput
+                    value={amounts[fund.id] ?? ''}
+                    onChangeText={(text) => setAmounts((prev) => ({ ...prev, [fund.id]: text }))}
+                    placeholder="0"
+                    keyboardType="decimal-pad"
+                    accessibilityLabel={`مبلغ ${fund.name}`}
+                    style={styles.input}
+                  />
+                }
+              />
+            ))}
+          </ListGroup>
+        </>
+      )}
     </FormSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  summary: {
-    padding: 14,
-    borderRadius: 10,
-    backgroundColor: FinanceColors.cardBackground,
-    alignItems: 'flex-end',
-    gap: 4,
-  },
-  summaryLabel: {
-    fontSize: 13,
-    color: Colors.light.icon,
-  },
-  summaryAmount: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: Colors.light.text,
-  },
-  suggestBtn: {
-    marginVertical: 14,
-    paddingVertical: 10,
-    borderRadius: 10,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: Colors.light.tint,
-  },
-  suggestText: {
-    color: Colors.light.tint,
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 8,
-  },
-  rowText: {
-    flex: 1,
-    alignItems: 'flex-end',
-    gap: 2,
-  },
-  name: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.light.text,
-  },
-  hint: {
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'right',
-  },
-  input: {
-    width: 120,
-  },
+  summary: { gap: space.xs },
+  hint: { marginTop: space.md },
+  suggest: { marginVertical: space.md },
+  input: { width: 110 },
 });

@@ -1,16 +1,21 @@
 import { useState } from 'react';
-import { StyleSheet, Text } from 'react-native';
+import { StyleSheet } from 'react-native';
 
-import { Chip, ChipRow } from '@/components/ui/Chip';
+import { AccountPicker } from '@/components/transactions/AccountPicker';
+import { CategoryPicker } from '@/components/transactions/CategoryPicker';
+import { AmountInput } from '@/components/ui/AmountInput';
+import { AppText } from '@/components/ui/AppText';
 import { PastDateField } from '@/components/ui/DateFields';
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
-import { Colors } from '@/constants/theme';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { formatDateAr } from '@/components/ui/formatDateAr';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { space } from '@/constants/theme';
 import { fundAllocated, pickerCategories, SINKING_CYCLE_MONTHS } from '@/store/selectors';
 import type { Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { fromEGP, toEGP } from '@/utils/currency';
 import { addMonthsToDate, toDateKey } from '@/utils/dates';
-import { currencySymbol, formatCurrency, formatDate } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
@@ -67,48 +72,38 @@ export function PaySinkingSheet({ fund, onClose }: PaySinkingSheetProps) {
 
   return (
     <FormSheet visible title={`دفع ${fund.name}`} onCancel={onClose} onSave={handleSave}>
-      <FieldLabel>المبلغ{account ? ` (${currencySymbol(account.currency)})` : ''}</FieldLabel>
-      <FormInput value={amountValue} onChangeText={setAmountText} keyboardType="decimal-pad" />
+      <AmountInput
+        value={amountValue}
+        onChangeText={setAmountText}
+        currency={account?.currency ?? fund.currency}
+        accessibilityLabel="المبلغ"
+      />
 
-      <FieldLabel>من حساب</FieldLabel>
-      <ChipRow>
-        {accounts.map((a) => (
-          <Chip
-            key={a.id}
-            label={`${a.name} · ${currencySymbol(a.currency)}`}
-            selected={a.id === accountId}
-            onPress={() => setAccountId(a.id)}
-          />
-        ))}
-      </ChipRow>
+      <AccountPicker label="من" accounts={accounts} selectedId={accountId} onSelect={setAccountId} />
 
-      <FieldLabel>التصنيف</FieldLabel>
-      <ChipRow>
-        {expenseCategories.map((c) => (
-          <Chip key={c.id} label={c.name} selected={c.id === categoryId} onPress={() => setCategoryId(c.id)} />
-        ))}
-      </ChipRow>
+      <CategoryPicker
+        categories={expenseCategories}
+        selectedId={categoryId}
+        lastUsedId={lastUsed?.categoryId}
+        onSelect={setCategoryId}
+      />
 
-      <FieldLabel>التاريخ</FieldLabel>
-      <PastDateField value={date} onChange={setDate} />
+      <FormField label="التاريخ">
+        <PastDateField value={date} onChange={setDate} />
+      </FormField>
 
-      <FieldLabel>ملاحظة (اختياري)</FieldLabel>
-      <FormInput value={note} onChangeText={setNote} placeholder={fund.name} />
+      <FormField label="ملاحظة (اختياري)">
+        <FormInput value={note} onChangeText={setNote} placeholder={fund.name} />
+      </FormField>
 
-      <Text style={styles.info}>
-        هيتسحب من الصندوق لحد {formatCurrency(fundAllocated(state, fund.id), fund.currency)} نقداً
-        {nextDue ? `، والموعد الجاي هيبقى ${formatDate(nextDue)}` : ''}
-      </Text>
+      <AppText variant="secondary" color="textSecondary" style={styles.info}>
+        هيتسحب من الصندوق لحد {formatMoney(fundAllocated(state, fund.id), fund.currency)} نقداً
+        {nextDue ? `، والموعد الجاي هيبقى ${formatDateAr(nextDue)}` : ''}.
+      </AppText>
     </FormSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  info: {
-    marginTop: 20,
-    fontSize: 13,
-    color: Colors.light.icon,
-    textAlign: 'right',
-    lineHeight: 20,
-  },
+  info: { marginTop: space.xl },
 });

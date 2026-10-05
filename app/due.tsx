@@ -1,109 +1,97 @@
-import { useState } from "react";
-import {
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from "react-native";
+import { router } from 'expo-router';
+import { useState } from 'react';
+import { StyleSheet, View } from 'react-native';
 
-import { ConfirmOccurrenceSheet } from "@/components/recurring/ConfirmOccurrenceSheet";
-import { Card } from "@/components/ui/Card";
-import { LoadingView } from "@/components/ui/LoadingView";
-import { Screen } from "@/components/ui/Screen";
-import { Colors, FinanceColors } from "@/constants/theme";
-import { dueOccurrences } from "@/store/recurring";
-import { useFinanceStore } from "@/store/useFinanceStore";
-import { toDateKey } from "@/utils/dates";
-import { formatCurrency, formatDayLabel } from "@/utils/formatters";
-import { runAction } from "@/utils/runAction";
+import { ConfirmOccurrenceSheet } from '@/components/recurring/ConfirmOccurrenceSheet';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { ListGroup } from '@/components/ui/ListRow';
+import { LoadingView } from '@/components/ui/LoadingView';
+import { Money } from '@/components/ui/Money';
+import { Screen } from '@/components/ui/Screen';
+import { SectionHeader } from '@/components/ui/SectionHeader';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { space } from '@/constants/theme';
+import { dueOccurrences, type Occurrence } from '@/store/recurring';
+import { useFinanceStore } from '@/store/useFinanceStore';
+import { toDateKey } from '@/utils/dates';
+import { formatDayLabel } from '@/utils/formatters';
+import { runAction } from '@/utils/runAction';
 
-// "المستحقات": due occurrences of 'confirm' rules, oldest first (missed months listed
-// separately). "تم" records it; "تخطّي" skips it.
+// "What needs confirmation?": due occurrences of 'confirm' rules, oldest first — earlier months
+// ("فات ومتسجلش", calm attention) apart from this month's. "تم" opens the confirm sheet; "تخطّي"
+// skips the occurrence.
 export default function DueScreen() {
   const state = useFinanceStore();
-  const [confirming, setConfirming] = useState<{
-    ruleId: string;
-    date: string;
-  } | null>(null);
+  const [confirming, setConfirming] = useState<{ ruleId: string; date: string } | null>(null);
 
   if (!state.hasHydrated) return <LoadingView />;
 
   const today = toDateKey(new Date());
-  const items = dueOccurrences(state, today, "confirm");
-  // Earlier months' items (missed) are listed apart from this month's; both oldest first.
+  const items = dueOccurrences(state, today, 'confirm');
   const thisMonth = today.slice(0, 7);
   const missed = items.filter((o) => o.date.slice(0, 7) < thisMonth);
   const current = items.filter((o) => o.date.slice(0, 7) >= thisMonth);
-  const sections = [
-    { title: "فات ومتسجلش", items: missed },
-    { title: "المستحق الشهر ده", items: current },
-  ].filter((section) => section.items.length > 0);
-  const accountName = (id?: string) =>
-    state.accounts.find((a) => a.id === id)?.name ?? "—";
-  const confirmRule =
-    confirming && state.recurringRules.find((r) => r.id === confirming.ruleId);
+  const accountName = (id?: string) => state.accounts.find((a) => a.id === id)?.name ?? '—';
+  const confirmRule = confirming && state.recurringRules.find((r) => r.id === confirming.ruleId);
+
+  const row = ({ rule, date }: Occurrence) => (
+    <View key={`${rule.id}-${date}`} style={styles.item}>
+      <View style={styles.line}>
+        <AppText variant="bodyStrong" numberOfLines={1} style={styles.flex}>
+          {rule.name}
+        </AppText>
+        {rule.variableAmount && (
+          <AppText variant="caption" color="textSecondary">
+            تقريباً
+          </AppText>
+        )}
+        <Money amount={rule.amount} currency={rule.currency} align="left" tone={rule.kind === 'income' ? 'positive' : 'default'} />
+      </View>
+      <AppText variant="secondary" color="textSecondary">
+        {formatDayLabel(date)} · {accountName(rule.accountId)}
+      </AppText>
+      <View style={styles.actions}>
+        <Button label="تم" onPress={() => setConfirming({ ruleId: rule.id, date })} />
+        <Button
+          label="تخطّي"
+          variant="tertiary"
+          onPress={() => runAction('تعذّر التخطي', () => state.skipOccurrence(rule.id, date))}
+        />
+      </View>
+    </View>
+  );
 
   return (
-    <Screen scroll edges={["bottom"]} contentStyle={styles.content}>
-        {items.length === 0 ? (
-          <Text style={styles.empty}>مفيش مستحقات دلوقتي ✓</Text>
-        ) : (
-          sections.map((section) => (
-            <View key={section.title} style={styles.section}>
-              <Text style={styles.sectionTitle}>
-                {section.title} ({section.items.length})
-              </Text>
-              {section.items.map(({ rule, date }) => (
-                <Card key={`${rule.id}-${date}`} style={styles.item}>
-                  <View style={styles.row}>
-                    <Text
-                      style={[
-                        styles.amount,
-                        {
-                          color:
-                            rule.kind === "income"
-                              ? FinanceColors.income
-                              : FinanceColors.expense,
-                        },
-                      ]}
-                    >
-                      {rule.variableAmount ? "≈ " : ""}
-                      {formatCurrency(rule.amount, rule.currency)}
-                    </Text>
-                    <View style={styles.text}>
-                      <Text style={styles.name}>{rule.name}</Text>
-                      <Text style={styles.muted}>
-                        {formatDayLabel(date)} · {accountName(rule.accountId)}
-                      </Text>
-                    </View>
-                  </View>
-                  <View style={styles.actions}>
-                    <TouchableOpacity
-                      style={[styles.button, styles.skip]}
-                      onPress={() =>
-                        runAction("تعذّر التخطي", () =>
-                          state.skipOccurrence(rule.id, date),
-                        )
-                      }
-                      activeOpacity={0.85}
-                    >
-                      <Text style={[styles.buttonText, styles.skipText]}>
-                        تخطّي
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.button}
-                      onPress={() => setConfirming({ ruleId: rule.id, date })}
-                      activeOpacity={0.85}
-                    >
-                      <Text style={styles.buttonText}>تم</Text>
-                    </TouchableOpacity>
-                  </View>
-                </Card>
-              ))}
+    <Screen scroll edges={['bottom']} contentStyle={styles.content}>
+      {items.length === 0 ? (
+        <>
+          <EmptyState icon="inbox" title="مفيش حاجة مستنياك." body="كل المستحقات متسجلة." />
+          <View style={styles.center}>
+            <Button label="المعاملات المتكررة" variant="tertiary" onPress={() => router.push('/recurring')} />
+          </View>
+        </>
+      ) : (
+        <>
+          {missed.length > 0 && (
+            <View>
+              <SectionHeader
+                title={`فات ومتسجلش (${missed.length})`}
+                trailing={<StatusChip label="فات ميعاده" tone="attention" icon="schedule" />}
+              />
+              <ListGroup>{missed.map(row)}</ListGroup>
             </View>
-          ))
-        )}
+          )}
+          {current.length > 0 && (
+            <View>
+              <SectionHeader title={`المستحق الشهر ده (${current.length})`} />
+              <ListGroup>{current.map(row)}</ListGroup>
+            </View>
+          )}
+        </>
+      )}
+
       {confirmRule && confirming && (
         <ConfirmOccurrenceSheet
           key={`${confirming.ruleId}-${confirming.date}`}
@@ -117,39 +105,11 @@ export default function DueScreen() {
 }
 
 const styles = StyleSheet.create({
-  content: { padding: 16, gap: 18 },
-  section: { gap: 10 },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: Colors.light.text,
-    textAlign: "right",
-  },
-  empty: {
-    marginTop: 48,
-    fontSize: 15,
-    color: Colors.light.icon,
-    textAlign: "center",
-  },
-  item: { gap: 12 },
-  row: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  text: { flex: 1, alignItems: "flex-end", gap: 2, marginLeft: 8 },
-  name: { fontSize: 15, fontWeight: "600", color: Colors.light.text },
-  muted: { fontSize: 12, color: Colors.light.icon, textAlign: "right" },
-  amount: { fontSize: 15, fontWeight: "700" },
-  actions: { flexDirection: "row", gap: 10 },
-  button: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 10,
-    alignItems: "center",
-    backgroundColor: Colors.light.tint,
-  },
-  buttonText: { color: "#fff", fontSize: 15, fontWeight: "700" },
-  skip: { backgroundColor: Colors.light.icon + "18" },
-  skipText: { color: Colors.light.text },
+  content: { padding: space.lg, gap: space.md },
+  item: { padding: space.lg, gap: space.xs },
+  line: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm },
+  flex: { flex: 1 },
+  // RTL: "تم" on the right (start), "تخطّي" after it.
+  actions: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm, marginTop: space.sm },
+  center: { alignItems: 'center' },
 });

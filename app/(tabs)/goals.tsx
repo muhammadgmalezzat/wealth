@@ -1,111 +1,92 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
 import { FundCard } from '@/components/funds/FundCard';
 import { FundSheet } from '@/components/funds/FundSheet';
+import { fundsSummary } from '@/components/funds/fundsUi';
 import { FUND_SECTION_TITLES } from '@/components/funds/labels';
 import { UnassignedPanel } from '@/components/funds/UnassignedPanel';
+import { AppText } from '@/components/ui/AppText';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { Fab, FAB_CLEARANCE } from '@/components/ui/Fab';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { MetricGroup } from '@/components/ui/MetricGroup';
+import { Money } from '@/components/ui/Money';
 import { Screen } from '@/components/ui/Screen';
-import { Colors } from '@/constants/theme';
+import { SectionHeader } from '@/components/ui/SectionHeader';
+import { space } from '@/constants/theme';
 import { fundsByPriority } from '@/store/selectors';
 import type { Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 
 const SECTION_ORDER: Fund['type'][] = ['emergency', 'goal', 'sinking'];
 
+// "What am I preparing for?": money to plan, totals, then funds by type.
 export default function FundsScreen() {
   const state = useFinanceStore();
-  // Type preselected in the create sheet (e.g. from the emergency hint).
+  // Type preselected in the create sheet (e.g. from the empty state).
   const [creating, setCreating] = useState<Fund['type'] | null>(null);
 
   if (!state.hasHydrated) return <LoadingView />;
 
   const funds = fundsByPriority(state);
+  const summary = fundsSummary(state);
 
   return (
     <Screen
       scroll
       contentStyle={styles.content}
       overlay={<Fab placement="tab" onPress={() => setCreating('goal')} accessibilityLabel="صندوق جديد" />}>
-        <Text style={styles.title}>الصناديق</Text>
+      <AppText variant="titleLg">الصناديق</AppText>
 
-        <UnassignedPanel state={state} />
+      <UnassignedPanel state={state} />
 
-        {SECTION_ORDER.map((type) => {
-          const sectionFunds = funds.filter((f) => f.type === type);
-          if (sectionFunds.length === 0 && type !== 'emergency') return null;
-          return (
-            <View key={type} style={styles.section}>
-              <Text style={styles.sectionTitle}>{FUND_SECTION_TITLES[type]}</Text>
-              {sectionFunds.length === 0 ? (
-                <TouchableOpacity style={styles.emptyHint} onPress={() => setCreating('emergency')} activeOpacity={0.8}>
-                  <Text style={styles.emptyText}>لسه معملتش صندوق طوارئ</Text>
-                  <Text style={styles.emptyAction}>+ أنشئه دلوقتي</Text>
-                </TouchableOpacity>
-              ) : (
-                sectionFunds.map((fund) => (
-                  <View key={fund.id} style={styles.cardGap}>
+      {funds.length === 0 ? (
+        <EmptyState
+          icon="savings"
+          title="لسه معندكش صناديق."
+          body="الصندوق بيساعدك تحجز جزء من فلوسك لهدف أو للظروف المفاجئة."
+          actionLabel="أنشئ صندوق طوارئ"
+          onAction={() => setCreating('emergency')}
+        />
+      ) : (
+        <>
+          <MetricGroup
+            metrics={[
+              { label: 'إجمالي المحجوز', value: <Money amount={summary.reservedEGP} currency="EGP" align="center" /> },
+              { label: 'مطلوب الشهر ده', value: <Money amount={summary.requiredEGP} currency="EGP" align="center" /> },
+              { label: 'صناديق', value: <AppText variant="moneyRow" align="center">{summary.count}</AppText> },
+            ]}
+          />
+          {SECTION_ORDER.map((type) => {
+            const sectionFunds = funds.filter((f) => f.type === type);
+            if (sectionFunds.length === 0) return null;
+            return (
+              <View key={type}>
+                <SectionHeader title={FUND_SECTION_TITLES[type]} />
+                <View style={styles.cards}>
+                  {sectionFunds.map((fund) => (
                     <FundCard
+                      key={fund.id}
                       fund={fund}
                       state={state}
                       onPress={() => router.push({ pathname: '/fund/[id]', params: { id: fund.id } })}
                     />
-                  </View>
-                ))
-              )}
-            </View>
-          );
-        })}
+                  ))}
+                </View>
+              </View>
+            );
+          })}
+        </>
+      )}
+
       {creating && <FundSheet initialType={creating} onClose={() => setCreating(null)} />}
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  content: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: FAB_CLEARANCE,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: Colors.light.text,
-    textAlign: 'right',
-    marginBottom: 16,
-  },
-  section: {
-    marginTop: 24,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: Colors.light.text,
-    textAlign: 'right',
-    marginBottom: 10,
-  },
-  cardGap: {
-    marginBottom: 10,
-  },
-  emptyHint: {
-    padding: 16,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: Colors.light.icon,
-    alignItems: 'flex-end',
-    gap: 4,
-  },
-  emptyText: {
-    fontSize: 14,
-    color: Colors.light.icon,
-  },
-  emptyAction: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: Colors.light.tint,
-  },
+  content: { paddingHorizontal: space.lg, paddingTop: space.sm, paddingBottom: FAB_CLEARANCE, gap: space.lg },
+  cards: { gap: space.md },
 });

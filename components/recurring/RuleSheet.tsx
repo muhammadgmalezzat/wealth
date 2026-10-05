@@ -1,11 +1,17 @@
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity } from 'react-native';
+import { StyleSheet, Switch, View } from 'react-native';
 
-import { Chip, ChipRow } from '@/components/ui/Chip';
+import { AccountPicker } from '@/components/transactions/AccountPicker';
+import { CategoryPicker } from '@/components/transactions/CategoryPicker';
+import { MoreDetails } from '@/components/transactions/MoreDetails';
+import { AmountInput } from '@/components/ui/AmountInput';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
 import { FutureDateField } from '@/components/ui/DateFields';
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { Segment } from '@/components/ui/Segment';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { colors, space } from '@/constants/theme';
 import type { NewRecurringRule } from '@/store/operations';
 import { pickerCategories } from '@/store/selectors';
 import type { RecurringFrequency, RecurringKind, RecurringRule } from '@/store/types';
@@ -17,6 +23,7 @@ import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
 import { frequencyLabel } from './labels';
+import { ruleDetailsOpen } from './recurringUi';
 
 interface RuleSheetProps {
   // Edit an existing rule…
@@ -28,7 +35,9 @@ interface RuleSheetProps {
   onClose: () => void;
 }
 
-// Add / edit a recurring income, expense or transfer.
+// Add / edit a recurring income, expense or transfer. Order: kind · amount (+ "المبلغ بيتغير") ·
+// name · category + account (or from / to) · frequency (+ interval, day of month) · start date ·
+// mode; "تفاصيل أكتر": end date, note (open when the edited rule uses them) · delete.
 export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleSheetProps) {
   const state = useFinanceStore();
   const accounts = state.accounts.filter((a) => !a.archived || a.id === rule?.accountId || a.id === rule?.toAccountId);
@@ -115,20 +124,6 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
     });
   };
 
-  const accountChips = (selected: string, onSelect: (id: string) => void, disabledId?: string) => (
-    <ChipRow>
-      {accounts.map((a) => (
-        <Chip
-          key={a.id}
-          label={`${a.name} · ${currencySymbol(a.currency)}`}
-          selected={a.id === selected}
-          disabled={a.id === disabledId}
-          onPress={() => onSelect(a.id)}
-        />
-      ))}
-    </ChipRow>
-  );
-
   const preview =
     startDate && Number.isFinite(interval)
       ? frequencyLabel({ frequency, interval, startDate, ...(Number.isFinite(dayOfMonth) ? { dayOfMonth } : {}) })
@@ -138,8 +133,8 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
     <FormSheet visible title={rule ? 'تعديل المتكرر' : 'معاملة متكررة'} onCancel={onClose} onSave={handleSave}>
       <Segment<RecurringKind>
         options={[
-          { label: 'مصروف', value: 'expense' },
           { label: 'دخل', value: 'income' },
+          { label: 'مصروف', value: 'expense' },
           { label: 'تحويل', value: 'transfer' },
         ]}
         value={kind}
@@ -149,116 +144,109 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
         }}
       />
 
-      <FieldLabel>الاسم</FieldLabel>
-      <FormInput value={name} onChangeText={setName} placeholder="مثال: إيجار" />
+      <AmountInput value={amountText} onChangeText={setAmountText} currency={account?.currency ?? 'EGP'} />
+      <View style={styles.switchRow}>
+        <Switch
+          value={variableAmount}
+          onValueChange={setVariableAmount}
+          trackColor={{ true: colors.primary600, false: colors.borderStrong }}
+          thumbColor={colors.surface}
+          accessibilityLabel="المبلغ بيتغير"
+        />
+        <View style={styles.flex}>
+          <AppText variant="bodyStrong">المبلغ بيتغير</AppText>
+          <AppText variant="caption" color="textSecondary">
+            زي فاتورة الكهربا: المبلغ ده تقريبي، وبتكتب الفعلي لما تأكده.
+          </AppText>
+        </View>
+      </View>
 
-      <FieldLabel>المبلغ{account ? ` (${currencySymbol(account.currency)})` : ''}</FieldLabel>
-      <FormInput value={amountText} onChangeText={setAmountText} placeholder="0" keyboardType="decimal-pad" />
-      <ChipRow>
-        <Chip label="المبلغ بيتغير" selected={variableAmount} onPress={() => setVariableAmount((v) => !v)} />
-      </ChipRow>
-
-      <FieldLabel>{kind === 'transfer' ? 'من حساب' : 'الحساب'}</FieldLabel>
-      {accountChips(accountId, setAccountId, kind === 'transfer' ? toAccountId : undefined)}
+      <FormField label="الاسم">
+        <FormInput value={name} onChangeText={setName} placeholder="مثال: إيجار" />
+      </FormField>
 
       {kind === 'transfer' ? (
         <>
-          <FieldLabel>إلى حساب</FieldLabel>
-          {accountChips(toAccountId, setToAccountId, accountId)}
+          <AccountPicker label="من" accounts={accounts} selectedId={accountId} disabledId={toAccountId} onSelect={setAccountId} />
+          <AccountPicker label="إلى" accounts={accounts} selectedId={toAccountId} disabledId={accountId} onSelect={setToAccountId} />
+          {/* Required when the currencies differ, so it stays in the main flow. */}
           {crossCurrency && (
-            <>
-              <FieldLabel>المبلغ المستلم ({currencySymbol(toAccount.currency)})</FieldLabel>
+            <FormField label={`المبلغ المستلم (${currencySymbol(toAccount.currency)})`}>
               <FormInput value={toAmountText} onChangeText={setToAmountText} placeholder="0" keyboardType="decimal-pad" />
-            </>
+            </FormField>
           )}
         </>
       ) : (
         <>
-          <FieldLabel>التصنيف</FieldLabel>
-          <ChipRow>
-            {categories.map((c) => (
-              <Chip key={c.id} label={c.name} selected={c.id === categoryId} onPress={() => setCategoryId(c.id)} />
-            ))}
-          </ChipRow>
+          <CategoryPicker categories={categories} selectedId={categoryId} onSelect={setCategoryId} />
+          <AccountPicker label={kind === 'income' ? 'في' : 'من'} accounts={accounts} selectedId={accountId} onSelect={setAccountId} />
         </>
       )}
 
-      <FieldLabel>التكرار</FieldLabel>
-      <Segment<RecurringFrequency>
-        options={[
-          { label: 'شهري', value: 'monthly' },
-          { label: 'أسبوعي', value: 'weekly' },
-          { label: 'سنوي', value: 'yearly' },
-        ]}
-        value={frequency}
-        onChange={setFrequency}
-      />
-      <FieldLabel>كل كام {frequency === 'weekly' ? 'أسبوع' : frequency === 'yearly' ? 'سنة' : 'شهر'}</FieldLabel>
-      <FormInput value={intervalText} onChangeText={setIntervalText} keyboardType="number-pad" />
-      {frequency !== 'weekly' && (
-        <>
-          <FieldLabel>يوم الشهر (لو الشهر أقصر بيتسجل آخر يوم)</FieldLabel>
-          <FormInput value={dayText} onChangeText={setDayText} keyboardType="number-pad" />
-        </>
-      )}
-      {preview ? <Text style={styles.preview}>{preview}</Text> : null}
+      <FormField label="التكرار" helper={preview || undefined}>
+        <Segment<RecurringFrequency>
+          options={[
+            { label: 'أسبوعي', value: 'weekly' },
+            { label: 'شهري', value: 'monthly' },
+            { label: 'سنوي', value: 'yearly' },
+          ]}
+          value={frequency}
+          onChange={setFrequency}
+        />
+      </FormField>
+      <View style={styles.compact}>
+        <View style={styles.flex}>
+          <FormField label={`كل كام ${frequency === 'weekly' ? 'أسبوع' : frequency === 'yearly' ? 'سنة' : 'شهر'}`}>
+            <FormInput value={intervalText} onChangeText={setIntervalText} keyboardType="number-pad" />
+          </FormField>
+        </View>
+        {frequency !== 'weekly' && (
+          <View style={styles.flex}>
+            <FormField label="يوم الشهر" helper="لو الشهر أقصر: آخر يوم">
+              <FormInput value={dayText} onChangeText={setDayText} keyboardType="number-pad" />
+            </FormField>
+          </View>
+        )}
+      </View>
 
-      <FieldLabel>تاريخ البداية</FieldLabel>
-      <FutureDateField value={startDate} onChange={setStartDate} />
-      <FieldLabel>تاريخ النهاية</FieldLabel>
-      <FutureDateField value={endDate} onChange={setEndDate} clearLabel="بدون نهاية" />
+      <FormField label="تاريخ البداية">
+        <FutureDateField value={startDate} onChange={setStartDate} />
+      </FormField>
 
-      <FieldLabel>طريقة التسجيل</FieldLabel>
-      <Segment<RecurringRule['mode']>
-        options={[
-          { label: 'بتأكيد', value: 'confirm' },
-          { label: 'تلقائي', value: 'auto' },
-        ]}
-        value={mode}
-        onChange={setMode}
-      />
-      <Text style={styles.hint}>
-        {mode === 'auto'
-          ? 'بتتسجل لوحدها في ميعادها.'
-          : 'بتظهر في «المستحقات» وأنت تأكدها أو تتخطاها.'}
-      </Text>
+      <FormField label="طريقة التسجيل" helper={mode === 'auto' ? 'بيتسجل لوحده في ميعاده.' : 'بيستناك تأكده من المستحقات.'}>
+        <Segment<RecurringRule['mode']>
+          options={[
+            { label: 'تلقائي', value: 'auto' },
+            { label: 'بتأكيد', value: 'confirm' },
+          ]}
+          value={mode}
+          onChange={setMode}
+        />
+      </FormField>
 
-      <FieldLabel>ملاحظة (اختياري)</FieldLabel>
-      <FormInput value={note} onChangeText={setNote} />
+      <MoreDetails initiallyOpen={ruleDetailsOpen(rule)}>
+        <FormField label="تاريخ النهاية">
+          <FutureDateField value={endDate} onChange={setEndDate} clearLabel="بدون نهاية" />
+        </FormField>
+        <FormField label="ملاحظة (اختياري)">
+          <FormInput value={note} onChangeText={setNote} multiline style={styles.note} />
+        </FormField>
+      </MoreDetails>
 
       {rule && (
-        <TouchableOpacity style={styles.deleteBtn} onPress={handleDelete} activeOpacity={0.8}>
-          <Text style={styles.deleteText}>حذف المتكرر</Text>
-        </TouchableOpacity>
+        <View style={styles.delete}>
+          <Button label="احذف المتكرر" variant="destructive" icon="delete-outline" block onPress={handleDelete} />
+        </View>
       )}
     </FormSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  preview: {
-    marginTop: 8,
-    fontSize: 13,
-    fontWeight: '600',
-    color: Colors.light.tint,
-    textAlign: 'right',
-  },
-  hint: {
-    marginTop: 6,
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'right',
-  },
-  deleteBtn: {
-    marginTop: 28,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: FinanceColors.expense + '15',
-  },
-  deleteText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: FinanceColors.expense,
-  },
+  // RTL: text on the right, switch on the left.
+  switchRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.md },
+  flex: { flex: 1 },
+  compact: { flexDirection: 'row-reverse', gap: space.md },
+  note: { minHeight: 72, textAlignVertical: 'top' },
+  delete: { marginTop: space.xxxl },
 });

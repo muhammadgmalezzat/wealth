@@ -1,13 +1,15 @@
 import { useState } from 'react';
-import { StyleSheet, Text } from 'react-native';
 
-import { Chip, ChipRow } from '@/components/ui/Chip';
+import { AccountPicker } from '@/components/transactions/AccountPicker';
+import { AmountInput } from '@/components/ui/AmountInput';
+import { AppText } from '@/components/ui/AppText';
 import { PastDateField } from '@/components/ui/DateFields';
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
-import { Colors } from '@/constants/theme';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { formatDateAr } from '@/components/ui/formatDateAr';
 import type { RecurringRule } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { currencySymbol, formatDate } from '@/utils/formatters';
+import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
@@ -46,49 +48,38 @@ export function ConfirmOccurrenceSheet({ rule, occurrenceDate, onClose }: Confir
   };
 
   return (
-    <FormSheet visible title={rule.name} onCancel={onClose} onSave={handleSave} saveLabel="تم">
-      <Text style={styles.hint}>مستحق {formatDate(occurrenceDate)}</Text>
+    <FormSheet visible title={rule.name} onCancel={onClose} onSave={handleSave} saveLabel="سجّل">
+      <AppText variant="secondary" color="textSecondary">
+        مستحق {formatDateAr(occurrenceDate)}
+      </AppText>
 
-      <FieldLabel>
-        المبلغ{account ? ` (${currencySymbol(account.currency)})` : ''}
-        {rule.variableAmount ? ' — بيتغير، اكتب المبلغ الفعلي' : ''}
-      </FieldLabel>
-      <FormInput value={amountText} onChangeText={setAmountText} keyboardType="decimal-pad" />
+      <AmountInput
+        value={amountText}
+        onChangeText={setAmountText}
+        currency={account?.currency ?? rule.currency}
+        hint={rule.variableAmount ? { tone: 'neutral', icon: 'edit', text: 'المبلغ بيتغير: اكتب المبلغ الفعلي' } : undefined}
+      />
 
       {crossCurrency && toAccount && (
-        <>
-          <FieldLabel>المبلغ المستلم ({currencySymbol(toAccount.currency)})</FieldLabel>
+        <FormField label={`المبلغ المستلم (${currencySymbol(toAccount.currency)})`}>
           <FormInput value={toAmountText} onChangeText={setToAmountText} keyboardType="decimal-pad" placeholder="بالسعر الحالي" />
-        </>
+        </FormField>
       )}
 
-      <FieldLabel>{rule.kind === 'transfer' ? 'من حساب' : 'الحساب'}</FieldLabel>
-      <ChipRow>
-        {accounts
-          .filter((a) => a.id !== rule.toAccountId)
-          .map((a) => (
-            <Chip
-              key={a.id}
-              label={`${a.name} · ${currencySymbol(a.currency)}`}
-              selected={a.id === accountId}
-              onPress={() => setAccountId(a.id)}
-            />
-          ))}
-      </ChipRow>
+      <AccountPicker
+        label={rule.kind === 'transfer' ? 'من' : rule.kind === 'income' ? 'في' : 'من'}
+        accounts={accounts.filter((a) => a.id !== rule.toAccountId)}
+        selectedId={accountId}
+        onSelect={setAccountId}
+      />
 
-      <FieldLabel>التاريخ</FieldLabel>
-      <PastDateField value={date} onChange={setDate} />
+      <FormField label="التاريخ">
+        <PastDateField value={date} onChange={setDate} />
+      </FormField>
 
-      <FieldLabel>ملاحظة (اختياري)</FieldLabel>
-      <FormInput value={note} onChangeText={setNote} placeholder={rule.name} />
+      <FormField label="ملاحظة (اختياري)">
+        <FormInput value={note} onChangeText={setNote} placeholder={rule.name} />
+      </FormField>
     </FormSheet>
   );
 }
-
-const styles = StyleSheet.create({
-  hint: {
-    fontSize: 13,
-    color: Colors.light.icon,
-    textAlign: 'right',
-  },
-});

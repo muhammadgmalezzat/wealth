@@ -6,7 +6,9 @@ import { randomBytes } from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import * as home from '@/components/dashboard/homeInsights';
+import * as fundsUi from '@/components/funds/fundsUi';
 import * as planUi from '@/components/plan/planUi';
+import * as recUi from '@/components/recurring/recurringUi';
 import * as txUi from '@/components/transactions/transactionUi';
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
@@ -2588,5 +2590,74 @@ describe('A4: zero-limit line with spending', () => {
     const line = { categoryId: 'c', bucket: 'lifestyle' as const, kind: 'flexible' as const, limit: 0, spent: 75, remaining: -75, pct: 1 };
     assert.equal(planUi.lineState(line), 'over');
     assert.ok(planUi.lineSentence(line, 'خروجات', 'SAR').startsWith('مفيش ميزانية للبند ده: اتصرف '));
+  });
+});
+
+// --- Funds / recurring UI helpers (Calm Wealth phase 5) ---------------------------
+
+describe('funds UI helpers', () => {
+  const at = (day: number) => new Date(2026, 9, day, 12);
+  const state = (funds: Fund[], movements: FinanceState['fundMovements'] = []): FinanceState => ({
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 1000000)],
+    funds,
+    fundMovements: movements,
+  });
+
+  it('fundsSummary sums current and required in EGP at current rates', () => {
+    const s = state(
+      [
+        fund({ id: 'egp', targetAmount: 30000, deadline: '2026-12-31' }),
+        fund({ id: 'sar', currency: 'SAR', targetAmount: 3000, deadline: '2026-12-31' }),
+        fund({ id: 'open', targetAmount: 1000 }),
+      ],
+      [
+        { id: 'm1', fundId: 'egp', amount: 6000, date: '2026-09-01', updatedAt: T0 },
+        { id: 'm2', fundId: 'sar', amount: 600, date: '2026-09-01', updatedAt: T0 },
+      ]
+    );
+    const summary = fundsUi.fundsSummary(s, at(15));
+    approx(summary.reservedEGP, 6000 + 600 * 12.5);
+    // (30000 − 6000) / 3 + (3000 − 600) / 3 × 12.5; the open fund has no requirement.
+    approx(summary.requiredEGP, 8000 + 800 * 12.5);
+    assert.equal(summary.count, 3);
+  });
+
+  it('fundNextStep follows the status, the deadline and the target', () => {
+    const goal = fund({ id: 'g', targetAmount: 30000, deadline: '2026-12-31' });
+    assert.equal(fundsUi.fundNextStep(state([goal]), goal, at(26)).tone, 'attention'); // behind
+    assert.ok(fundsUi.fundNextStep(state([goal]), goal, at(26)).text.startsWith('خصص '));
+    assert.equal(fundsUi.fundNextStep(state([goal]), goal, at(10)).tone, 'neutral'); // pending
+    assert.ok(fundsUi.fundNextStep(state([goal]), goal, at(10)).text.endsWith(' الشهر ده.'));
+    const paid = state([goal], [{ id: 'm', fundId: 'g', amount: 10000, date: '2026-10-02', updatedAt: T0 }]);
+    assert.deepEqual(fundsUi.fundNextStep(paid, goal, at(26)), { tone: 'ok', text: 'ماشي على الخطة.' });
+    const open = fund({ id: 'o', targetAmount: 1000 });
+    assert.ok(fundsUi.fundNextStep(state([open]), open, at(26)).text.startsWith('لسه محتاج '));
+    const reached = state([open], [{ id: 'm', fundId: 'o', amount: 1000, date: '2026-10-02', updatedAt: T0 }]);
+    assert.deepEqual(fundsUi.fundNextStep(reached, open, at(26)), { tone: 'ok', text: 'وصلت للهدف.' });
+  });
+
+  it('movementKind tells allocations, withdrawals and sinking payments apart', () => {
+    assert.equal(fundsUi.movementKind({ amount: 100 }), 'allocation');
+    assert.equal(fundsUi.movementKind({ amount: -100, note: 'سحب' }), 'withdrawal');
+    assert.equal(fundsUi.movementKind({ amount: -100 }), 'withdrawal');
+    assert.equal(fundsUi.movementKind({ amount: -100, note: 'اتدفعت: تأمين' }), 'payment');
+  });
+});
+
+describe('recurring UI helpers', () => {
+  it('ruleState: paused, ended, active', () => {
+    assert.equal(recUi.ruleState({ active: false, nextDate: '2026-11-01' }), 'paused');
+    assert.equal(recUi.ruleState({ active: true, nextDate: '' }), 'ended');
+    assert.equal(recUi.ruleState({ active: true, nextDate: '2026-11-01' }), 'active');
+  });
+
+  it('ruleDetailsOpen when editing a rule with an end date, note or received amount', () => {
+    assert.equal(recUi.ruleDetailsOpen(undefined), false);
+    assert.equal(recUi.ruleDetailsOpen({}), false);
+    assert.equal(recUi.ruleDetailsOpen({ endDate: '2027-01-01' }), true);
+    assert.equal(recUi.ruleDetailsOpen({ note: ' x ' }), true);
+    assert.equal(recUi.ruleDetailsOpen({ note: '  ' }), false);
+    assert.equal(recUi.ruleDetailsOpen({ toAmount: 100 }), true);
   });
 });
