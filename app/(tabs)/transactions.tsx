@@ -1,41 +1,30 @@
 import { useState } from 'react';
-import { SectionList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { FlatList, StyleSheet, View } from 'react-native';
 
+import { MonthlySnapshot } from '@/components/dashboard/MonthlySnapshot';
 import { TransactionRow } from '@/components/transactions/TransactionRow';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
+import { emptyFilterMessage, FILTERS, filterTransactions } from '@/components/transactions/transactionUi';
+import { AppText } from '@/components/ui/AppText';
 import { Chip, ChipRow } from '@/components/ui/Chip';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { Fab, FAB_CLEARANCE } from '@/components/ui/Fab';
+import { ListGroup } from '@/components/ui/ListRow';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { Money } from '@/components/ui/Money';
 import { MonthSwitcher } from '@/components/ui/MonthSwitcher';
 import { Screen } from '@/components/ui/Screen';
-import { StatCard } from '@/components/ui/StatCard';
-import { Colors, FinanceColors } from '@/constants/theme';
-import {
-  groupTransactionsByDay,
-  monthSummary,
-  transactionsForMonth,
-  type TransactionFilter,
-} from '@/store/selectors';
+import { space } from '@/constants/theme';
+import { groupTransactionsByDay, transactionsForMonth, type DayGroup, type TransactionFilter } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toMonthKey } from '@/utils/dates';
-import { formatCurrency, formatDayLabel } from '@/utils/formatters';
-
-const FILTERS: { label: string; value: TransactionFilter }[] = [
-  { label: 'الكل', value: 'all' },
-  { label: 'مصروف', value: 'expense' },
-  { label: 'دخل', value: 'income' },
-  { label: 'تحويل', value: 'transfer' },
-  { label: 'ذهب', value: 'asset_purchase' },
-];
+import { formatDayLabel } from '@/utils/formatters';
 
 // 'add' opens an empty sheet; a transaction id opens it for editing.
 type SheetTarget = 'add' | { id: string } | null;
 
-const signedColor = (value: number) =>
-  value > 0 ? FinanceColors.income : value < 0 ? FinanceColors.expense : Colors.light.text;
-
-const signed = (value: number) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${formatCurrency(Math.abs(value), 'EGP')}`;
-
+// "What happened?": month switcher · month snapshot · type filter · days, each one header row
+// (day label, day net) and one grouped list of its transactions.
 export default function TransactionsScreen() {
   const state = useFinanceStore();
   const [month, setMonth] = useState(() => toMonthKey(new Date()));
@@ -44,78 +33,61 @@ export default function TransactionsScreen() {
 
   if (!state.hasHydrated) return <LoadingView />;
 
-  const summary = monthSummary(state, month);
-  const sections = groupTransactionsByDay(transactionsForMonth(state, month, filter)).map((day) => ({
-    ...day,
-    data: day.transactions,
-  }));
-  const editing =
-    sheet && sheet !== 'add' ? state.transactions.find((t) => t.id === sheet.id) : undefined;
+  const monthTransactions = transactionsForMonth(state, month);
+  const days = groupTransactionsByDay(filterTransactions(monthTransactions, filter));
+  const editing = sheet && sheet !== 'add' ? state.transactions.find((t) => t.id === sheet.id) : undefined;
 
   const header = (
-    <View>
+    <View style={styles.header}>
       <MonthSwitcher month={month} onChange={setMonth} />
-
-      {/* ── Month summary ── */}
-      <View style={styles.summaryRow}>
-        <StatCard label="دخل" amountEGP={summary.incomeEGP} accentColor={FinanceColors.income} />
-        <StatCard label="مصروف" amountEGP={summary.expenseEGP} accentColor={FinanceColors.expense} />
-        <StatCard
-          label="الصافي"
-          amountEGP={summary.netCashFlow}
-          accentColor={summary.netCashFlow < 0 ? FinanceColors.expense : FinanceColors.income}
-          amountColor={signedColor(summary.netCashFlow)}
-        />
-      </View>
-
-      {/* ── Filters ── */}
-      <View style={styles.filters}>
-        <ChipRow>
-          {FILTERS.map((f) => (
-            <Chip key={f.value} label={f.label} selected={filter === f.value} onPress={() => setFilter(f.value)} />
-          ))}
-        </ChipRow>
-      </View>
+      <MonthlySnapshot state={state} month={month} linkToTransactions={false} />
+      <ChipRow>
+        {FILTERS.map((f) => (
+          <Chip key={f.value} label={f.label} selected={filter === f.value} onPress={() => setFilter(f.value)} />
+        ))}
+      </ChipRow>
     </View>
   );
 
+  const empty =
+    monthTransactions.length === 0 ? (
+      <EmptyState
+        icon="receipt-long"
+        title="مفيش معاملات في الشهر ده."
+        body="سجّل مصروف أو دخل عشان تشوف شهرك."
+        actionLabel="سجّل معاملة"
+        onAction={() => setSheet('add')}
+      />
+    ) : (
+      <AppText variant="secondary" color="textSecondary" align="center" style={styles.noMatch}>
+        {emptyFilterMessage(filter)}
+      </AppText>
+    );
+
   return (
     <Screen overlay={<Fab placement="tab" onPress={() => setSheet('add')} accessibilityLabel="إضافة معاملة" />}>
-      <SectionList
-        sections={sections}
-        keyExtractor={(tx) => tx.id}
-        stickySectionHeadersEnabled={false}
-        contentContainerStyle={[styles.content, { paddingTop: 8, paddingBottom: FAB_CLEARANCE }]}
+      <FlatList<DayGroup>
+        data={days}
+        keyExtractor={(day) => day.date}
+        contentContainerStyle={styles.content}
         ListHeaderComponent={header}
-        renderSectionHeader={({ section }) => (
-          <View style={styles.dayHeader}>
-            <Text style={[styles.dayNet, { color: signedColor(section.netEGP) }]}>{signed(section.netEGP)}</Text>
-            <Text style={styles.dayLabel}>{formatDayLabel(section.date)}</Text>
+        ListEmptyComponent={empty}
+        renderItem={({ item: day }) => (
+          <View style={styles.day}>
+            {/* RTL: day label on the right (start), day net on the left (end). Never red. */}
+            <View style={styles.dayHeader}>
+              <AppText variant="caption" color="textSecondary" style={styles.dayLabel}>
+                {formatDayLabel(day.date)}
+              </AppText>
+              <Money amount={day.netEGP} currency="EGP" size="row" tone="muted" showSign align="left" />
+            </View>
+            <ListGroup>
+              {day.transactions.map((tx) => (
+                <TransactionRow key={tx.id} tx={tx} state={state} onPress={() => setSheet({ id: tx.id })} />
+              ))}
+            </ListGroup>
           </View>
         )}
-        renderItem={({ item, index, section }) => (
-          <View
-            style={[
-              styles.rowWrap,
-              index === 0 && styles.rowWrapFirst,
-              index === section.data.length - 1 && styles.rowWrapLast,
-            ]}>
-            <TransactionRow
-              tx={item}
-              state={state}
-              isLast={index === section.data.length - 1}
-              onPress={() => setSheet({ id: item.id })}
-            />
-          </View>
-        )}
-        ListEmptyComponent={
-          <View style={styles.empty}>
-            <Text style={styles.emptyText}>لا توجد معاملات في الشهر ده</Text>
-            <TouchableOpacity style={styles.emptyButton} onPress={() => setSheet('add')} activeOpacity={0.85}>
-              <Text style={styles.emptyButtonText}>أضف أول معاملة</Text>
-            </TouchableOpacity>
-          </View>
-        }
       />
 
       {sheet === 'add' && <TransactionSheet onClose={() => setSheet(null)} />}
@@ -125,75 +97,10 @@ export default function TransactionsScreen() {
 }
 
 const styles = StyleSheet.create({
-  content: {
-    paddingHorizontal: 16,
-  },
-
-  // Summary & filters
-  summaryRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 16,
-  },
-  filters: {
-    marginBottom: 8,
-  },
-
-  // Day sections
-  dayHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  dayLabel: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: Colors.light.text,
-    textAlign: 'right',
-  },
-  dayNet: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  rowWrap: {
-    backgroundColor: '#fff',
-    borderLeftWidth: StyleSheet.hairlineWidth,
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderColor: FinanceColors.progressTrack,
-  },
-  rowWrapFirst: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-  },
-  rowWrapLast: {
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomLeftRadius: 12,
-    borderBottomRightRadius: 12,
-  },
-
-  // Empty state
-  empty: {
-    alignItems: 'center',
-    paddingVertical: 48,
-    gap: 16,
-  },
-  emptyText: {
-    fontSize: 15,
-    color: Colors.light.icon,
-  },
-  emptyButton: {
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 10,
-    backgroundColor: Colors.light.tint,
-  },
-  emptyButtonText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-
+  content: { paddingHorizontal: space.lg, paddingTop: space.sm, paddingBottom: FAB_CLEARANCE },
+  header: { gap: space.lg, marginBottom: space.sm },
+  day: { marginTop: space.lg, gap: space.sm },
+  dayHeader: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', gap: space.sm },
+  dayLabel: { flexShrink: 1, fontWeight: '600' },
+  noMatch: { marginTop: space.xxl },
 });

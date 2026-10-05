@@ -116,7 +116,10 @@ components/
   recurring/                RuleSheet (add/edit/delete rule), ConfirmOccurrenceSheet (تم),
                             labels.ts (Arabic frequency / mode / section labels)
   settings/                 ExportSheet, RestoreSheet
-  transactions/             TransactionRow (shared row), TransactionSheet (add/edit)
+  transactions/             TransactionRow (shared row), TransactionSheet (add/edit) and its
+                            presentational parts CategoryPicker, AccountPicker, GoldFields,
+                            MoreDetails; transactionUi.ts (pure: FILTERS, filterTransactions,
+                            emptyFilterMessage, quickCategories, transferTitle)
   ui/                       Design-system primitives: AppText, Card, Button, Chip/ChipRow,
                             StatusChip, Segment, ProgressBar, Money, AmountInput, FormField,
                             ListRow/ListGroup, SectionHeader, InsightCard, EmptyState;
@@ -207,7 +210,7 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 | Route | Tab title | What it does |
 |---|---|---|
 | `/` (`index`) | الرئيسية | Calm Wealth Home (see "Home" below): greeting + date + settings icon; safe to spend (hero) → /plan; one next-best-action insight; هذا الشهر snapshot → /transactions; جاي قريب → /recurring, /due; up to 3 funds → /fund/[id], "عرض كل الصناديق" → /goals; money available to plan (Assign/Cover sheets); net worth; backup nudge → /settings?export=1; last 5 transactions (tap to edit, "+ معاملة"). |
-| `/transactions` | المعاملات | Month switcher, income/expense/net cards, filter chips (الكل/مصروف/دخل/تحويل/ذهب), SectionList grouped by day with day net, empty state, "+" FAB → TransactionSheet. |
+| `/transactions` | المعاملات | MonthSwitcher; MonthlySnapshot for the selected month (no link); filter chips الكل/مصروف/دخل/تحويل/ذهب (UI-only, by type); days (FlatList), each a header row (day label · day net in textSecondary, never red) and one ListGroup of TransactionRows (tap → edit); EmptyState for an empty month, a one-line message for a filter with no match; "+" FAB → TransactionSheet. |
 | `/plan` | الخطة | Month switcher; empty state (اقترح من مصروفي / انسخ خطة … / ابدأ من الصفر); income + unplanned header; lines by bucket with progress; fund contributions vs allocated; off-plan spending; planned/spent/remaining summary; "تعديل" → PlanEditorSheet (tap a line → LineSheet; "+ أضف بند" → AddLineSheet, whose "إدارة البنود" asks to discard unsaved edits, closes the editor and opens `/categories`); "المعاملات المتكررة ‹" link → `/recurring`. |
 | `/assets` | الأصول | Summary (إجمالي الأصول / السيولة / الاستثمارات); accounts (tap → EditAccountSheet, delete); holdings with P&L (delete); "+" → add account (cash/bank/wallet) or gold (opening asset). |
 | `/goals` | الصناديق | UnassignedPanel; sections الطوارئ / الأهداف / مصاريف دورية (by priority); emergency empty hint; "+" → FundSheet. |
@@ -353,8 +356,55 @@ percent · "الموعد: …". Status mapping (`components/funds/labels.ts` →
 | behind | attention "محتاج انتباه" (never red) | محتاج {fundRequiredMonthly} هذا الشهر للحاق بالخطة (hidden if ≤ 0) |
 | no_deadline | neutral "بدون موعد" | لسه محتاج {target − current} للوصول للهدف / وصلت للهدف |
 
-TransactionRow (minimal phase-2 pass): amounts in text color for expenses, transfers and gold;
-income green; signs via `formatMoney`; Arabic dates via `formatDateAr`; tokens only.
+### Transactions (Calm Wealth phase 3)
+
+**Screen** (`app/(tabs)/transactions.tsx`) — "what happened?", built for scanning 10–20 rows:
+MonthSwitcher · `MonthlySnapshot` (`month`, `linkToTransactions={false}`) · filter chips
+(`transactionUi.FILTERS`; `filterTransactions` over `transactionsForMonth`) · days from
+`groupTransactionsByDay`: header row (formatDayLabel on the right, `Money` muted with sign on the
+left — the day net is never red) + one `ListGroup` per day. Empty month → `EmptyState` "مفيش
+معاملات في الشهر ده." + "سجّل معاملة"; filter without matches → `emptyFilterMessage` ("مفيش
+تحويلات في الشهر ده."). Bottom padding `FAB_CLEARANCE`; Fab placement 'tab'.
+
+**TransactionRow** (Home and Transactions; props unchanged, `isLast` accepted but unused — the
+ListGroup draws separators) on `ListRow`:
+
+| Part | expense | income | transfer | gold purchase |
+|---|---|---|---|---|
+| Icon tile | north-east, neutral | south-west, ok | swap-horiz, neutral | diamond, gold |
+| Title | category (textMuted if archived) | category | `transferTitle(from, to)` = "from ← to" with RLMs | holding name |
+| Subtitle (1 line) | account · note · date* | same | "تحويل بين حساباتك" · note · date* | account · note · date* |
+| Amount | text color, no sign | green "+" | text color (source currency) | text color |
+
+\* date only with `showDate` (Home). Chips under the subtitle: لمرة واحدة (oneTime), متكرر
+(`recurringRuleId`), مؤرشف (archived category). Non-EGP amounts show "≈ X ج.م" from the stored
+`rateToEGP` snapshot (never current rates). minHeight 56; accessibilityLabel = title, amount, date.
+
+**TransactionSheet** — progressive disclosure; the fastest path is amount → category → حفظ. All
+state, defaults, type-switch rules and `handleSave` are unchanged from before (only an inline
+copy of three validation messages was added); the parts are presentational:
+1. `Segment` مصروف · دخل · تحويل · ذهب (adding only; editing a non-gold transaction hides ذهب;
+   a saved gold purchase shows a gold "شراء ذهب" chip instead — its type is locked).
+2. `AmountInput` (autoFocus when adding) in the account's currency (the from-account for
+   transfers); budget hint under it for new expenses when `spendImpact` returns data: neutral
+   ✓ "هيفضل {remainingAfter} في {category}" or attention ⓘ "المبلغ ده هيعدّي ميزانية {category}
+   بـ {overBy}" (plan currency). Never blocks saving.
+3. `CategoryPicker` (income/expense): `quickCategories` — last-used first, then picker order, max
+   6, the selected one always shown — and "كل البنود" expanding the full list inline.
+4. `AccountPicker`: one line "من / في / دفعت من {account} · {currency}" that expands account
+   chips; transfers have من and إلى; a cross-currency transfer adds the "المبلغ المستلم" FormField
+   pre-filled with the converted amount (as before).
+5. Date (`PastDateField`; other dates now in Arabic via `formatDateAr`).
+6. `GoldFields` (ذهب only): weight, karat Segment, location Segment, optional name (auto-name as
+   placeholder); gold accent on the section label. Cost = the amount.
+7. `MoreDetails` "تفاصيل أكتر" (collapsed when adding; open when editing a transaction with a
+   note, oneTime or a recurring link): note (multiline), oneTime Switch (expenses), "خلّيها
+   معاملة متكررة" (tertiary; opens RuleSheet with the existing prefill, only for saved, unlinked,
+   non-gold transactions).
+8. "احذف المعاملة" (destructive Button, edit only) with the existing confirm.
+Inline errors (amount / account / category) appear under their field in addition to the existing
+alerts; error codes are unchanged. `AmountInput` stretches with a flexing input (a web `<input>`
+otherwise takes its intrinsic width and pushes the number off-screen) and centers via style.
 
 ---
 

@@ -6,6 +6,37 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 3
+
+Calm Wealth — phase 3: Transactions screen, TransactionRow, TransactionSheet.
+
+> JS-only (ships with `eas update` to 1.1.0 builds). No store, data, schema or native changes;
+> saved transactions keep exactly the same shape.
+
+**For users**
+- Transactions: the month summary from Home, filter chips, and each day as one calm grouped
+  list; day totals are grey, never red; a clear empty state, and a one-line message when a
+  filter has no match.
+- Rows: an icon per type, the category (or "من ← إلى" for transfers, the gold name for gold),
+  account and note on one line, small tags (لمرة واحدة / متكرر / مؤرشف), expenses in the regular
+  text color, income green with "+", and "≈ … ج.م" under SAR/USD amounts.
+- Adding a transaction is faster: a big amount field, the last-used category first (max 6 chips,
+  "كل البنود" for the rest), the account as one line you tap to change, and the rarely used
+  fields (note, one-time, make recurring) under "تفاصيل أكتر".
+- The budget hint is calmer: ✓ "هيفضل X في …" or an amber "المبلغ ده هيعدّي ميزانية … بـ X".
+- Missing amount / account / category is also shown under the field.
+
+**Technical**
+- New `components/transactions/`: `transactionUi.ts` (pure, tested), `CategoryPicker`,
+  `AccountPicker`, `GoldFields`, `MoreDetails`. `TransactionSheet` keeps all state and save logic
+  (diff of the logic section: only the inline-error additions).
+- `TransactionRow` rebuilt on `ListRow` (new `titleColor`, `subtitleLines`, `accessory` props).
+- `AmountInput`: hint icon; stretches with a flexing, style-centred input (web fix).
+- `MonthlySnapshot`: `month` and `linkToTransactions` props. `DateFields` show Arabic dates.
+- Tests: 139 (+5 for the transactions UI helpers).
+
+---
+
 ## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 2
 
 Calm Wealth — phase 2: Home redesign, tab bar, navigation theme, FundCard.

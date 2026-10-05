@@ -1,33 +1,36 @@
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, Switch, View } from 'react-native';
 
-import { Chip, ChipRow } from '@/components/ui/Chip';
 import { RuleSheet } from '@/components/recurring/RuleSheet';
+import { AmountInput, type AmountHint } from '@/components/ui/AmountInput';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
 import { PastDateField } from '@/components/ui/DateFields';
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { formatMoney } from '@/components/ui/formatMoney';
 import { Segment } from '@/components/ui/Segment';
-import { Colors, FinanceColors } from '@/constants/theme';
-import type { Category, ExpenseBucket, GoldKarat, Location, Transaction } from '@/store/types';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { colors, space } from '@/constants/theme';
 import type { NewRecurringRule } from '@/store/operations';
 import { planFor, spendImpact } from '@/store/planning';
 import { pickerCategories } from '@/store/selectors';
+import type { GoldKarat, Location, Transaction } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { fromEGP, toEGP } from '@/utils/currency';
 import { monthOf, toDateKey } from '@/utils/dates';
 import { confirmAction, showMessage } from '@/utils/dialogs';
-import { currencySymbol, formatCurrency } from '@/utils/formatters';
+import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
+import { AccountPicker } from './AccountPicker';
+import { CategoryPicker } from './CategoryPicker';
+import { GoldFields, type KaratOption } from './GoldFields';
+import { MoreDetails } from './MoreDetails';
+
 type TxType = Transaction['type'];
 type FlowType = 'income' | 'expense';
-type KaratOption = `${GoldKarat}`;
-
-const BUCKET_LABELS: Record<ExpenseBucket, string> = {
-  essentials: 'أساسيات',
-  lifestyle: 'رفاهيات',
-  giving: 'عطاء',
-};
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -40,6 +43,10 @@ interface TransactionSheetProps {
 // Add / edit sheet for income, expense, transfer and gold-purchase transactions. A gold
 // purchase stays a gold purchase when edited (it owns a holding). Mount it only while open:
 // its form state is initialised from `transaction` (or the remembered defaults) on mount.
+//
+// Progressive disclosure (fastest path: amount → category → حفظ): type · amount (+ budget hint)
+// · category chips · account line(s) · date · gold fields · "تفاصيل أكتر" (note, one-time,
+// make recurring) · delete. All state and save logic stay here; the pieces are presentational.
 export function TransactionSheet({ transaction, onClose }: TransactionSheetProps) {
   const state = useFinanceStore();
   const lastUsed = state.settings.lastUsed ?? {};
@@ -103,6 +110,8 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
   const [karat, setKarat] = useState<KaratOption>(editedGold ? `${editedGold.karat}` : '21');
   const [goldLocation, setGoldLocation] = useState<Location>(editedGold?.location ?? 'EG');
   const [holdingName, setHoldingName] = useState(editedGold?.name ?? '');
+  // Inline copies of the validation messages, shown under the related field.
+  const [errors, setErrors] = useState<{ amount?: string; account?: string; category?: string }>({});
 
   const isTransfer = type === 'transfer';
   const isGold = type === 'asset_purchase';
@@ -157,6 +166,11 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
     : {};
 
   const handleSave = () => {
+    setErrors({
+      amount: amount === null ? 'اكتب مبلغ أكبر من صفر' : undefined,
+      account: (isTransfer ? !fromAccountId || !toAccountId : !flowAccount) ? 'اختار الحساب' : undefined,
+      category: (type === 'income' || type === 'expense') && !categoryId ? 'اختار البند' : undefined,
+    });
     const value = amount ?? NaN; // NaN → the store reports an Arabic "invalid amount" message
     const noteField = note.trim() ? { note: note.trim() } : {};
 
@@ -296,28 +310,6 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
     });
   };
 
-  const accountChips = (selected: string, onSelect: (id: string) => void, disabledId?: string) => (
-    <ChipRow>
-      {accounts.map((a) => (
-        <Chip
-          key={a.id}
-          label={`${a.name} · ${currencySymbol(a.currency)}`}
-          selected={a.id === selected}
-          disabled={a.id === disabledId}
-          onPress={() => onSelect(a.id)}
-        />
-      ))}
-    </ChipRow>
-  );
-
-  const categoryChips = (categories: Category[]) => (
-    <ChipRow>
-      {categories.map((c) => (
-        <Chip key={c.id} label={c.name} selected={c.id === categoryId} onPress={() => setCategoryId(c.id)} />
-      ))}
-    </ChipRow>
-  );
-
   // Archived categories are hidden, except the one this transaction already uses.
   const kindCategories =
     type === 'income' || type === 'expense'
@@ -333,8 +325,29 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
           { label: 'مصروف', value: 'expense' },
           { label: 'دخل', value: 'income' },
           { label: 'تحويل', value: 'transfer' },
-          ...(transaction ? [] : [{ label: 'شراء ذهب', value: 'asset_purchase' as const }]),
+          ...(transaction ? [] : [{ label: 'ذهب', value: 'asset_purchase' as const }]),
         ];
+
+  // Budget hint under the amount (new expenses with a plan line only; never blocks saving).
+  const budgetHint: AmountHint | undefined =
+    impact && impactCategory
+      ? impact.overBy > 0
+        ? {
+            tone: 'attention',
+            icon: 'info-outline',
+            text: `المبلغ ده هيعدّي ميزانية ${impactCategory} بـ ${formatMoney(impact.overBy, impactCurrency)}`,
+          }
+        : {
+            tone: 'neutral',
+            icon: 'check-circle-outline',
+            text: `هيفضل ${formatMoney(impact.remainingAfter, impactCurrency)} في ${impactCategory}`,
+          }
+      : undefined;
+
+  const detailsOpen =
+    !!transaction &&
+    (!!transaction.note || (transaction.type === 'expense' && !!transaction.oneTime) || !!transaction.recurringRuleId);
+  const lastUsedCategory = type === 'income' || type === 'expense' ? lastUsed[type]?.categoryId : undefined;
 
   return (
     <FormSheet
@@ -345,215 +358,164 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
       {typeOptions.length > 0 ? (
         <Segment<TxType> options={typeOptions} value={type} onChange={changeType} />
       ) : (
-        <Text style={styles.fixedType}>شراء ذهب</Text>
+        <View style={styles.lockedType}>
+          <StatusChip label="شراء ذهب" tone="gold" icon="diamond" />
+          <AppText variant="caption" color="textSecondary">
+            نوع المعاملة دي مش بيتغير بعد الحفظ.
+          </AppText>
+        </View>
       )}
 
-      {/* Amount */}
-      <FieldLabel>المبلغ</FieldLabel>
-      <View style={styles.amountRow}>
-        <FormInput
-          value={amountText}
-          onChangeText={setAmountText}
-          placeholder="0"
-          keyboardType="decimal-pad"
-          style={styles.amountInput}
+      <AmountInput
+        value={amountText}
+        onChangeText={(text) => {
+          setAmountText(text);
+          if (errors.amount) setErrors((e) => ({ ...e, amount: undefined }));
+        }}
+        currency={amountCurrency ?? 'EGP'}
+        hint={budgetHint}
+        autoFocus={!transaction}
+      />
+      {errors.amount ? (
+        <AppText variant="caption" color="danger" align="center">
+          {errors.amount}
+        </AppText>
+      ) : null}
+
+      {(type === 'income' || type === 'expense') && (
+        <CategoryPicker
+          categories={kindCategories}
+          selectedId={categoryId}
+          lastUsedId={lastUsedCategory}
+          onSelect={(id) => {
+            setCategoryId(id);
+            if (errors.category) setErrors((e) => ({ ...e, category: undefined }));
+          }}
+          error={errors.category}
         />
-        {amountCurrency && <Text style={styles.currency}>{currencySymbol(amountCurrency)}</Text>}
-      </View>
-      {impact && impactCategory && (
-        <Text style={[styles.impact, impact.overBy > 0 && styles.impactOver]}>
-          {impact.overBy > 0
-            ? `هتعدّي ميزانية ${impactCategory} بـ ${formatCurrency(impact.overBy, impactCurrency)}`
-            : `هيفضل ${formatCurrency(impact.remainingAfter, impactCurrency)} في ميزانية ${impactCategory}`}
-        </Text>
       )}
 
       {accounts.length === 0 && (
-        <Text style={styles.hint}>أضف حساباً أولاً من شاشة الأصول</Text>
+        <AppText variant="caption" color="textSecondary" style={styles.hint}>
+          أضف حساباً أولاً من شاشة الأصول
+        </AppText>
       )}
 
       {isTransfer ? (
         <>
-          <FieldLabel>من حساب</FieldLabel>
-          {accountChips(fromAccountId, setFromAccountId, toAccountId)}
-          <FieldLabel>إلى حساب</FieldLabel>
-          {accountChips(toAccountId, setToAccountId, fromAccountId)}
-
+          <AccountPicker
+            label="من"
+            accounts={accounts}
+            selectedId={fromAccountId}
+            disabledId={toAccountId}
+            onSelect={(id) => {
+              setFromAccountId(id);
+              if (errors.account) setErrors((e) => ({ ...e, account: undefined }));
+            }}
+            error={errors.account}
+          />
+          <AccountPicker
+            label="إلى"
+            accounts={accounts}
+            selectedId={toAccountId}
+            disabledId={fromAccountId}
+            onSelect={(id) => {
+              setToAccountId(id);
+              if (errors.account) setErrors((e) => ({ ...e, account: undefined }));
+            }}
+          />
           {crossCurrency && (
-            <>
-              <FieldLabel>المبلغ المستلم ({currencySymbol(toAccount.currency)})</FieldLabel>
-              <FormInput
-                value={toAmountValue}
-                onChangeText={setToAmountText}
-                placeholder="0"
-                keyboardType="decimal-pad"
-              />
-              <Text style={styles.hint}>محسوب بسعر الصرف الحالي، عدّله لو السعر الفعلي أو الرسوم مختلفة</Text>
-            </>
+            <FormField
+              label={`المبلغ المستلم (${currencySymbol(toAccount.currency)})`}
+              helper="محسوب بسعر الصرف الحالي، عدّله لو السعر الفعلي أو الرسوم مختلفة.">
+              <FormInput value={toAmountValue} onChangeText={setToAmountText} placeholder="0" keyboardType="decimal-pad" />
+            </FormField>
           )}
-        </>
-      ) : isGold ? (
-        <>
-          <FieldLabel>دفعت من حساب</FieldLabel>
-          {accountChips(accountId, setAccountId)}
-
-          <FieldLabel>الوزن (جرام)</FieldLabel>
-          <FormInput value={weightText} onChangeText={setWeightText} placeholder="0" keyboardType="decimal-pad" />
-
-          <FieldLabel>العيار</FieldLabel>
-          <Segment<KaratOption>
-            options={[
-              { label: '24k', value: '24' },
-              { label: '21k', value: '21' },
-              { label: '18k', value: '18' },
-            ]}
-            value={karat}
-            onChange={setKarat}
-          />
-
-          <FieldLabel>مكانه</FieldLabel>
-          <Segment<Location>
-            options={[
-              { label: 'مصر', value: 'EG' },
-              { label: 'السعودية', value: 'SA' },
-            ]}
-            value={goldLocation}
-            onChange={setGoldLocation}
-          />
-
-          <FieldLabel>الاسم (اختياري)</FieldLabel>
-          <FormInput
-            value={holdingName}
-            onChangeText={setHoldingName}
-            placeholder={`ذهب ${weightText.trim() || '…'} جم عيار ${karat}`}
-          />
-          <Text style={styles.hint}>شراء الذهب مش مصروف: الفلوس بتتحول من الحساب لذهب بنفس التكلفة</Text>
         </>
       ) : (
-        <>
-          <FieldLabel>الحساب</FieldLabel>
-          {accountChips(accountId, setAccountId)}
+        <AccountPicker
+          label={isGold ? 'دفعت من' : type === 'income' ? 'في' : 'من'}
+          accounts={accounts}
+          selectedId={accountId}
+          onSelect={(id) => {
+            setAccountId(id);
+            if (errors.account) setErrors((e) => ({ ...e, account: undefined }));
+          }}
+          error={errors.account}
+        />
+      )}
 
-          <FieldLabel>التصنيف</FieldLabel>
-          {type === 'expense'
-            ? (Object.keys(BUCKET_LABELS) as ExpenseBucket[]).map((bucket) => (
-                <View key={bucket} style={styles.bucket}>
-                  <Text style={styles.bucketTitle}>{BUCKET_LABELS[bucket]}</Text>
-                  {categoryChips(kindCategories.filter((c) => c.bucket === bucket))}
-                </View>
-              ))
-            : categoryChips(kindCategories)}
+      <View style={styles.date}>
+        <AppText variant="caption" color="textSecondary">
+          التاريخ
+        </AppText>
+        <PastDateField value={date} onChange={setDate} />
+      </View>
 
-          {type === 'expense' && (
-            <View style={styles.oneTime}>
-              <ChipRow>
-                <Chip label="مصروف لمرة واحدة" selected={oneTime} onPress={() => setOneTime((v) => !v)} />
-              </ChipRow>
-              <Text style={styles.hint}>مش بيدخل في متوسط المصروفات الشهري (زي تجهيز البيت)</Text>
+      {isGold && (
+        <GoldFields
+          weightText={weightText}
+          onWeightText={setWeightText}
+          karat={karat}
+          onKarat={setKarat}
+          location={goldLocation}
+          onLocation={setGoldLocation}
+          name={holdingName}
+          onName={setHoldingName}
+        />
+      )}
+
+      <MoreDetails initiallyOpen={detailsOpen}>
+        <FormField label="ملاحظة (اختياري)">
+          <FormInput value={note} onChangeText={setNote} placeholder="مثال: عشاء مع الأصحاب" multiline style={styles.note} />
+        </FormField>
+
+        {type === 'expense' && (
+          <View style={styles.switchRow}>
+            <Switch
+              value={oneTime}
+              onValueChange={setOneTime}
+              trackColor={{ true: colors.primary600, false: colors.borderStrong }}
+              thumbColor={colors.surface}
+              accessibilityLabel="مصروف لمرة واحدة"
+            />
+            <View style={styles.switchText}>
+              <AppText variant="bodyStrong">مصروف لمرة واحدة</AppText>
+              <AppText variant="caption" color="textSecondary">
+                بيتحسب في الشهر ده بس، ومش بيدخل في متوسطات الخطة.
+              </AppText>
             </View>
-          )}
-        </>
-      )}
+          </View>
+        )}
 
-      {/* Date */}
-      <FieldLabel>التاريخ</FieldLabel>
-      <PastDateField value={date} onChange={setDate} />
+        {recurringPrefill && (
+          <View style={styles.recurring}>
+            <Button label="خلّيها معاملة متكررة" variant="tertiary" icon="repeat" onPress={() => setRuleOpen(true)} />
+          </View>
+        )}
+      </MoreDetails>
 
-      {/* Note */}
-      <FieldLabel>ملاحظة (اختياري)</FieldLabel>
-      <FormInput value={note} onChangeText={setNote} placeholder="مثال: عشاء مع الأصحاب" />
-
-      {recurringPrefill && (
-        <TouchableOpacity style={styles.recurringBtn} onPress={() => setRuleOpen(true)} activeOpacity={0.8}>
-          <Text style={styles.recurringText}>خليها متكررة</Text>
-        </TouchableOpacity>
-      )}
       {ruleOpen && recurringPrefill && transaction && (
         <RuleSheet prefill={recurringPrefill} linkTransactionId={transaction.id} onClose={() => setRuleOpen(false)} />
       )}
 
       {transaction && (
-        <TouchableOpacity style={styles.deleteBtn} onPress={handleDelete} activeOpacity={0.8}>
-          <Text style={styles.deleteText}>حذف</Text>
-        </TouchableOpacity>
+        <View style={styles.delete}>
+          <Button label="احذف المعاملة" variant="destructive" icon="delete-outline" block onPress={handleDelete} />
+        </View>
       )}
     </FormSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  amountRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  amountInput: {
-    flex: 1,
-    fontSize: 28,
-    fontWeight: '700',
-    paddingVertical: 10,
-  },
-  currency: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: Colors.light.icon,
-  },
-  impact: {
-    marginTop: 6,
-    fontSize: 13,
-    color: FinanceColors.income,
-    textAlign: 'right',
-  },
-  impactOver: {
-    color: FinanceColors.expense,
-    fontWeight: '600',
-  },
-  fixedType: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: FinanceColors.gold,
-    textAlign: 'right',
-  },
-  oneTime: {
-    marginTop: 12,
-  },
-  bucket: {
-    marginBottom: 10,
-    gap: 6,
-  },
-  bucketTitle: {
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'right',
-  },
-  hint: {
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'right',
-    marginTop: 6,
-  },
-  recurringBtn: {
-    marginTop: 24,
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: Colors.light.tint + '15',
-  },
-  recurringText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: Colors.light.tint,
-  },
-  deleteBtn: {
-    marginTop: 32,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: FinanceColors.expense + '15',
-  },
-  deleteText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: FinanceColors.expense,
-  },
+  lockedType: { gap: space.xs, alignItems: 'flex-end' },
+  hint: { marginTop: space.sm },
+  date: { marginTop: space.lg, gap: space.sm },
+  note: { minHeight: 72, textAlignVertical: 'top' },
+  // RTL: text on the right, switch on the left.
+  switchRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.md, marginTop: space.lg },
+  switchText: { flex: 1, gap: 2 },
+  recurring: { marginTop: space.md },
+  delete: { marginTop: space.xxxl },
 });

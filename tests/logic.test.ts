@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import * as home from '@/components/dashboard/homeInsights';
+import * as txUi from '@/components/transactions/transactionUi';
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
 import { FinanceValidationError } from '@/store/errors';
@@ -63,7 +64,7 @@ import {
   unassignedEGP,
   unassignedEGPWithFundCash,
 } from '@/store/selectors';
-import type { FinanceState, Fund, RecurringRule } from '@/store/types';
+import type { FinanceState, Fund, RecurringRule, Transaction } from '@/store/types';
 import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
 import { formatDayLabel } from '@/utils/formatters';
@@ -2330,5 +2331,67 @@ describe('home: homeFunds', () => {
       home.upcomingItems(s, NOW).map((o) => `${o.rule.id}:${o.date}`),
       ['a:2026-10-20', 'b:2026-10-25', 'a:2026-10-27']
     );
+  });
+});
+
+// --- Transactions UI helpers (Calm Wealth phase 3) ------------------------------
+
+describe('transactions UI: quickCategories', () => {
+  const cats = (ids: string[]) => ids.map((id) => DEFAULT_CATEGORIES.find((c) => c.id === id)!);
+  const expense = DEFAULT_CATEGORIES.filter((c) => c.kind === 'expense');
+
+  it('puts the last-used category first and caps the quick chips at 6', () => {
+    const lastUsed = expense[8].id;
+    const { visible, hiddenCount } = txUi.quickCategories(expense, { lastUsedId: lastUsed });
+    assert.equal(visible.length, 6);
+    assert.equal(visible[0].id, lastUsed);
+    assert.deepEqual(
+      visible.slice(1).map((c) => c.id),
+      expense.filter((c) => c.id !== lastUsed).slice(0, 5).map((c) => c.id)
+    );
+    assert.equal(hiddenCount, expense.length - 6);
+  });
+
+  it('always shows the selected category, even past the cap', () => {
+    const selected = expense[expense.length - 1].id;
+    const { visible, hiddenCount } = txUi.quickCategories(expense, { selectedId: selected });
+    assert.equal(visible.length, 7);
+    assert.equal(visible[6].id, selected);
+    assert.equal(hiddenCount, expense.length - 7);
+    // An unknown last-used id (e.g. archived) is ignored.
+    assert.deepEqual(txUi.quickCategories(cats([expense[0].id, expense[1].id]), { lastUsedId: 'gone' }).visible.map((c) => c.id), [
+      expense[0].id,
+      expense[1].id,
+    ]);
+  });
+});
+
+describe('transactions UI: filters and titles', () => {
+  const txs = [
+    { type: 'expense' },
+    { type: 'income' },
+    { type: 'transfer' },
+    { type: 'asset_purchase' },
+    { type: 'expense' },
+  ] as unknown as Transaction[];
+
+  it('filters by type (ذهب = asset_purchase) and keeps all for الكل', () => {
+    assert.equal(txUi.filterTransactions(txs, 'all').length, 5);
+    assert.equal(txUi.filterTransactions(txs, 'expense').length, 2);
+    assert.equal(txUi.filterTransactions(txs, 'asset_purchase').length, 1);
+    assert.deepEqual(
+      txUi.FILTERS.map((f) => f.label),
+      ['الكل', 'مصروف', 'دخل', 'تحويل', 'ذهب']
+    );
+  });
+
+  it('words the empty-filter line per type', () => {
+    assert.equal(txUi.emptyFilterMessage('expense'), 'مفيش مصروفات في الشهر ده.');
+    assert.equal(txUi.emptyFilterMessage('asset_purchase'), 'مفيش مشتريات ذهب في الشهر ده.');
+  });
+
+  it('builds an RTL-safe "from ← to" transfer title', () => {
+    const RLM = String.fromCharCode(0x200f);
+    assert.equal(txUi.transferTitle('Cash SAR', 'بنك مصر'), `${RLM}Cash SAR${RLM} ← ${RLM}بنك مصر${RLM}`);
   });
 });

@@ -1,3 +1,5 @@
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import type { ComponentProps } from 'react';
 import { StyleSheet, TextInput, View } from 'react-native';
 
 import { colors, radius, space } from '@/constants/theme';
@@ -10,6 +12,7 @@ import { AppText } from './AppText';
 export interface AmountHint {
   tone: 'neutral' | 'attention';
   text: string;
+  icon?: ComponentProps<typeof MaterialIcons>['name'];
 }
 
 interface AmountInputProps {
@@ -60,6 +63,9 @@ export function AmountInput({
       </View>
       {hint && (
         <View style={[styles.hint, hint.tone === 'attention' && styles.hintAttention]}>
+          {hint.icon && (
+            <MaterialIcons name={hint.icon} size={16} color={hint.tone === 'attention' ? colors.warning : colors.primary700} />
+          )}
           <AppText variant="caption" color={hint.tone === 'attention' ? 'warning' : 'textSecondary'} align="center">
             {hint.text}
           </AppText>
@@ -71,17 +77,30 @@ export function AmountInput({
 
 const styles = StyleSheet.create({
   wrap: { alignItems: 'center', gap: space.sm, paddingVertical: space.md },
-  row: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'center', gap: space.sm },
+  // Stretched to the sheet width with a flexing input: a web <input> otherwise takes its
+  // intrinsic width (hundreds of px at 48px) and pushes the number off-screen.
+  row: { flexDirection: 'row', alignItems: 'baseline', alignSelf: 'stretch', gap: space.sm },
   input: {
     fontSize: 48,
     lineHeight: 58,
     fontWeight: '700',
     color: colors.text,
-    minWidth: 80,
+    flex: 1,
+    minWidth: 0,
     padding: 0,
+    // In the style too: react-native-web ignores the textAlign prop on inputs.
+    textAlign: 'center',
     fontVariant: ['tabular-nums'],
   },
   inputSmall: { fontSize: 40, lineHeight: 50 },
-  hint: { paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.pill },
+  // RTL: icon first, on the right.
+  hint: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: space.xs,
+    paddingHorizontal: space.md,
+    paddingVertical: space.xs,
+    borderRadius: radius.pill,
+  },
   hintAttention: { backgroundColor: colors.warningSurface },
 });

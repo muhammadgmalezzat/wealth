@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Chip, ChipRow } from '@/components/ui/Chip';
 import { DatePicker } from '@/components/ui/DatePicker';
 import { shiftDate, toDateKey } from '@/utils/dates';
-import { formatDate } from '@/utils/formatters';
+import { formatDateAr } from './formatDateAr';
 
 interface PastDateFieldProps {
   value: string; // 'YYYY-MM-DD'
@@ -22,7 +22,7 @@ export function PastDateField({ value, onChange }: PastDateFieldProps) {
       <ChipRow>
         <Chip label="النهارده" selected={value === today} onPress={() => onChange(today)} />
         <Chip label="امبارح" selected={value === yesterday} onPress={() => onChange(yesterday)} />
-        <Chip label={other ? formatDate(value) : 'تاريخ تاني'} selected={other} onPress={() => setPickerOpen(true)} />
+        <Chip label={other ? formatDateAr(value) : 'تاريخ تاني'} selected={other} onPress={() => setPickerOpen(true)} />
       </ChipRow>
       {pickerOpen && <DatePicker value={value} onChange={onChange} onClose={() => setPickerOpen(false)} />}
     </>
@@ -43,7 +43,7 @@ export function FutureDateField({ value, onChange, clearLabel }: FutureDateField
     <>
       <ChipRow>
         {clearLabel && <Chip label={clearLabel} selected={!value} onPress={() => onChange(undefined)} />}
-        <Chip label={value ? formatDate(value) : 'اختر تاريخ'} selected={!!value} onPress={() => setPickerOpen(true)} />
+        <Chip label={value ? formatDateAr(value) : 'اختر تاريخ'} selected={!!value} onPress={() => setPickerOpen(true)} />
       </ChipRow>
       {pickerOpen && (
         <DatePicker

@@ -25,12 +25,31 @@ interface ListRowProps {
   // Shows a chevron (pointing left, the "forward" direction in RTL).
   chevron?: boolean;
   archived?: boolean;
+  // Overrides the title color (e.g. textMuted for an archived category) without dimming the row.
+  titleColor?: ColorToken;
+  // Defaults to 2.
+  subtitleLines?: number;
+  // Under the subtitle: small status chips etc.
+  accessory?: ReactNode;
   onPress?: () => void;
   accessibilityLabel?: string;
 }
 
 // One row: [trailing][chevron] … [title / subtitle][icon tile] — reading order starts on the right.
-export function ListRow({ title, subtitle, icon, iconTone = 'neutral', trailing, chevron, archived, onPress, accessibilityLabel }: ListRowProps) {
+export function ListRow({
+  title,
+  subtitle,
+  icon,
+  iconTone = 'neutral',
+  trailing,
+  chevron,
+  archived,
+  titleColor,
+  subtitleLines = 2,
+  accessory,
+  onPress,
+  accessibilityLabel,
+}: ListRowProps) {
   const tone = ICON_TONES[iconTone];
   const body = (
     <>
@@ -40,14 +59,15 @@ export function ListRow({ title, subtitle, icon, iconTone = 'neutral', trailing,
         </View>
       )}
       <View style={styles.text}>
-        <AppText variant="bodyStrong" color={archived ? 'textSecondary' : 'text'} numberOfLines={1}>
+        <AppText variant="bodyStrong" color={titleColor ?? (archived ? 'textSecondary' : 'text')} numberOfLines={1}>
           {title}
         </AppText>
         {subtitle ? (
-          <AppText variant="secondary" color="textSecondary" numberOfLines={2}>
+          <AppText variant="secondary" color="textSecondary" numberOfLines={subtitleLines}>
             {subtitle}
           </AppText>
         ) : null}
+        {accessory}
       </View>
       {trailing}
       {chevron && <MaterialIcons name="chevron-left" size={22} color={colors.textSecondary} />}
