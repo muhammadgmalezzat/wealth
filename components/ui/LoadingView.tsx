@@ -1,11 +1,11 @@
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
-import { Colors } from '@/constants/theme';
+import { colors } from '@/constants/theme';
 
 export function LoadingView() {
   return (
     <View style={styles.container}>
-      <ActivityIndicator size="large" color={Colors.light.tint} />
+      <ActivityIndicator size="large" color={colors.primary700} />
     </View>
   );
 }
@@ -15,6 +15,6 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: Colors.light.background,
+    backgroundColor: colors.background,
   },
 });

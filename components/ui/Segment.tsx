@@ -1,6 +1,8 @@
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
-import { Colors, FinanceColors } from '@/constants/theme';
+import { colors, radius, shadow, space } from '@/constants/theme';
+
+import { AppText } from './AppText';
 
 export interface SegmentOption<T extends string> {
   label: string;
@@ -17,19 +19,24 @@ interface SegmentProps<T extends string> {
 // Generic segmented control. Options flow right-to-left, so the first one sits on the right.
 export function Segment<T extends string>({ options, value, onChange }: SegmentProps<T>) {
   return (
-    <View style={styles.segment}>
+    <View style={styles.segment} accessibilityRole="tablist">
       {options.map((opt) => {
         const active = opt.value === value;
         return (
-          <TouchableOpacity
+          <Pressable
             key={opt.value}
-            style={[styles.segmentItem, active && styles.segmentItemActive]}
+            style={[styles.item, active && styles.itemActive]}
             onPress={() => onChange(opt.value)}
-            activeOpacity={0.75}>
-            <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+            accessibilityRole="tab"
+            accessibilityState={{ selected: active }}>
+            <AppText
+              variant="secondary"
+              color={active ? 'primary800' : 'textSecondary'}
+              align="center"
+              style={active && styles.textActive}>
               {opt.label}
-            </Text>
-          </TouchableOpacity>
+            </AppText>
+          </Pressable>
         );
       })}
     </View>
@@ -39,33 +46,17 @@ export function Segment<T extends string>({ options, value, onChange }: SegmentP
 const styles = StyleSheet.create({
   segment: {
     flexDirection: 'row-reverse',
-    backgroundColor: FinanceColors.cardBackground,
-    borderRadius: 10,
+    backgroundColor: colors.surfaceSubtle,
+    borderRadius: radius.md,
     padding: 3,
-    borderWidth: 1,
-    borderColor: FinanceColors.progressTrack,
   },
-  segmentItem: {
+  item: {
     flex: 1,
-    paddingVertical: 8,
-    alignItems: 'center',
-    borderRadius: 8,
+    minHeight: 38,
+    justifyContent: 'center',
+    paddingHorizontal: space.xs,
+    borderRadius: radius.md - 3,
   },
-  segmentItemActive: {
-    backgroundColor: Colors.light.background,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 2,
-    elevation: 1,
-  },
-  segmentText: {
-    fontSize: 14,
-    color: Colors.light.icon,
-    fontWeight: '500',
-  },
-  segmentTextActive: {
-    color: Colors.light.tint,
-    fontWeight: '700',
-  },
+  itemActive: { backgroundColor: colors.surface, ...shadow.card },
+  textActive: { fontWeight: '700' },
 });

@@ -1,7 +1,7 @@
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { Colors } from '@/constants/theme';
+import { colors, space, type } from '@/constants/theme';
 import { shiftMonth } from '@/utils/dates';
 import { formatMonthLabel } from '@/utils/formatters';
 
@@ -14,12 +14,12 @@ interface MonthSwitcherProps {
 export function MonthSwitcher({ month, onChange }: MonthSwitcherProps) {
   return (
     <View style={styles.row}>
-      <TouchableOpacity onPress={() => onChange(shiftMonth(month, 1))} hitSlop={10} accessibilityLabel="الشهر التالي">
-        <MaterialIcons name="chevron-left" size={28} color={Colors.light.tint} />
+      <TouchableOpacity onPress={() => onChange(shiftMonth(month, 1))} hitSlop={10} style={styles.arrow} accessibilityLabel="الشهر التالي">
+        <MaterialIcons name="chevron-left" size={28} color={colors.primary700} />
       </TouchableOpacity>
       <Text style={styles.label}>{formatMonthLabel(month)}</Text>
-      <TouchableOpacity onPress={() => onChange(shiftMonth(month, -1))} hitSlop={10} accessibilityLabel="الشهر السابق">
-        <MaterialIcons name="chevron-right" size={28} color={Colors.light.tint} />
+      <TouchableOpacity onPress={() => onChange(shiftMonth(month, -1))} hitSlop={10} style={styles.arrow} accessibilityLabel="الشهر السابق">
+        <MaterialIcons name="chevron-right" size={28} color={colors.primary700} />
       </TouchableOpacity>
     </View>
   );
@@ -30,11 +30,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 16,
+    marginBottom: space.lg,
   },
+  arrow: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   label: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: Colors.light.text,
+    ...type.title,
+    color: colors.text,
   },
 });

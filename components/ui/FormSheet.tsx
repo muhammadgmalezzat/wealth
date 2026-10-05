@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Colors, FinanceColors } from '@/constants/theme';
+import { colors, opacity, radius, space, type } from '@/constants/theme';
 
 // Page-sheet modal with cancel / title / save header, shared by the app's edit forms.
 // Safe area: on Android the modal is a full-screen window drawn under the status and navigation
@@ -59,11 +59,18 @@ export function FormSheet({
         style={[styles.root, { paddingTop: insets.top }]}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={onCancel} hitSlop={8}>
+          <TouchableOpacity onPress={onCancel} hitSlop={12} accessibilityRole="button">
             <Text style={styles.cancel}>إلغاء</Text>
           </TouchableOpacity>
-          <Text style={styles.title}>{title}</Text>
-          <TouchableOpacity onPress={onSave} disabled={saveDisabled} hitSlop={8}>
+          <Text style={styles.title} numberOfLines={1}>
+            {title}
+          </Text>
+          <TouchableOpacity
+            onPress={onSave}
+            disabled={saveDisabled}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: saveDisabled }}>
             <Text style={[styles.save, saveDisabled && styles.saveDisabled]}>{saveLabel}</Text>
           </TouchableOpacity>
         </View>
@@ -85,7 +92,7 @@ export function FieldLabel({ children }: { children: ReactNode }) {
 export function FormInput(props: TextInputProps) {
   return (
     <TextInput
-      placeholderTextColor={Colors.light.icon}
+      placeholderTextColor={colors.textMuted}
       textAlign="right"
       {...props}
       style={[styles.input, props.style]}
@@ -96,59 +103,60 @@ export function FormInput(props: TextInputProps) {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: Colors.light.background,
+    backgroundColor: colors.background,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
+    gap: space.md,
+    minHeight: 56,
+    paddingHorizontal: space.xl,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: FinanceColors.progressTrack,
+    borderBottomColor: colors.border,
   },
   title: {
-    fontSize: 17,
+    flexShrink: 1,
+    fontSize: 18,
+    lineHeight: 26,
     fontWeight: '700',
-    color: Colors.light.text,
+    color: colors.text,
   },
   cancel: {
-    fontSize: 16,
-    color: Colors.light.icon,
+    ...type.body,
+    color: colors.textSecondary,
   },
   save: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: Colors.light.tint,
+    ...type.bodyStrong,
+    color: colors.primary700,
   },
   saveDisabled: {
-    opacity: 0.4,
+    opacity: opacity.disabled,
   },
   scroll: {
     flex: 1,
   },
   body: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 40,
-    gap: 4,
+    paddingHorizontal: space.xl,
+    paddingTop: space.xl,
+    gap: space.xs,
   },
   fieldLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: Colors.light.icon,
+    ...type.caption,
+    color: colors.textSecondary,
     textAlign: 'right',
     marginBottom: 6,
-    marginTop: 16,
+    marginTop: space.lg,
   },
   input: {
+    minHeight: 48,
     borderWidth: 1,
-    borderColor: FinanceColors.progressTrack,
-    borderRadius: 10,
+    borderColor: colors.borderStrong,
+    borderRadius: radius.md,
     paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 15,
-    color: Colors.light.text,
-    backgroundColor: FinanceColors.cardBackground,
+    paddingVertical: 10,
+    ...type.body,
+    color: colors.text,
+    backgroundColor: colors.surface,
   },
 });

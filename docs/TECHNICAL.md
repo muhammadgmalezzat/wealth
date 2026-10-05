@@ -116,7 +116,10 @@ components/
                             labels.ts (Arabic frequency / mode / section labels)
   settings/                 ExportSheet, RestoreSheet
   transactions/             TransactionRow (shared row), TransactionSheet (add/edit)
-  ui/                       Screen (outer layout + safe area), Fab, Card, Chip/ChipRow,
+  ui/                       Design-system primitives: AppText, Card, Button, Chip/ChipRow,
+                            StatusChip, Segment, ProgressBar, Money, AmountInput, FormField,
+                            ListRow/ListGroup, SectionHeader, InsightCard, EmptyState;
+                            Screen (outer layout + safe area), Fab,
                             DateFields (Past/Future), DatePicker(.web), FormSheet/FieldLabel/
                             FormInput, LoadingView, MonthSwitcher, ProgressBar, Segment,
                             StatCard, icon-symbol(.ios), CurrencyText
@@ -149,7 +152,7 @@ utils/
   notifications(.web).ts    Local due reminders (permission, channel, schedule/cancel); web no-ops
   id.ts                     newId() = expo-crypto randomUUID
 
-constants/                  theme.ts (colors), currencies.ts (DEFAULT_RATES), market.ts
+constants/                  theme.ts (design tokens), currencies.ts (DEFAULT_RATES), market.ts
 tests/logic.test.ts         126 tests over store/* and utils/*
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
@@ -212,6 +215,63 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 | `/recurring` | (stack) | "جاي خلال 30 يوم" (up to 12 items + income/expense totals per currency); sections دخل / مصروفات / تحويلات; each rule shows mode badge (تلقائي / بتأكيد), amount ("تقريباً" if variable), Arabic frequency, account(s), next date / متوقف / انتهى, and a pause/resume switch; tap → RuleSheet (edit/delete); "+" FAB → RuleSheet (new). |
 | `/due` | (stack) | Due inbox for `confirm` rules: "فات ومتسجلش" (missed, earlier months) listed first, then "المستحق الشهر ده", each oldest first with a count; each item has **تم** (ConfirmOccurrenceSheet: amount, received amount for cross-currency transfers, account, date, note) and **تخطّي**. |
 | `/categories` | (stack) | Sections مصروفات (by bucket: أساسيات / رفاهيات / عطاء) and دخل with active categories ("أساسي" badge on defaults), then مؤرشفة; tap → CategorySheet (rename; bucket for expenses; أرشفة / استرجاع / حذف); "+" FAB → CategorySheet (name, مصروف/دخل, bucket required for expenses). |
+
+### Design system (Calm Wealth)
+
+Phase 1 of the Calm Wealth redesign: tokens + shared primitives. Screens are migrated in later
+phases; until then they keep using the deprecated aliases below.
+
+**Tokens (`constants/theme.ts`)** — components read these, never raw hex.
+- `palette.light` → `colors` (type `ThemeColors`, keys = `ColorToken`); `colors` is the single
+  switch point for a future dark palette. Grounds: `background` #F8F7F3, `surface` #FFFFFF,
+  `surfaceSubtle`, `border`, `borderStrong`, `progressTrack`. Text: `text`, `textSecondary`,
+  `textMuted` (placeholders/disabled only — fails 4.5:1). Brand green `primary900…primary50`,
+  `onPrimary`. Gold: `gold`, `goldSurface`, `goldText`. States: `warning`/`warningSurface`,
+  `danger`/`dangerSurface`. `scrim`.
+- `space` xs 4 · sm 8 · md 12 · lg 16 · xl 20 · xxl 24 · xxxl 32 · huge 40.
+- `radius` sm 8 · md 12 · lg 16 · xl 24 · pill 999.
+- `type` (alias `typography`; keys = `TypeVariant`): moneyHero 34/44, moneyLg 24/32, moneyMd
+  18/26, moneyRow 16/24, display 32/42, titleLg 26/36, title 22/30, section 18/26, body 16/26,
+  bodyStrong 16/26 600, secondary 14/22, caption 13/20, micro 12/18. Money styles are rendered
+  with `fontVariant: ['tabular-nums']`.
+- `shadow.card`, `shadow.raised`; `opacity` pressed 0.85 / disabled 0.4; `size` touchMin 44,
+  fab 56, icon 24, progress 8. System fonts only; icons = MaterialIcons (+ `IconSymbol`).
+- **Deprecated aliases** (`Colors`, `FinanceColors`, `Fonts`), removed in phase 7:
+  `Colors.light.text/background` → text/background, `tint`/`tabIconSelected` → primary700,
+  `icon`/`tabIconDefault` → textSecondary, `Colors.dark` = light; `FinanceColors.primary/income` →
+  primary700, `expense` → danger, `gold` → gold, `progressTrack`, `cardBackground` → surfaceSubtle.
+  They stay 6-digit hex because old call sites append alpha suffixes (`tint + '22'`).
+
+**RTL approach (one rule everywhere).** The app never enables `I18nManager` RTL (Expo's
+`supportsRTL` is off), so the layout engine is always LTR and Arabic is laid out explicitly:
+rows that read right-to-left use `flexDirection: 'row-reverse'` (first child = rightmost =
+reading start), text uses `textAlign: 'right'` + `writingDirection: 'rtl'` (AppText default),
+progress fills from the right, and "forward" chevrons point left (`chevron-left`). Money is
+wrapped in a left-to-right isolate (U+2066…U+2069) so "ر.س 1,250" and its sign never get
+reordered inside Arabic text. Inputs of numbers stay LTR (AmountInput).
+
+**Primitives (`components/ui/`)** — each reads only tokens.
+
+| Component | Props | Notes |
+|---|---|---|
+| `AppText` | `variant` (TypeVariant, default body), `color` (ColorToken, default text), `align` (default right), + Text props | Base of all primitives |
+| `Card` | `variant` default \| subtle \| hero, `style` | default: surface, 1px border, radius.lg, padding lg, shadow.card · subtle: surfaceSubtle, flat · hero: radius.xl, padding xl |
+| `Button` | `label`, `onPress`, `variant` primary \| secondary \| tertiary \| destructive, `icon?`, `disabled`, `loading`, `block` | minHeight 48, radius.md; primary pressed → primary900 |
+| `Chip` / `ChipRow` | `label`, `selected`, `disabled`, `onPress` | pill, minHeight 36 + hitSlop → 44; selected primary50 / primary700 border / primary800 semibold |
+| `StatusChip` | `label` (required), `tone` ok \| attention \| danger \| gold \| neutral, `icon?` | Status never by color alone |
+| `Segment` | `options`, `value` (may be undefined), `onChange` | Track surfaceSubtle, active surface + shadow.card + primary800 bold |
+| `ProgressBar` | `progress`, `tone` normal \| attention \| over, `goldPortion?`, `height` (+ deprecated `color`, `backgroundColor`) | Fills primary600 / warning / danger; gold part first |
+| `Money` (+ `formatMoney`) | `amount`, `currency`, `size` hero \| lg \| md \| row, `tone` default \| positive \| danger \| muted, `showSign?`, `converted?` {amount, currency}, `align` | Never colored by sign; tabular nums; LTR isolate |
+| `AmountInput` | `value`, `onChangeText`, `onChangeAmount?` (parseAmount), `currency`, `hint?` {tone neutral \| attention, text}, `allowZero`, `autoFocus` | 48 (40 when long) bold, centred |
+| `FormField` | `label`, `helper?`, `error?`, children (input) | Error: danger border + dangerSurface + icon + text. `FormInput`/`FieldLabel` in FormSheet share the look: borderStrong, radius.md, minHeight 48, body, placeholder textMuted |
+| `ListRow` / `ListGroup` | `title`, `subtitle?`, `icon?`, `iconTone` neutral \| ok \| gold, `trailing?`, `chevron?`, `archived?`, `onPress?` | 36px icon tile, minHeight 56; group = surface, radius.lg, border, hairline separators |
+| `SectionHeader` | `title`, `actionLabel?`, `onAction?` | section type + tertiary action |
+| `InsightCard` | `tone` ok \| attention \| danger, `message`, `icon?`, `actionLabel?`, `onAction?` | Grounds primary50 / warningSurface / dangerSurface |
+| `EmptyState` | `icon`, `title`, `body?`, `actionLabel?`, `onAction?` | Icon disc + primary Button |
+| `Fab` | unchanged API (`placement`, `FAB_CLEARANCE`) | primary700, pill, shadow.raised |
+| `FormSheet` | unchanged API (`useSheetInsets`) | background ground, hairline header, title 18 bold, cancel textSecondary, save primary700 |
+| `Screen` | unchanged | background = colors.background |
+| `StatCard`, `CurrencyText`, `LoadingView`, `MonthSwitcher` | unchanged (StatCard `accentColor` now ignored) | Tokens; StatCard is a plain metric tile |
 
 ---
 

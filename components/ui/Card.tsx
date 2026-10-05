@@ -1,23 +1,37 @@
-﻿import { StyleSheet, View, ViewStyle } from 'react-native';
+import type { ReactNode } from 'react';
+import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
+
+import { colors, radius, shadow, space } from '@/constants/theme';
+
+export type CardVariant = 'default' | 'subtle' | 'hero';
 
 interface CardProps {
-  children: React.ReactNode;
-  style?: ViewStyle;
+  children: ReactNode;
+  variant?: CardVariant;
+  style?: StyleProp<ViewStyle>;
 }
 
-export function Card({ children, style }: CardProps) {
-  return <View style={[styles.card, style]}>{children}</View>;
+// default: surface + hairline border + soft shadow · subtle: tinted ground, flat · hero: larger
+// radius and padding for the one headline card of a screen.
+export function Card({ children, variant = 'default', style }: CardProps) {
+  return <View style={[styles.base, styles[variant], style]}>{children}</View>;
 }
 
 const styles = StyleSheet.create({
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+  base: { borderRadius: radius.lg, padding: space.lg },
+  default: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    ...shadow.card,
+  },
+  subtle: { backgroundColor: colors.surfaceSubtle },
+  hero: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.xl,
+    padding: space.xl,
+    ...shadow.card,
   },
 });

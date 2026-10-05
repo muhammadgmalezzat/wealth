@@ -2,7 +2,7 @@ import type { ReactElement, ReactNode } from 'react';
 import { ScrollView, StyleSheet, View, type RefreshControlProps, type StyleProp, type ViewStyle } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Colors } from '@/constants/theme';
+import { colors } from '@/constants/theme';
 
 // The only way routes set their outer layout (edge-to-edge is always on in SDK 57).
 //
@@ -12,6 +12,7 @@ import { Colors } from '@/constants/theme';
 // - Stack screens: the native header (titles in app/_layout.tsx) handles the top inset, so
 //   edges={['bottom']} — nothing sits under the Android navigation bar / iOS home indicator.
 // - Floating buttons go in `overlay` (see Fab), so they don't scroll with the content.
+// Background = colors.background.
 export type ScreenEdge = 'top' | 'bottom';
 
 interface ScreenProps {
@@ -55,6 +56,6 @@ export function Screen({ scroll = false, edges = ['top'], contentStyle, refreshC
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: Colors.light.background },
+  root: { flex: 1, backgroundColor: colors.background },
   fill: { flex: 1 },
 });

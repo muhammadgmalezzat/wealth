@@ -6,6 +6,34 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 1
+
+Calm Wealth — phase 1: design tokens + shared UI primitives (no screen changes).
+
+> JS-only (ships with `eas update` to 1.1.0 builds). No store, data, schema or native changes.
+
+**For users**
+- New calmer palette (warm off-white ground, deep green, gold) shows through the existing
+  screens via the shared components: cards, chips, segmented controls, progress bars, form
+  sheets and inputs, the "+" button and the month switcher. Metric tiles lose their colored top
+  strip. Screen layouts are unchanged; they are redesigned one by one in the next phases.
+
+**Technical**
+- `constants/theme.ts` rewritten: `palette` / `colors` (`ThemeColors`, `ColorToken`), `space`,
+  `radius`, `type` (+ `typography`, `TypeVariant`), `shadow`, `opacity`, `size`. `Colors`,
+  `FinanceColors`, `Fonts` kept as deprecated aliases mapped onto the tokens (removal: phase 7).
+- New primitives in `components/ui/`: `AppText`, `Button`, `StatusChip`, `Money` (+
+  `formatMoney`), `AmountInput`, `FormField`, `ListRow` / `ListGroup`, `SectionHeader`,
+  `InsightCard`, `EmptyState`.
+- Refactored on tokens (same APIs): `Card` (+ `variant`), `Chip`, `Segment`, `ProgressBar`
+  (+ `tone`, `goldPortion`; `color`/`backgroundColor` deprecated), `FormSheet` (+ `FormInput`,
+  `FieldLabel`), `Fab`, `Screen`, `StatCard` (`accentColor` ignored), `CurrencyText`,
+  `LoadingView`, `MonthSwitcher`. Safe-area logic untouched.
+- RTL rule documented: LTR layout engine + explicit `row-reverse` / right-aligned text /
+  LTR-isolated money.
+
+---
+
 ## Unreleased (2026-10-03) — 1.1.0 · data v6 (OTA update) · safe areas
 
 > JS-only (ships with `eas update` to 1.1.0 builds). No data or native changes.

@@ -1,28 +1,34 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet } from 'react-native';
 
 import { Card } from '@/components/ui/Card';
-import { Colors } from '@/constants/theme';
+import { colors, space } from '@/constants/theme';
 import { formatCurrency } from '@/utils/formatters';
+
+import { AppText } from './AppText';
 
 interface StatCardProps {
   label: string;
   amountEGP: number;
-  accentColor: string;
-  // Overrides the default text color of the amount (e.g. green/red for a net figure).
+  /** @deprecated ignored — plain metric look (no colored accent). */
+  accentColor?: string;
+  // Overrides the default text color of the amount (e.g. for a net figure).
   amountColor?: string;
 }
 
-export function StatCard({ label, amountEGP, accentColor, amountColor }: StatCardProps) {
+// Small metric tile: amount on top, label underneath. Replaced on Home in phase 2.
+export function StatCard({ label, amountEGP, amountColor }: StatCardProps) {
   return (
     <Card style={styles.card}>
-      <View style={[styles.accent, { backgroundColor: accentColor }]} />
-      <Text
+      <AppText
+        variant="moneyRow"
         style={[styles.amount, amountColor ? { color: amountColor } : null]}
         numberOfLines={1}
         adjustsFontSizeToFit>
         {formatCurrency(amountEGP, 'EGP')}
-      </Text>
-      <Text style={styles.label}>{label}</Text>
+      </AppText>
+      <AppText variant="micro" color="textSecondary">
+        {label}
+      </AppText>
     </Card>
   );
 }
@@ -30,31 +36,10 @@ export function StatCard({ label, amountEGP, accentColor, amountColor }: StatCar
 const styles = StyleSheet.create({
   card: {
     flex: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 12,
-    overflow: 'hidden',
     minWidth: 0,
+    paddingHorizontal: space.md,
+    paddingVertical: space.md,
+    gap: 2,
   },
-  accent: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 3,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-  },
-  amount: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: Colors.light.text,
-    marginTop: 8,
-    textAlign: 'right',
-  },
-  label: {
-    fontSize: 11,
-    color: Colors.light.icon,
-    marginTop: 3,
-    textAlign: 'right',
-  },
+  amount: { fontVariant: ['tabular-nums'], color: colors.text },
 });

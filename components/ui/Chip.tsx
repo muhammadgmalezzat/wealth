@@ -1,7 +1,9 @@
 import type { ReactNode } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
-import { Colors, FinanceColors } from '@/constants/theme';
+import { colors, opacity, radius, space } from '@/constants/theme';
+
+import { AppText } from './AppText';
 
 interface ChipProps {
   label: string;
@@ -10,51 +12,46 @@ interface ChipProps {
   onPress: () => void;
 }
 
-// Pill-shaped toggle used for filters and pickers.
+// Pill-shaped toggle used for filters and pickers. Visual height 36, touch target 44.
 export function Chip({ label, selected = false, disabled = false, onPress }: ChipProps) {
   return (
-    <TouchableOpacity
+    <Pressable
       onPress={onPress}
       disabled={disabled}
-      activeOpacity={0.75}
-      style={[styles.chip, selected && styles.chipSelected, disabled && styles.chipDisabled]}>
-      <Text style={[styles.label, selected && styles.labelSelected]}>{label}</Text>
-    </TouchableOpacity>
+      hitSlop={4}
+      accessibilityRole="button"
+      accessibilityState={{ selected, disabled }}
+      style={({ pressed }) => [
+        styles.chip,
+        selected && styles.chipSelected,
+        pressed && styles.pressed,
+        disabled && styles.disabled,
+      ]}>
+      <AppText variant="secondary" color={selected ? 'primary800' : 'text'} align="center" style={selected && styles.labelSelected}>
+        {label}
+      </AppText>
+    </Pressable>
   );
 }
 
-// Right-aligned wrapping row of chips.
+// Right-aligned wrapping row of chips (first chip on the right).
 export function ChipRow({ children }: { children: ReactNode }) {
   return <View style={styles.row}>{children}</View>;
 }
 
 const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'row-reverse',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
+  row: { flexDirection: 'row-reverse', flexWrap: 'wrap', gap: space.sm },
   chip: {
+    minHeight: 36,
+    justifyContent: 'center',
     paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 18,
+    borderRadius: radius.pill,
     borderWidth: 1,
-    borderColor: FinanceColors.progressTrack,
-    backgroundColor: FinanceColors.cardBackground,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
   },
-  chipSelected: {
-    backgroundColor: Colors.light.tint,
-    borderColor: Colors.light.tint,
-  },
-  chipDisabled: {
-    opacity: 0.35,
-  },
-  label: {
-    fontSize: 14,
-    color: Colors.light.text,
-  },
-  labelSelected: {
-    color: '#fff',
-    fontWeight: '600',
-  },
+  chipSelected: { backgroundColor: colors.primary50, borderColor: colors.primary700 },
+  labelSelected: { fontWeight: '600' },
+  pressed: { opacity: opacity.pressed },
+  disabled: { opacity: opacity.disabled },
 });
