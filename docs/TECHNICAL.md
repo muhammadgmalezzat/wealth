@@ -104,7 +104,8 @@ components/
   RecurringRunner.tsx       Invisible: processDue after hydration / on foreground; syncs reminders
   assets/EditAccountSheet   Edit account name + "current balance"
   categories/CategorySheet  Add / edit / archive / restore / delete a category
-  dashboard/                NetWorthCard, SafeToSpendCard, RecurringCard, BackupReminder
+  dashboard/                SafeToSpendCard, MonthlySnapshot, RecurringCard (جاي قريب),
+                            NetWorthCard, BackupReminder, homeInsights.ts (pure Home logic)
   funds/                    FundCard, FundSheet (create/edit), AssignSheet (وزّعها),
                             CoverSheet (غطّيها), MoveMoneySheet (إضافة/سحب),
                             PaySinkingSheet (اتدفعت), UnassignedPanel, labels.ts
@@ -205,7 +206,7 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 
 | Route | Tab title | What it does |
 |---|---|---|
-| `/` (`index`) | الرئيسية | Gear → Settings; backup reminder banner; net worth card + Egypt/Saudi split; **Safe to spend** card (or "اعمل خطة الشهر"); **RecurringCard** ("عندك X مستحقات" → `/due`, "جاي الأسبوع ده" with the next 3 items → `/recurring`); "فلوس بدون وظيفة" panel with وزّعها/غطّيها; stat cards (سيولة / استثمارات / صافي الشهر); funds list (→ fund detail); last 5 transactions (tap to edit) and "+ معاملة". |
+| `/` (`index`) | الرئيسية | Calm Wealth Home (see "Home" below): greeting + date + settings icon; safe to spend (hero) → /plan; one next-best-action insight; هذا الشهر snapshot → /transactions; جاي قريب → /recurring, /due; up to 3 funds → /fund/[id], "عرض كل الصناديق" → /goals; money available to plan (Assign/Cover sheets); net worth; backup nudge → /settings?export=1; last 5 transactions (tap to edit, "+ معاملة"). |
 | `/transactions` | المعاملات | Month switcher, income/expense/net cards, filter chips (الكل/مصروف/دخل/تحويل/ذهب), SectionList grouped by day with day net, empty state, "+" FAB → TransactionSheet. |
 | `/plan` | الخطة | Month switcher; empty state (اقترح من مصروفي / انسخ خطة … / ابدأ من الصفر); income + unplanned header; lines by bucket with progress; fund contributions vs allocated; off-plan spending; planned/spent/remaining summary; "تعديل" → PlanEditorSheet (tap a line → LineSheet; "+ أضف بند" → AddLineSheet, whose "إدارة البنود" asks to discard unsaved edits, closes the editor and opens `/categories`); "المعاملات المتكررة ‹" link → `/recurring`. |
 | `/assets` | الأصول | Summary (إجمالي الأصول / السيولة / الاستثمارات); accounts (tap → EditAccountSheet, delete); holdings with P&L (delete); "+" → add account (cash/bank/wallet) or gold (opening asset). |
@@ -261,7 +262,7 @@ reordered inside Arabic text. Inputs of numbers stay LTR (AmountInput).
 | `StatusChip` | `label` (required), `tone` ok \| attention \| danger \| gold \| neutral, `icon?` | Status never by color alone |
 | `Segment` | `options`, `value` (may be undefined), `onChange` | Track surfaceSubtle, active surface + shadow.card + primary800 bold |
 | `ProgressBar` | `progress`, `tone` normal \| attention \| over, `goldPortion?`, `height` (+ deprecated `color`, `backgroundColor`) | Fills primary600 / warning / danger; gold part first |
-| `Money` (+ `formatMoney`) | `amount`, `currency`, `size` hero \| lg \| md \| row, `tone` default \| positive \| danger \| muted, `showSign?`, `converted?` {amount, currency}, `align` | Never colored by sign; tabular nums; LTR isolate |
+| `Money` (+ `formatMoney` in pure `formatMoney.ts`) | `amount`, `currency`, `size` hero \| lg \| md \| row, `tone` default \| positive \| danger \| muted, `showSign?`, `converted?` {amount, currency}, `align` | Never colored by sign; tabular nums; `LRI` + symbol + `LRM` + sign + number + `PDI` (the LRM keeps "−1,250" together: digits after the Arabic symbol would otherwise resolve as Arabic numbers and the minus would jump to their right) |
 | `AmountInput` | `value`, `onChangeText`, `onChangeAmount?` (parseAmount), `currency`, `hint?` {tone neutral \| attention, text}, `allowZero`, `autoFocus` | 48 (40 when long) bold, centred |
 | `FormField` | `label`, `helper?`, `error?`, children (input) | Error: danger border + dangerSurface + icon + text. `FormInput`/`FieldLabel` in FormSheet share the look: borderStrong, radius.md, minHeight 48, body, placeholder textMuted |
 | `ListRow` / `ListGroup` | `title`, `subtitle?`, `icon?`, `iconTone` neutral \| ok \| gold, `trailing?`, `chevron?`, `archived?`, `onPress?` | 36px icon tile, minHeight 56; group = surface, radius.lg, border, hairline separators |
@@ -272,6 +273,88 @@ reordered inside Arabic text. Inputs of numbers stay LTR (AmountInput).
 | `FormSheet` | unchanged API (`useSheetInsets`) | background ground, hairline header, title 18 bold, cancel textSecondary, save primary700 |
 | `Screen` | unchanged | background = colors.background |
 | `StatCard`, `CurrencyText`, `LoadingView`, `MonthSwitcher` | unchanged (StatCard `accentColor` now ignored) | Tokens; StatCard is a plain metric tile |
+
+Pure date helper: `components/ui/formatDateAr.ts` → `formatDateAr(dateKey|iso, {year})` ("٥ أكتوبر ٢٠٢٦");
+used by redesigned components instead of `utils/formatters.formatDate` (which prints English
+month names).
+
+### Navigation theme & tab bar (Calm Wealth phase 2)
+
+- `app/_layout.tsx` passes a light React Navigation theme built from tokens (`background` and
+  `card` = colors.background, `text`, `border`, `primary` = primary700); the color-scheme hook is
+  no longer used (light only). Header titles and back behavior unchanged.
+- `app/(tabs)/_layout.tsx`: same 5 tabs, order and `HapticTab`; bar on colors.background, hairline
+  top border, no elevation/shadow; active primary700, inactive textSecondary; labels
+  `type.micro` size/weight (no fixed lineHeight — it clipped Arabic glyphs); icons 24
+  (`size.icon`). Web only: bar height 58 + bottom padding 6 (web has no bottom inset and the
+  default 48px clipped the labels' descent).
+- Icons (`components/ui/icon-symbol.tsx` mapping, SF Symbol → Material): house.fill → home,
+  list.bullet.rectangle → receipt-long, calendar → event-note, wallet.pass →
+  account-balance-wallet, target → track-changes.
+
+### Home (Calm Wealth phase 2)
+
+One question: *what should I know / do now?* Daily decisions first, long-term figures after.
+Content padding `space.lg`, section gap `space.xxl`. Order (`app/(tabs)/index.tsx`):
+
+1. **Header** — "صباح الخير" (before 12:00) / "مساء الخير", ar-EG date without year,
+   settings icon button (textSecondary, 44pt, label "الإعدادات").
+2. **SafeToSpendCard** (hero) — `safeToSpend` in the plan currency (Money hero, text color),
+   "حتى نهاية الشهر · حوالي {safeToSpendToday} يومياً", StatusChip ok "خطتك ماشية كويس" or
+   attention "في بند محتاج انتباه" + "صرف {lines} عدى الخطة" (`overspentLines`). No plan →
+   explanation + primary "اعمل خطة الشهر" → /plan (never a 0). Tap → /plan.
+3. **Next best action** — at most one `InsightCard` from `nextBestAction` (table below); nothing
+   when null. When null and a backup is due, the backup nudge takes this slot.
+4. **MonthlySnapshot** — "هذا الشهر": دخل / مصروف / صافي from `monthSummary` (EGP) in one
+   grouped surface; expense in text color; net positive (+) green, negative "−" plain. Tap or
+   "كل المعاملات" → /transactions. Replaces the three StatCards (StatCard is still used by the
+   Transactions and Assets tabs).
+5. **جاي قريب** (`RecurringCard`) — up to 3 `upcomingItems` as ListRows (name, day label or "بعد
+   N أيام", amount; income rows green tile). Header action "الكل" → /recurring; a calm warning
+   link "عندك N … · راجعهم" → /due when confirm items are due and the insight isn't already
+   about them. Hidden without content.
+6. **الصناديق** — up to 3 `homeFunds` as FundCards; "عرض كل الصناديق" → /goals; subtle hint when
+   there are none.
+7. **UnassignedPanel** — positive: "فلوس متاحة للتخطيط" + "وزّع أموالك" (AssignSheet); negative:
+   dangerSurface card "استخدمت جزء من فلوس الصناديق." + "غطّي الفرق" (CoverSheet) — the only
+   danger styling on Home; zero: nothing. Hidden when the insight is `cover`/`assign`.
+8. **NetWorthCard** — "صافي الثروة" (Money lg), مصر / السعودية lines (`netWorthByLocation`),
+   سيولة / ذهب واستثمارات (gold dot) on a subtle strip.
+9. **BackupReminder** — InsightCard attention "يفضل تعمل نسخة احتياطية…" + "تصدير نسخة" →
+   /settings?export=1; same 7-day rule (`needsBackupReminder`); here only when an insight took
+   the top slot.
+10. **آخر المعاملات** — 5 `recentTransactions` in a ListGroup of TransactionRows ("+ معاملة" opens
+    TransactionSheet; tap a row to edit); EmptyState "لسه مسجلتش معاملات." + "سجّل معاملة".
+
+**`components/dashboard/homeInsights.ts`** (pure; unit-tested) — `nextBestAction(state, now)`:
+
+| # | Condition | Tone | Message | Action |
+|---|---|---|---|---|
+| 1 | `unassignedEGP < −0.005` | danger | استخدمت جزء من فلوس الصناديق. | غطّي الفرق → CoverSheet |
+| 2 | `dueOccurrences(today, 'confirm')` not empty | attention | عندك {N: مستحق واحد / مستحقين / N مستحقات / N مستحق} محتاج… مراجعة. | راجعهم → /due |
+| 3 | first of `upcoming(3 days)` | attention | {name} مستحق خلال {يوم / يومين / N أيام}. | راجع المستحقات → /recurring |
+| 4 | first fund (priority order) with `fundStatus = behind` and `fundRequiredMonthly > 0` | attention | {fund} محتاج {amount} هذا الشهر عشان يفضل على المسار. | خصص الآن → /fund/[id] |
+| 5 | `unassignedEGP > 0.005` | ok | عندك {amount} لسه محتاجة تتوزع. | وزّع أموالك → AssignSheet |
+| — | otherwise | | null | |
+
+`homeFunds(state, now, max = 3)`: behind first, then nearest due date (funds with a due date
+before those without), then `fundsByPriority` order. `upcomingItems(state, now, max = 3)`: the
+first items of `upcoming(30 days)`. Helpers `dueCountPhrase`, `withinDaysPhrase`, `daysBetween`.
+
+**FundCard** (Home and the Funds tab): name (bodyStrong) + StatusChip · "{current} من {target}" ·
+ProgressBar (attention when behind; `goldPortion = fundLinkedValue / target`) · one sentence +
+percent · "الموعد: …". Status mapping (`components/funds/labels.ts` → `FUND_STATUS`,
+`fundStatusSentence`; `STATUS_BADGES` derived for the fund detail screen):
+
+| Status | Chip | Sentence |
+|---|---|---|
+| ahead | ok "متقدم" | — |
+| on_track | ok "على المسار" | ماشي على الخطة |
+| behind | attention "محتاج انتباه" (never red) | محتاج {fundRequiredMonthly} هذا الشهر للحاق بالخطة (hidden if ≤ 0) |
+| no_deadline | neutral "بدون موعد" | لسه محتاج {target − current} للوصول للهدف / وصلت للهدف |
+
+TransactionRow (minimal phase-2 pass): amounts in text color for expenses, transfers and gold;
+income green; signs via `formatMoney`; Arabic dates via `formatDateAr`; tokens only.
 
 ---
 
@@ -639,6 +722,8 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
   editor discards unsaved plan edits (after a confirm) because a route can't open above the modal.
 - Numbers are formatted with Western digits (`en-US`) inside an Arabic UI.
 - `AGENTS.md` points to the SDK 54 docs although the project is on SDK 57.
+- Metro's file watcher doesn't always pick up edits on this drive during web QA; restart
+  `expo start` after changes before trusting what the browser shows.
 - No E2E/UI tests; screens were checked manually in the web build (where all safe-area insets
   are 0 — inset handling must be checked on a device).
 

@@ -1,262 +1,172 @@
-﻿import MaterialIcons from '@expo/vector-icons/MaterialIcons';
-import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { router } from 'expo-router';
+import { useState } from 'react';
+import { Pressable, StyleSheet, View } from 'react-native';
 
-import { BackupReminder } from '@/components/dashboard/BackupReminder';
+import { BackupReminder, needsBackupReminder } from '@/components/dashboard/BackupReminder';
+import { homeFunds, nextBestAction } from '@/components/dashboard/homeInsights';
+import { MonthlySnapshot } from '@/components/dashboard/MonthlySnapshot';
 import { NetWorthCard } from '@/components/dashboard/NetWorthCard';
 import { RecurringCard } from '@/components/dashboard/RecurringCard';
 import { SafeToSpendCard } from '@/components/dashboard/SafeToSpendCard';
+import { AssignSheet } from '@/components/funds/AssignSheet';
+import { CoverSheet } from '@/components/funds/CoverSheet';
 import { FundCard } from '@/components/funds/FundCard';
 import { UnassignedPanel } from '@/components/funds/UnassignedPanel';
 import { TransactionRow } from '@/components/transactions/TransactionRow';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
+import { AppText } from '@/components/ui/AppText';
 import { Card } from '@/components/ui/Card';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { InsightCard } from '@/components/ui/InsightCard';
+import { ListGroup } from '@/components/ui/ListRow';
 import { LoadingView } from '@/components/ui/LoadingView';
 import { Screen } from '@/components/ui/Screen';
-import { StatCard } from '@/components/ui/StatCard';
-import { Colors, FinanceColors } from '@/constants/theme';
-import {
-  fundsByPriority,
-  holdingsTotalEGP,
-  liquidTotalEGP,
-  monthSummary,
-  netWorthByLocation,
-  netWorthEGP,
-  recentTransactions,
-} from '@/store/selectors';
+import { SectionHeader } from '@/components/ui/SectionHeader';
+import { colors, opacity, space } from '@/constants/theme';
+import { recentTransactions } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { toMonthKey } from '@/utils/dates';
-import { formatCurrency } from '@/utils/formatters';
 
 // 'add' opens an empty transaction sheet; an id opens it for editing.
 type TxSheetTarget = 'add' | { id: string } | null;
 
-// ---------------------------------------------------------------------------
-// Dashboard screen
-// ---------------------------------------------------------------------------
-export default function DashboardScreen() {
+// Home answers "what should I know / do now?": daily decisions first (safe to spend, the one
+// next action, this month, what's coming), long-term figures after (funds, net worth).
+export default function HomeScreen() {
   const state = useFinanceStore();
   const [txSheet, setTxSheet] = useState<TxSheetTarget>(null);
+  const [fundSheet, setFundSheet] = useState<'assign' | 'cover' | null>(null);
 
   if (!state.hasHydrated) return <LoadingView />;
 
-  const funds = fundsByPriority(state);
-  // 0 when the month has no transactions.
-  const monthNetEGP = monthSummary(state, toMonthKey(new Date())).netCashFlow;
-
+  const now = new Date();
+  const action = nextBestAction(state, now);
+  const funds = homeFunds(state, now);
   const recentTx = recentTransactions(state, 5);
-  const byLocation = netWorthByLocation(state);
-  const editingTx =
-    txSheet && txSheet !== 'add' ? state.transactions.find((t) => t.id === txSheet.id) : undefined;
+  const editingTx = txSheet && txSheet !== 'add' ? state.transactions.find((t) => t.id === txSheet.id) : undefined;
+  // The backup nudge takes the insight slot only when nothing stronger is there.
+  const backupDue = needsBackupReminder(state.settings.lastBackupAt, now);
+  // The insight already says what the unassigned panel would say.
+  const hideUnassigned = action?.kind === 'cover' || action?.kind === 'assign';
 
-  const todayArabic = new Date().toLocaleDateString('ar-EG', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  });
+  const runAction = () => {
+    if (!action) return;
+    if (action.kind === 'cover') setFundSheet('cover');
+    else if (action.kind === 'assign') setFundSheet('assign');
+    else if (action.kind === 'due') router.push('/due');
+    else if (action.kind === 'upcoming') router.push('/recurring');
+    else if (action.kind === 'fund' && action.fundId) {
+      router.push({ pathname: '/fund/[id]', params: { id: action.fundId } });
+    }
+  };
 
   return (
     <Screen scroll contentStyle={styles.content}>
-        {/* ── Header ─────────────────────────────────────────────── */}
-        <View style={styles.header}>
-          <View>
-            <Text style={styles.appTitle}>Wealth</Text>
-            <Text style={styles.greeting}>مرحباً</Text>
-          </View>
-          <View style={styles.headerRight}>
-            <TouchableOpacity
-              onPress={() => router.push('/settings')}
-              hitSlop={10}
-              accessibilityLabel="الإعدادات">
-              <MaterialIcons name="settings" size={24} color={Colors.light.icon} />
-            </TouchableOpacity>
-            <Text style={styles.dateText}>{todayArabic}</Text>
-          </View>
-        </View>
+      <Header now={now} />
 
-        <BackupReminder lastBackupAt={state.settings.lastBackupAt} />
+      <SafeToSpendCard state={state} now={now} />
 
-        {/* ── Net Worth ──────────────────────────────────────────── */}
-        <View style={styles.section}>
-          <NetWorthCard totalEGP={netWorthEGP(state)} />
-          <Text style={styles.locationSplit}>
-            مصر {formatCurrency(byLocation.EG, 'EGP')} · السعودية {formatCurrency(byLocation.SA, 'EGP')}
-          </Text>
-          <Text style={styles.netWorthLabel}>إجمالي الثروة</Text>
-        </View>
+      {action ? (
+        <InsightCard tone={action.tone} message={action.message} actionLabel={action.actionLabel} onAction={runAction} />
+      ) : (
+        backupDue && <BackupReminder lastBackupAt={state.settings.lastBackupAt} />
+      )}
 
-        {/* ── Safe to spend ──────────────────────────────────────── */}
-        <View style={styles.section}>
-          <SafeToSpendCard state={state} />
-        </View>
+      <MonthlySnapshot state={state} now={now} />
 
-        {/* ── Recurring: due & this week ─────────────────────────── */}
-        <View style={styles.section}>
-          <RecurringCard state={state} />
-        </View>
+      <RecurringCard state={state} now={now} dueShownElsewhere={action?.kind === 'due'} />
 
-        {/* ── Unassigned money ───────────────────────────────────── */}
-        <View style={styles.section}>
-          <UnassignedPanel state={state} />
-        </View>
-
-        {/* ── Quick Stats ────────────────────────────────────────── */}
-        <View style={[styles.section, styles.statsRow]}>
-          <StatCard label="سيولة" amountEGP={liquidTotalEGP(state)} accentColor={Colors.light.tint} />
-          <StatCard label="استثمارات" amountEGP={holdingsTotalEGP(state)} accentColor={FinanceColors.gold} />
-          <StatCard label="صافي الشهر" amountEGP={monthNetEGP} accentColor={FinanceColors.income} />
-        </View>
-
-        {/* ── Funds ──────────────────────────────────────────────── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>الصناديق</Text>
-          {funds.map((fund) => (
-            <View key={fund.id} style={styles.fundItem}>
+      <View>
+        <SectionHeader title="الصناديق" actionLabel="عرض كل الصناديق" onAction={() => router.push('/goals')} />
+        {funds.length === 0 ? (
+          <Card variant="subtle">
+            <AppText variant="secondary" color="textSecondary">
+              لسه معملتش صناديق. ابدأ بصندوق طوارئ من شاشة الصناديق.
+            </AppText>
+          </Card>
+        ) : (
+          <View style={styles.stack}>
+            {funds.map((fund) => (
               <FundCard
+                key={fund.id}
                 fund={fund}
                 state={state}
                 onPress={() => router.push({ pathname: '/fund/[id]', params: { id: fund.id } })}
               />
-            </View>
-          ))}
-        </View>
-
-        {/* ── Recent Transactions ────────────────────────────────── */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <TouchableOpacity onPress={() => setTxSheet('add')} hitSlop={8}>
-              <Text style={styles.addTxText}>+ معاملة</Text>
-            </TouchableOpacity>
-            <Text style={[styles.sectionTitle, styles.sectionTitleInline]}>آخر المعاملات</Text>
+            ))}
           </View>
-          <Card style={styles.txCard}>
-            {recentTx.length === 0 ? (
-              <Text style={styles.emptyText}>لا توجد معاملات بعد</Text>
-            ) : (
-              recentTx.map((tx, idx) => (
-                <TransactionRow
-                  key={tx.id}
-                  tx={tx}
-                  state={state}
-                  showDate
-                  isLast={idx === recentTx.length - 1}
-                  onPress={() => setTxSheet({ id: tx.id })}
-                />
-              ))
-            )}
-          </Card>
-        </View>
+        )}
+      </View>
 
-        <View style={styles.bottomSpacer} />
+      {!hideUnassigned && <UnassignedPanel state={state} />}
+
+      <NetWorthCard state={state} />
+
+      {action && backupDue && <BackupReminder lastBackupAt={state.settings.lastBackupAt} />}
+
+      <View>
+        <SectionHeader title="آخر المعاملات" actionLabel="+ معاملة" onAction={() => setTxSheet('add')} />
+        {recentTx.length === 0 ? (
+          <Card variant="subtle">
+            <EmptyState
+              icon="receipt-long"
+              title="لسه مسجلتش معاملات."
+              body="سجّل أول مصروف أو دخل عشان تبدأ تشوف صورة شهرك."
+              actionLabel="سجّل معاملة"
+              onAction={() => setTxSheet('add')}
+            />
+          </Card>
+        ) : (
+          <ListGroup>
+            {recentTx.map((tx) => (
+              <TransactionRow key={tx.id} tx={tx} state={state} showDate onPress={() => setTxSheet({ id: tx.id })} />
+            ))}
+          </ListGroup>
+        )}
+      </View>
 
       {txSheet === 'add' && <TransactionSheet onClose={() => setTxSheet(null)} />}
-      {editingTx && (
-        <TransactionSheet key={editingTx.id} transaction={editingTx} onClose={() => setTxSheet(null)} />
-      )}
+      {editingTx && <TransactionSheet key={editingTx.id} transaction={editingTx} onClose={() => setTxSheet(null)} />}
+      {fundSheet === 'assign' && <AssignSheet onClose={() => setFundSheet(null)} />}
+      {fundSheet === 'cover' && <CoverSheet onClose={() => setFundSheet(null)} />}
     </Screen>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
+// Greeting by the hour + today's date, settings on the other side.
+function Header({ now }: { now: Date }) {
+  const greeting = now.getHours() < 12 ? 'صباح الخير' : 'مساء الخير';
+  const date = now.toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' });
+  return (
+    <View style={styles.header}>
+      <View style={styles.headerText}>
+        <AppText variant="titleLg">{greeting}</AppText>
+        <AppText variant="secondary" color="textSecondary">
+          {date}
+        </AppText>
+      </View>
+      <Pressable
+        onPress={() => router.push('/settings')}
+        hitSlop={10}
+        accessibilityRole="button"
+        accessibilityLabel="الإعدادات"
+        style={({ pressed }) => [styles.settings, pressed && { opacity: opacity.pressed }]}>
+        <MaterialIcons name="settings" size={24} color={colors.textSecondary} />
+      </Pressable>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   content: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
+    paddingHorizontal: space.lg,
+    paddingTop: space.sm,
+    paddingBottom: space.xxl,
+    gap: space.xxl,
   },
-  bottomSpacer: { height: 24 },
-
-  // Header
-  headerRight: {
-    alignItems: 'flex-end',
-    gap: 6,
-  },
-  locationSplit: {
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'center',
-    marginTop: 8,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 20,
-  },
-  appTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: Colors.light.text,
-  },
-  greeting: {
-    fontSize: 13,
-    color: Colors.light.icon,
-    marginTop: 2,
-  },
-  dateText: {
-    fontSize: 13,
-    color: Colors.light.icon,
-    textAlign: 'right',
-    marginTop: 6,
-    maxWidth: 160,
-  },
-
-  // Section spacing
-  section: {
-    marginBottom: 20,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: Colors.light.text,
-    textAlign: 'right',
-    marginBottom: 12,
-  },
-
-  // Net Worth label
-  netWorthLabel: {
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'center',
-    marginTop: 6,
-  },
-
-  // Quick stats
-  statsRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-
-  // Funds
-  fundItem: {
-    marginBottom: 10,
-  },
-
-  // Transactions
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  sectionTitleInline: {
-    marginBottom: 0,
-  },
-  addTxText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: Colors.light.tint,
-  },
-  txCard: {
-    paddingHorizontal: 0,
-    paddingVertical: 0,
-  },
-  emptyText: {
-    textAlign: 'center',
-    color: Colors.light.icon,
-    fontSize: 14,
-    paddingVertical: 24,
-  },
+  // RTL: greeting on the right, settings on the left.
+  header: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', gap: space.md },
+  headerText: { flex: 1 },
+  settings: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  stack: { gap: space.md },
 });

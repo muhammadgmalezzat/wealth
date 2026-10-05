@@ -1,7 +1,6 @@
 import { router } from 'expo-router';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { Colors, FinanceColors } from '@/constants/theme';
+import { InsightCard } from '@/components/ui/InsightCard';
 
 const REMIND_AFTER_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -12,54 +11,22 @@ export function daysSinceBackup(lastBackupAt: string | undefined, now: Date = ne
   return Math.floor((now.getTime() - new Date(lastBackupAt).getTime()) / DAY_MS);
 }
 
-// Small banner nudging the user to export when the last backup is missing or > 7 days old.
-export function BackupReminder({ lastBackupAt }: { lastBackupAt?: string }) {
-  const days = daysSinceBackup(lastBackupAt);
-  if (days !== null && days < REMIND_AFTER_DAYS) return null;
-
-  return (
-    <View style={styles.banner}>
-      <TouchableOpacity
-        style={styles.button}
-        onPress={() => router.push({ pathname: '/settings', params: { export: '1' } })}
-        activeOpacity={0.85}>
-        <Text style={styles.buttonText}>صدّر نسخة</Text>
-      </TouchableOpacity>
-      <Text style={styles.text}>
-        {days === null ? 'لسه معملتش نسخة احتياطية' : `آخر نسخة احتياطية من ${days} يوم`}
-      </Text>
-    </View>
-  );
+// Whether to nudge: no backup yet, or the last one is 7+ days old.
+export function needsBackupReminder(lastBackupAt: string | undefined, now: Date = new Date()): boolean {
+  const days = daysSinceBackup(lastBackupAt, now);
+  return days === null || days >= REMIND_AFTER_DAYS;
 }
 
-const styles = StyleSheet.create({
-  banner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-    padding: 12,
-    marginBottom: 16,
-    borderRadius: 10,
-    backgroundColor: FinanceColors.gold + '18',
-    borderWidth: 1,
-    borderColor: FinanceColors.gold + '55',
-  },
-  text: {
-    flex: 1,
-    fontSize: 13,
-    color: Colors.light.text,
-    textAlign: 'right',
-  },
-  button: {
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 8,
-    backgroundColor: FinanceColors.gold,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-});
+// Calm nudge to export a backup (opens Settings with the export sheet).
+export function BackupReminder({ lastBackupAt }: { lastBackupAt?: string }) {
+  if (!needsBackupReminder(lastBackupAt)) return null;
+  return (
+    <InsightCard
+      tone="attention"
+      icon="backup"
+      message="يفضل تعمل نسخة احتياطية عشان بياناتك تفضل آمنة."
+      actionLabel="تصدير نسخة"
+      onAction={() => router.push({ pathname: '/settings', params: { export: '1' } })}
+    />
+  );
+}

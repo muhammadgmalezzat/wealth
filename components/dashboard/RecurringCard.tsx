@@ -1,54 +1,72 @@
 import { router } from 'expo-router';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet } from 'react-native';
 
-import { Card } from '@/components/ui/Card';
-import { Colors, FinanceColors } from '@/constants/theme';
-import { dueOccurrences, upcoming } from '@/store/recurring';
+import { AppText } from '@/components/ui/AppText';
+import { ListGroup, ListRow } from '@/components/ui/ListRow';
+import { Money } from '@/components/ui/Money';
+import { SectionHeader } from '@/components/ui/SectionHeader';
+import { opacity, space } from '@/constants/theme';
+import { dueOccurrences } from '@/store/recurring';
 import type { FinanceState } from '@/store/types';
 import { toDateKey } from '@/utils/dates';
-import { formatCurrency, formatDayLabel } from '@/utils/formatters';
+import { formatDayLabel } from '@/utils/formatters';
 
-// Dashboard: "عندك X مستحقات" (→ inbox) and a "جاي الأسبوع ده" line with the next 3 items.
-// Renders nothing when there's neither.
-export function RecurringCard({ state }: { state: FinanceState }) {
-  const today = toDateKey(new Date());
-  const due = dueOccurrences(state, today, 'confirm');
-  const week = upcoming(state, 7, today).items.slice(0, 3);
-  if (due.length === 0 && week.length === 0) return null;
+import { daysBetween, dueCountPhrase, upcomingItems } from './homeInsights';
+
+interface RecurringCardProps {
+  state: FinanceState;
+  // True when the next-best-action card already asks to review due items.
+  dueShownElsewhere?: boolean;
+  now?: Date;
+}
+
+// "جاي قريب": the next 3 recurring items, plus a calm link to the due inbox when confirm items
+// are waiting (unless Home's insight already says so). Renders nothing without content.
+export function RecurringCard({ state, dueShownElsewhere = false, now = new Date() }: RecurringCardProps) {
+  const today = toDateKey(now);
+  const items = upcomingItems(state, now);
+  const dueCount = dueShownElsewhere ? 0 : dueOccurrences(state, today, 'confirm').length;
+  if (items.length === 0 && dueCount === 0) return null;
 
   return (
-    <View style={styles.wrap}>
-      {due.length > 0 && (
-        <TouchableOpacity onPress={() => router.push('/due')} activeOpacity={0.85}>
-          <Card style={styles.dueCard}>
-            <Text style={styles.dueAction}>افتح ‹</Text>
-            <Text style={styles.dueText}>عندك {due.length} مستحقات</Text>
-          </Card>
-        </TouchableOpacity>
+    <>
+      <SectionHeader title="جاي قريب" actionLabel="الكل" onAction={() => router.push('/recurring')} />
+      {dueCount > 0 && (
+        <Pressable
+          onPress={() => router.push('/due')}
+          hitSlop={8}
+          accessibilityRole="button"
+          style={({ pressed }) => [styles.dueLink, pressed && { opacity: opacity.pressed }]}>
+          <AppText variant="secondary" color="warning" style={styles.dueText}>
+            عندك {dueCountPhrase(dueCount)} · راجعهم
+          </AppText>
+        </Pressable>
       )}
-      {week.length > 0 && (
-        <TouchableOpacity onPress={() => router.push('/recurring')} activeOpacity={0.8}>
-          <Text style={styles.week}>
-            جاي الأسبوع ده:{' '}
-            {week.map(({ rule, date }) => `${rule.name} ${formatCurrency(rule.amount, rule.currency)} (${formatDayLabel(date)})`).join('، ')}
-          </Text>
-        </TouchableOpacity>
+      {items.length > 0 && (
+        <ListGroup>
+          {items.map(({ rule, date }) => {
+            const days = daysBetween(today, date);
+            return (
+              <ListRow
+                key={`${rule.id}-${date}`}
+                title={rule.name}
+                subtitle={days <= 2 ? formatDayLabel(date, now) : `بعد ${days} ${days <= 10 ? 'أيام' : 'يوم'} · ${formatDayLabel(date, now)}`}
+                icon={rule.kind === 'income' ? 'south-west' : rule.kind === 'transfer' ? 'swap-horiz' : 'event'}
+                iconTone={rule.kind === 'income' ? 'ok' : 'neutral'}
+                trailing={
+                  <Money amount={rule.amount} currency={rule.currency} tone={rule.kind === 'income' ? 'positive' : 'default'} />
+                }
+                onPress={() => router.push('/recurring')}
+              />
+            );
+          })}
+        </ListGroup>
       )}
-    </View>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
-  wrap: { gap: 8 },
-  dueCard: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: FinanceColors.gold + '18',
-    borderWidth: 1,
-    borderColor: FinanceColors.gold + '55',
-  },
-  dueText: { fontSize: 16, fontWeight: '700', color: Colors.light.text },
-  dueAction: { fontSize: 14, fontWeight: '700', color: FinanceColors.gold },
-  week: { fontSize: 12, color: Colors.light.icon, textAlign: 'right', lineHeight: 18 },
+  dueLink: { marginBottom: space.sm, alignSelf: 'flex-end' },
+  dueText: { fontWeight: '600' },
 });

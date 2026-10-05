@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { describe, it } from 'node:test';
 
+import * as home from '@/components/dashboard/homeInsights';
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
 import { FinanceValidationError } from '@/store/errors';
@@ -2224,6 +2225,110 @@ describe('category management', () => {
     assert.throws(
       () => ops.addCategoryWithPlanLine(s, { name: 'Pool', bucket: 'giving' }, { month: '2026-10', limit: -5, kind: 'flexible' }, ctx),
       { code: 'NEGATIVE' }
+    );
+  });
+});
+
+// --- Home insights (Calm Wealth phase 2) ---------------------------------------
+
+describe('home: nextBestAction', () => {
+  // NOW = 15 Oct 2026. Fund "goal" is behind: deadline next year, nothing allocated this month.
+  const behindFund = () => fund({ id: 'goal', name: 'جواز', targetAmount: 12000, deadline: '2027-09-30', priority: 1 });
+  const base = (overrides: Partial<FinanceState> = {}): FinanceState => ({
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 10000)],
+    ...overrides,
+  });
+  const kind = (s: FinanceState) => home.nextBestAction(s, NOW)?.kind ?? null;
+
+  it('returns null when there is nothing to do', () => {
+    assert.equal(home.nextBestAction({ ...emptyState() }, NOW), null);
+  });
+
+  it('puts covering spent fund money first', () => {
+    const s = base({
+      funds: [behindFund()],
+      fundMovements: [{ id: 'm', fundId: 'goal', amount: 15000, date: '2026-09-01', updatedAt: T0 }],
+      recurringRules: [rule({ id: 'r', startDate: '2026-10-05' })],
+    });
+    const action = home.nextBestAction(s, NOW)!;
+    assert.equal(action.kind, 'cover');
+    assert.equal(action.tone, 'danger');
+    assert.equal(action.actionLabel, 'غطّي الفرق');
+  });
+
+  it('then due confirm items, with Arabic number agreement', () => {
+    const one = base({ funds: [behindFund()], recurringRules: [rule({ id: 'r', startDate: '2026-10-05' })] });
+    const action = home.nextBestAction(one, NOW)!;
+    assert.equal(action.kind, 'due');
+    assert.equal(action.message, 'عندك مستحق واحد محتاج مراجعة.');
+    const two = base({ recurringRules: [rule({ id: 'r', startDate: '2026-09-05', dayOfMonth: 5 })] });
+    assert.equal(home.nextBestAction(two, NOW)!.message, 'عندك مستحقين محتاجين مراجعة.');
+    assert.equal(home.dueCountPhrase(3), '3 مستحقات محتاجة مراجعة');
+    assert.equal(home.dueCountPhrase(11), '11 مستحق محتاج مراجعة');
+    // Auto rules are recorded by the app, so they never ask for review.
+    assert.notEqual(kind(base({ recurringRules: [rule({ id: 'r', startDate: '2026-10-05', mode: 'auto' })] })), 'due');
+  });
+
+  it('then an item due within 3 days', () => {
+    const s = base({ funds: [behindFund()], recurringRules: [rule({ id: 'rent', name: 'إيجار', startDate: '2026-10-17' })] });
+    const action = home.nextBestAction(s, NOW)!;
+    assert.equal(action.kind, 'upcoming');
+    assert.equal(action.message, 'إيجار مستحق خلال يومين.');
+    // Four days away is not "soon".
+    assert.equal(kind(base({ recurringRules: [rule({ id: 'r', startDate: '2026-10-19' })] })), 'assign');
+  });
+
+  it('then a fund that is behind, before assigning money', () => {
+    const s = base({ funds: [behindFund()] });
+    const action = home.nextBestAction(s, NOW)!;
+    assert.equal(action.kind, 'fund');
+    assert.equal(action.fundId, 'goal');
+    assert.ok(action.message.startsWith('جواز محتاج '));
+  });
+
+  it('then money without a job', () => {
+    const action = home.nextBestAction(base(), NOW)!;
+    assert.equal(action.kind, 'assign');
+    assert.equal(action.tone, 'ok');
+    assert.ok(action.message.includes('10,000'));
+  });
+});
+
+describe('home: homeFunds', () => {
+  it('orders behind funds first, then by nearest due date, then by priority', () => {
+    const s: FinanceState = {
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 1000000)],
+      funds: [
+        fund({ id: 'noDue', priority: 1 }),
+        fund({ id: 'behindFar', priority: 2, deadline: '2028-01-01' }),
+        fund({ id: 'behindNear', priority: 3, deadline: '2027-01-01' }),
+        // Fully funded this month → not behind.
+        fund({ id: 'okNear', priority: 4, targetAmount: 100, deadline: '2026-12-01' }),
+        fund({ id: 'okNoDue', priority: 5 }),
+      ],
+      fundMovements: [{ id: 'm', fundId: 'okNear', amount: 100, date: '2026-10-02', updatedAt: T0 }],
+    };
+    assert.deepEqual(
+      home.homeFunds(s, NOW, 5).map((f) => f.id),
+      ['behindNear', 'behindFar', 'okNear', 'noDue', 'okNoDue']
+    );
+    assert.deepEqual(
+      home.homeFunds(s, NOW).map((f) => f.id),
+      ['behindNear', 'behindFar', 'okNear']
+    );
+  });
+
+  it('upcomingItems lists the next items, soonest first', () => {
+    const s: FinanceState = {
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 1000)],
+      recurringRules: [rule({ id: 'b', startDate: '2026-10-25' }), rule({ id: 'a', startDate: '2026-10-20', frequency: 'weekly' })],
+    };
+    assert.deepEqual(
+      home.upcomingItems(s, NOW).map((o) => `${o.rule.id}:${o.date}`),
+      ['a:2026-10-20', 'b:2026-10-25', 'a:2026-10-27']
     );
   });
 });

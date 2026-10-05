@@ -1,99 +1,70 @@
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
 import { AssignSheet } from '@/components/funds/AssignSheet';
 import { CoverSheet } from '@/components/funds/CoverSheet';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { Money } from '@/components/ui/Money';
+import { colors, space } from '@/constants/theme';
 import { unassignedEGP } from '@/store/selectors';
 import type { FinanceState } from '@/store/types';
-import { formatCurrency } from '@/utils/formatters';
 
-// "فلوس بدون وظيفة" card with its actions: distribute a surplus (وزّعها) or cover a
-// shortfall (غطّيها). Owns the sheets it opens.
+// Money without a job. Positive: "فلوس متاحة للتخطيط" → distribute (AssignSheet). Negative:
+// fund money was spent → cover the gap (CoverSheet); the only state styled as danger. Zero:
+// nothing. Owns the sheets it opens.
 export function UnassignedPanel({ state }: { state: FinanceState }) {
   const [sheet, setSheet] = useState<'assign' | 'cover' | null>(null);
   const amount = unassignedEGP(state);
   const negative = amount < -0.005;
   const positive = amount > 0.005;
 
-  return (
+  const sheets = (
     <>
-      <Card style={negative ? styles.cardNegative : undefined}>
-        <View style={styles.row}>
-          {(positive || negative) && (
-            <TouchableOpacity
-              style={[styles.button, negative && styles.buttonNegative]}
-              onPress={() => setSheet(negative ? 'cover' : 'assign')}
-              activeOpacity={0.85}>
-              <Text style={styles.buttonText}>{negative ? 'غطّيها' : 'وزّعها'}</Text>
-            </TouchableOpacity>
-          )}
-          <View style={styles.text}>
-            <Text style={styles.label}>فلوس بدون وظيفة</Text>
-            <Text style={[styles.amount, negative && styles.negativeText]}>
-              {formatCurrency(amount, 'EGP')}
-            </Text>
-          </View>
-        </View>
-        {negative && (
-          <Text style={[styles.message, styles.negativeText]}>
-            صرفت {formatCurrency(-amount, 'EGP')} من فلوس مخصصة لصناديق
-          </Text>
-        )}
-      </Card>
-
       {sheet === 'assign' && <AssignSheet onClose={() => setSheet(null)} />}
       {sheet === 'cover' && <CoverSheet onClose={() => setSheet(null)} />}
+    </>
+  );
+
+  if (negative) {
+    return (
+      <>
+        <Card style={styles.negative}>
+          <AppText variant="bodyStrong" color="danger">
+            استخدمت جزء من فلوس الصناديق.
+          </AppText>
+          <Money amount={-amount} currency="EGP" size="md" tone="danger" />
+          <View style={styles.action}>
+            <Button label="غطّي الفرق" variant="destructive" onPress={() => setSheet('cover')} />
+          </View>
+        </Card>
+        {sheets}
+      </>
+    );
+  }
+
+  if (!positive) return sheets;
+
+  return (
+    <>
+      <Card style={styles.card}>
+        <AppText variant="secondary" color="textSecondary">
+          فلوس متاحة للتخطيط
+        </AppText>
+        <Money amount={amount} currency="EGP" size="md" />
+        <AppText variant="secondary">ممكن توزّع جزء منها على أهدافك القادمة.</AppText>
+        <View style={styles.action}>
+          <Button label="وزّع أموالك" onPress={() => setSheet('assign')} />
+        </View>
+      </Card>
+      {sheets}
     </>
   );
 }
 
 const styles = StyleSheet.create({
-  cardNegative: {
-    backgroundColor: '#FEF2F2',
-    borderWidth: 1,
-    borderColor: FinanceColors.expense + '40',
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  text: {
-    flex: 1,
-    alignItems: 'flex-end',
-    gap: 2,
-  },
-  label: {
-    fontSize: 13,
-    color: Colors.light.icon,
-  },
-  amount: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: Colors.light.text,
-  },
-  negativeText: {
-    color: FinanceColors.expense,
-  },
-  message: {
-    marginTop: 8,
-    fontSize: 13,
-    textAlign: 'right',
-  },
-  button: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 10,
-    backgroundColor: Colors.light.tint,
-  },
-  buttonNegative: {
-    backgroundColor: FinanceColors.expense,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
+  card: { gap: space.xs },
+  negative: { gap: space.xs, backgroundColor: colors.dangerSurface, borderColor: colors.dangerSurface },
+  action: { marginTop: space.sm },
 });

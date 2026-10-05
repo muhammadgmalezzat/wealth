@@ -1,20 +1,32 @@
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
+import { DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
 import { AppLockGate } from '@/components/AppLockGate';
 import { RecurringRunner } from '@/components/RecurringRunner';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { colors } from '@/constants/theme';
 
 export const unstable_settings = {
   anchor: '(tabs)',
 };
 
-export default function RootLayout() {
-  const colorScheme = useColorScheme();
+// Light theme only, built from the design tokens: headers and tab bar sit on the warm ground
+// (card = background) with hairline borders.
+const navigationTheme = {
+  ...DefaultTheme,
+  colors: {
+    ...DefaultTheme.colors,
+    background: colors.background,
+    card: colors.background,
+    text: colors.text,
+    border: colors.border,
+    primary: colors.primary700,
+  },
+};
 
+export default function RootLayout() {
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+    <ThemeProvider value={navigationTheme}>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="fund/[id]" options={{ title: 'الصندوق', headerBackTitle: 'رجوع' }} />

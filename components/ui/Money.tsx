@@ -2,9 +2,11 @@ import { StyleSheet, View } from 'react-native';
 
 import type { ColorToken, TypeVariant } from '@/constants/theme';
 import type { CurrencyCode } from '@/store/types';
-import { formatCurrency } from '@/utils/formatters';
 
 import { AppText } from './AppText';
+import { formatMoney } from './formatMoney';
+
+export { formatMoney };
 
 export type MoneySize = 'hero' | 'lg' | 'md' | 'row';
 export type MoneyTone = 'default' | 'positive' | 'danger' | 'muted';
@@ -29,16 +31,6 @@ const TONE: Record<MoneyTone, ColorToken> = {
   danger: 'danger',
   muted: 'textSecondary',
 };
-
-// Left-to-right isolate: keeps "ر.س 1,250" (and its sign) in one piece inside Arabic text.
-const LRI = '⁦';
-const PDI = '⁩';
-const isolate = (s: string) => `${LRI}${s}${PDI}`;
-
-export function formatMoney(amount: number, currency: CurrencyCode, showSign = false): string {
-  const sign = !showSign || Math.abs(amount) < 0.005 ? '' : amount > 0 ? '+' : '−';
-  return isolate(`${sign}${formatCurrency(showSign ? Math.abs(amount) : amount, currency)}`);
-}
 
 // A money amount in tabular figures.
 export function Money({ amount, currency, size = 'row', tone = 'default', showSign = false, converted, align = 'right' }: MoneyProps) {

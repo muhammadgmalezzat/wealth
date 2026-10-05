@@ -1,8 +1,9 @@
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { Colors, FinanceColors } from '@/constants/theme';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { colors, radius, space, type } from '@/constants/theme';
 import type { CurrencyCode, FinanceState, Transaction } from '@/store/types';
-import { formatCurrency, formatDate } from '@/utils/formatters';
+import { formatDateAr } from '@/components/ui/formatDateAr';
 
 interface TransactionRowProps {
   tx: Transaction;
@@ -49,15 +50,9 @@ function describe(state: TransactionRowProps['state'], tx: Transaction): Descrip
 export function TransactionRow({ tx, state, onPress, showDate = false, isLast = true }: TransactionRowProps) {
   const { title, subtitle, currency } = describe(state, tx);
   const sign = tx.type === 'income' ? '+' : tx.type === 'expense' ? '−' : '';
-  // Purchases aren't spending: no minus sign, shown in gold.
-  const color =
-    tx.type === 'income'
-      ? FinanceColors.income
-      : tx.type === 'expense'
-        ? FinanceColors.expense
-        : tx.type === 'asset_purchase'
-          ? FinanceColors.gold
-          : Colors.light.text;
+  // Color by meaning, not sign: income green; expenses, transfers and gold purchases (not
+  // spending) in the regular text color.
+  const color = tx.type === 'income' ? colors.primary700 : colors.text;
   const oneTime = tx.type === 'expense' && tx.oneTime;
 
   return (
@@ -67,12 +62,9 @@ export function TransactionRow({ tx, state, onPress, showDate = false, isLast = 
       activeOpacity={0.7}>
       {/* Left: amount (+ EGP equivalent at the snapshotted rate) */}
       <View style={styles.amountCol}>
-        <Text style={[styles.amount, { color }]}>
-          {sign}
-          {formatCurrency(tx.amount, currency)}
-        </Text>
+        <Text style={[styles.amount, { color }]}>{formatMoney(tx.type === 'expense' ? -tx.amount : tx.amount, currency, sign !== '')}</Text>
         {currency !== 'EGP' && (
-          <Text style={styles.muted}>{formatCurrency(tx.amount * tx.rateToEGP, 'EGP')}</Text>
+          <Text style={[styles.muted, styles.tabular]}>{formatMoney(tx.amount * tx.rateToEGP, 'EGP')}</Text>
         )}
       </View>
       {/* Right: category, account, note */}
@@ -86,7 +78,7 @@ export function TransactionRow({ tx, state, onPress, showDate = false, isLast = 
           <Text style={styles.title}>{title}</Text>
         </View>
         <Text style={styles.muted} numberOfLines={1}>
-          {showDate ? `${subtitle} · ${formatDate(tx.date)}` : subtitle}
+          {showDate ? `${subtitle} · ${formatDateAr(tx.date, { year: false })}` : subtitle}
         </Text>
         {tx.note ? (
           <Text style={styles.note} numberOfLines={1}>
@@ -102,22 +94,24 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    gap: 12,
+    minHeight: 56,
+    paddingVertical: space.md,
+    paddingHorizontal: space.lg,
+    gap: space.md,
   },
   rowBorder: {
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: FinanceColors.progressTrack,
+    borderBottomColor: colors.border,
   },
   amountCol: {
     alignItems: 'flex-start',
     gap: 2,
   },
   amount: {
-    fontSize: 15,
-    fontWeight: '600',
+    ...type.moneyRow,
+    fontVariant: ['tabular-nums'],
   },
+  tabular: { fontVariant: ['tabular-nums'] },
   details: {
     flex: 1,
     alignItems: 'flex-end',
@@ -129,30 +123,28 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   badge: {
-    borderRadius: 4,
-    paddingHorizontal: 5,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.sm,
     paddingVertical: 1,
-    backgroundColor: Colors.light.icon + '22',
+    backgroundColor: colors.surfaceSubtle,
   },
   badgeText: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: Colors.light.icon,
+    ...type.micro,
+    color: colors.textSecondary,
   },
   title: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.light.text,
+    ...type.bodyStrong,
+    color: colors.text,
     textAlign: 'right',
   },
   muted: {
-    fontSize: 12,
-    color: Colors.light.icon,
+    ...type.micro,
+    color: colors.textSecondary,
     textAlign: 'right',
   },
   note: {
-    fontSize: 12,
-    color: Colors.light.text,
+    ...type.micro,
+    color: colors.text,
     fontStyle: 'italic',
     textAlign: 'right',
   },

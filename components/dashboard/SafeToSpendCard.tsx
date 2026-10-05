@@ -1,91 +1,73 @@
 import { router } from 'expo-router';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { Money } from '@/components/ui/Money';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { opacity, space } from '@/constants/theme';
 import { overspentLines, planFor, safeToSpend, safeToSpendToday } from '@/store/planning';
 import type { FinanceState } from '@/store/types';
 import { toMonthKey } from '@/utils/dates';
-import { formatCurrency } from '@/utils/formatters';
 
 // "تقدر تصرف بأمان": what's left on flexible plan lines this month, and per day. Without a
-// plan it invites the user to make one.
-export function SafeToSpendCard({ state }: { state: FinanceState }) {
-  const month = toMonthKey(new Date());
+// plan it invites the user to make one (never a 0 or an empty metric).
+export function SafeToSpendCard({ state, now = new Date() }: { state: FinanceState; now?: Date }) {
+  const month = toMonthKey(now);
   const plan = planFor(state, month);
 
   if (!plan) {
     return (
-      <TouchableOpacity onPress={() => router.push('/plan')} activeOpacity={0.85}>
-        <Card style={styles.cta}>
-          <Text style={styles.ctaTitle}>اعمل خطة الشهر</Text>
-          <Text style={styles.subtitle}>عشان تعرف تقدر تصرف قد إيه بأمان</Text>
-        </Card>
-      </TouchableOpacity>
+      <Card variant="hero" style={styles.card}>
+        <AppText variant="secondary" color="textSecondary">
+          تقدر تصرف بأمان
+        </AppText>
+        <AppText variant="body">اعمل خطة الشهر عشان نقدر نحسب المبلغ الآمن للصرف.</AppText>
+        <View style={styles.cta}>
+          <Button label="اعمل خطة الشهر" onPress={() => router.push('/plan')} />
+        </View>
+      </Card>
     );
   }
 
   const safe = safeToSpend(state, month) ?? 0;
-  const perDay = safeToSpendToday(state, month) ?? 0;
+  const perDay = safeToSpendToday(state, month, now) ?? 0;
   const overspent = overspentLines(state, month);
   const names = overspent.map((l) => state.categories.find((c) => c.id === l.categoryId)?.name ?? '—');
 
   return (
-    <TouchableOpacity onPress={() => router.push('/plan')} activeOpacity={0.85}>
-      <Card>
-        <Text style={styles.label}>تقدر تصرف بأمان</Text>
-        <Text style={styles.amount}>{formatCurrency(safe, plan.currency)}</Text>
-        <Text style={styles.subtitle}>≈ {formatCurrency(perDay, plan.currency)} في اليوم لحد آخر الشهر</Text>
-        {names.length > 0 && (
-          <View style={styles.overRow}>
-            <Text style={styles.over}>عدّيت ميزانية: {names.join('، ')}</Text>
-          </View>
-        )}
+    <Pressable
+      onPress={() => router.push('/plan')}
+      accessibilityRole="button"
+      accessibilityHint="يفتح الخطة"
+      style={({ pressed }) => pressed && { opacity: opacity.pressed }}>
+      <Card variant="hero" style={styles.card}>
+        <AppText variant="secondary" color="textSecondary">
+          تقدر تصرف بأمان
+        </AppText>
+        <Money amount={safe} currency={plan.currency} size="hero" />
+        <AppText variant="secondary" color="textSecondary">
+          حتى نهاية الشهر · حوالي {formatMoney(perDay, plan.currency)} يومياً
+        </AppText>
+        <View style={styles.status}>
+          {names.length === 0 ? (
+            <StatusChip tone="ok" label="خطتك ماشية كويس" icon="check" />
+          ) : (
+            <>
+              <StatusChip tone="attention" label="في بند محتاج انتباه" icon="info-outline" />
+              <AppText variant="secondary">صرف {names.join('، ')} عدى الخطة</AppText>
+            </>
+          )}
+        </View>
       </Card>
-    </TouchableOpacity>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  label: {
-    fontSize: 14,
-    color: Colors.light.icon,
-    textAlign: 'right',
-  },
-  amount: {
-    marginTop: 4,
-    fontSize: 30,
-    fontWeight: '800',
-    color: FinanceColors.income,
-    textAlign: 'right',
-  },
-  subtitle: {
-    marginTop: 4,
-    fontSize: 13,
-    color: Colors.light.icon,
-    textAlign: 'right',
-  },
-  cta: {
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: Colors.light.tint,
-  },
-  ctaTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: Colors.light.tint,
-    textAlign: 'right',
-  },
-  overRow: {
-    marginTop: 10,
-    paddingTop: 8,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: FinanceColors.progressTrack,
-  },
-  over: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: FinanceColors.expense,
-    textAlign: 'right',
-  },
+  card: { gap: space.xs },
+  status: { marginTop: space.md, gap: space.sm },
+  cta: { marginTop: space.md },
 });

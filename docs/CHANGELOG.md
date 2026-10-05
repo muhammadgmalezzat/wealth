@@ -6,6 +6,42 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 2
+
+Calm Wealth — phase 2: Home redesign, tab bar, navigation theme, FundCard.
+
+> JS-only (ships with `eas update` to 1.1.0 builds). No store, data, schema or native changes.
+
+**For users**
+- New Home: greeting and date; **تقدر تصرف بأمان** as the main card (or "اعمل خطة الشهر");
+  one **next step** card (cover spent fund money → due items → something due within 3 days →
+  a fund that's behind → money to distribute); **هذا الشهر** (income / expense / net);
+  **جاي قريب** (next 3 recurring items); up to 3 funds; money available to plan; a compact net
+  worth card (Egypt / Saudi, cash vs gold); the backup nudge; the last 5 transactions with an
+  empty state.
+- Expenses are no longer shown in red; red is kept for real problems (spent fund money).
+- Fund cards: "X من Y", a status chip (متقدم / على المسار / محتاج انتباه / بدون موعد), one
+  sentence with what's needed, linked gold shown in gold on the progress bar.
+- Calmer tab bar and headers on the warm background; new tab icons.
+- Dates on Home are fully Arabic (no "Sept").
+
+**Technical**
+- New pure `components/dashboard/homeInsights.ts` (`nextBestAction`, `homeFunds`,
+  `upcomingItems`, Arabic count/day phrases) + 8 tests (134 total).
+- New `MonthlySnapshot`; rebuilt `SafeToSpendCard`, `RecurringCard`, `NetWorthCard`
+  (now takes `state`), `BackupReminder` (InsightCard; `needsBackupReminder`), `UnassignedPanel`,
+  `FundCard`; `labels.ts` gains `FUND_STATUS` / `fundStatusSentence` (`STATUS_BADGES` derived).
+- `TransactionRow`: color by meaning, tokens, `formatMoney`, `formatDateAr`.
+- `formatMoney` moved to pure `components/ui/formatMoney.ts` (re-exported by `Money`) and now
+  puts an LRM before the sign so "−1,250" stays together after the Arabic symbol; new
+  `formatDateAr.ts`.
+- Navigation theme from tokens in `app/_layout.tsx`; tab bar restyle + icon mapping in
+  `app/(tabs)/_layout.tsx` / `icon-symbol.tsx` (web-only taller bar so Arabic labels aren't
+  clipped).
+- Lint: the old BOM / unused-import warnings are gone (files rewritten).
+
+---
+
 ## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 1
 
 Calm Wealth — phase 1: design tokens + shared UI primitives (no screen changes).
