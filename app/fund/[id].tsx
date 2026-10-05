@@ -4,7 +4,7 @@ import { useState, type ComponentProps } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { FundSheet } from '@/components/funds/FundSheet';
-import { fundNextStep, movementKind } from '@/components/funds/fundsUi';
+import { fundNextStep, fundPercent, movementKind } from '@/components/funds/fundsUi';
 import { FREQUENCY_LABELS, FUND_STATUS, FUND_TYPE_LABELS } from '@/components/funds/labels';
 import { MoveMoneySheet } from '@/components/funds/MoveMoneySheet';
 import { PaySinkingSheet } from '@/components/funds/PaySinkingSheet';
@@ -75,6 +75,7 @@ export default function FundDetailScreen() {
   const chip = FUND_STATUS[status];
   const current = fundCurrent(state, fund.id);
   const progress = fundProgress(state, fund.id);
+  const pct = fundPercent(progress);
   const linkedValue = fundLinkedValue(state, fund.id);
   const due = fundDueDate(fund);
   const requiredMonthly = fundRequiredMonthly(state, fund.id, now);
@@ -136,11 +137,19 @@ export default function FundDetailScreen() {
           goldPortion={linkedValue > 0 && fund.targetAmount > 0 ? linkedValue / fund.targetAmount : 0}
         />
         <View style={styles.statusRow}>
-          <StatusChip label={chip.label} tone={chip.tone} />
+          <View style={styles.chips}>
+            <StatusChip label={chip.label} tone={chip.tone} />
+            {pct.over && <StatusChip label="تخطيت الهدف" tone="ok" />}
+          </View>
           <AppText variant="caption" color="textSecondary" style={styles.tabular}>
-            {`\u2066${Math.round(progress * 100)}%\u2069`}
+            {`\u2066${pct.shown}%\u2069`}
           </AppText>
         </View>
+        {pct.over && (
+          <AppText variant="secondary" color="textSecondary" style={styles.tabular}>
+            {`\u2066${pct.real}%\u2069`} من الهدف
+          </AppText>
+        )}
         {due && (
           <AppText variant="secondary" color="textSecondary">
             {sinking ? 'الاستحقاق القادم' : 'الموعد'}: {formatDateAr(due)} · {monthsLeftPhrase(monthsUntil(due, now))}
@@ -273,6 +282,7 @@ const styles = StyleSheet.create({
   typeRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs },
   amounts: { flexDirection: 'row-reverse', alignItems: 'baseline', flexWrap: 'wrap', gap: space.sm },
   statusRow: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between' },
+  chips: { flexDirection: 'row-reverse', gap: space.xs },
   tabular: { fontVariant: ['tabular-nums'] },
   step: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.md },
   flex: { flex: 1 },

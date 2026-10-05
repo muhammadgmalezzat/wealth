@@ -1,10 +1,13 @@
 import { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
 import { BUCKET_TITLES } from '@/components/plan/labels';
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { Segment } from '@/components/ui/Segment';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { space } from '@/constants/theme';
 import { categoryInUse } from '@/store/operations';
 import type { Category, ExpenseBucket } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
@@ -32,11 +35,15 @@ export function CategorySheet({ category, onClose }: CategorySheetProps) {
     category && category.bucket !== 'income' ? (category.bucket as ExpenseBucket) : undefined
   );
 
+  // Inline copy of the "bucket required" message (the alert stays).
+  const [bucketError, setBucketError] = useState(false);
+
   const inUse = category ? categoryInUse(state, category.id) : false;
   const canDelete = !!category && !category.isDefault && !inUse;
 
   const handleSave = () => {
     if (kind === 'expense' && !bucket) {
+      setBucketError(true);
       showMessage('تنبيه', 'اختار نوع البند (أساسيات / رفاهيات / عطاء)');
       return;
     }
@@ -79,12 +86,12 @@ export function CategorySheet({ category, onClose }: CategorySheetProps) {
 
   return (
     <FormSheet visible title={category ? 'تعديل البند' : 'بند جديد'} onCancel={onClose} onSave={handleSave}>
-      <FieldLabel>الاسم</FieldLabel>
-      <FormInput value={name} onChangeText={setName} placeholder="مثال: جيم" />
+      <FormField label="الاسم">
+        <FormInput value={name} onChangeText={setName} placeholder="مثال: جيم" />
+      </FormField>
 
       {!category && (
-        <>
-          <FieldLabel>مصروف ولا دخل؟</FieldLabel>
+        <FormField label="مصروف ولا دخل؟">
           <Segment<Category['kind']>
             options={[
               { label: 'مصروف', value: 'expense' },
@@ -93,61 +100,47 @@ export function CategorySheet({ category, onClose }: CategorySheetProps) {
             value={kind}
             onChange={setKind}
           />
-        </>
+        </FormField>
       )}
 
       {kind === 'expense' && (
-        <>
-          <FieldLabel>النوع</FieldLabel>
-          <Segment<ExpenseBucket> options={BUCKET_OPTIONS} value={bucket} onChange={setBucket} />
-          {category && (
-            <Text style={styles.hint}>تغيير النوع بيأثر على كل معاملات البند ده، القديمة والجديدة</Text>
-          )}
-        </>
+        <FormField
+          label="النوع"
+          helper={category ? 'تغيير النوع بيأثر على كل معاملات البند ده، القديمة والجديدة.' : undefined}
+          error={bucketError ? 'اختار نوع البند (أساسيات / رفاهيات / عطاء)' : null}>
+          <Segment<ExpenseBucket>
+            options={BUCKET_OPTIONS}
+            value={bucket}
+            onChange={(next) => {
+              setBucket(next);
+              setBucketError(false);
+            }}
+          />
+        </FormField>
       )}
 
-      {category?.archived && (
-        <TouchableOpacity style={styles.secondaryBtn} onPress={() => handleArchive(false)} activeOpacity={0.8}>
-          <Text style={styles.secondaryText}>استرجاع</Text>
-        </TouchableOpacity>
-      )}
-      {category && !category.archived && !canDelete && (
-        <>
-          <TouchableOpacity style={styles.secondaryBtn} onPress={() => handleArchive(true)} activeOpacity={0.8}>
-            <Text style={styles.secondaryText}>أرشفة</Text>
-          </TouchableOpacity>
-          <Text style={styles.hint}>
-            {category.isDefault
-              ? 'البنود الأساسية مينفعش تتحذف، ممكن تأرشفها.'
-              : 'البند مستخدم في معاملات أو خطط أو معاملات متكررة، فبيتأرشف بدل ما يتحذف.'}
-          </Text>
-        </>
-      )}
-      {canDelete && (
-        <TouchableOpacity style={styles.deleteBtn} onPress={handleDelete} activeOpacity={0.8}>
-          <Text style={styles.deleteText}>حذف البند</Text>
-        </TouchableOpacity>
+      {category && (
+        <View style={styles.actions}>
+          {category.archived && (
+            <Button label="استرجاع" variant="secondary" icon="unarchive" block onPress={() => handleArchive(false)} />
+          )}
+          {!category.archived && !canDelete && (
+            <>
+              <Button label="أرشفة" variant="secondary" icon="archive" block onPress={() => handleArchive(true)} />
+              <AppText variant="caption" color="textSecondary">
+                {category.isDefault
+                  ? 'البنود الأساسية مينفعش تتحذف، ممكن تأرشفها.'
+                  : 'البند مستخدم في معاملات أو خطط أو معاملات متكررة، فبيتأرشف بدل ما يتحذف.'}
+              </AppText>
+            </>
+          )}
+          {canDelete && <Button label="احذف البند" variant="destructive" icon="delete-outline" block onPress={handleDelete} />}
+        </View>
       )}
     </FormSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  hint: { marginTop: 8, fontSize: 12, color: Colors.light.icon, textAlign: 'right' },
-  secondaryBtn: {
-    marginTop: 28,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: Colors.light.icon + '18',
-  },
-  secondaryText: { fontSize: 16, fontWeight: '700', color: Colors.light.text },
-  deleteBtn: {
-    marginTop: 28,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: FinanceColors.expense + '15',
-  },
-  deleteText: { fontSize: 16, fontWeight: '700', color: FinanceColors.expense },
+  actions: { marginTop: space.xxxl, gap: space.sm },
 });

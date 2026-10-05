@@ -102,7 +102,9 @@ app/                        expo-router routes
 components/
   AppLockGate.tsx           Biometric/PIN lock overlay (Modal)
   RecurringRunner.tsx       Invisible: processDue after hydration / on foreground; syncs reminders
-  assets/EditAccountSheet   Edit account name + "current balance"
+  assets/EditAccountSheet   Edit account name, location, "current balance"; delete
+  assets/HoldingSheet       Holding details (value, cost, value difference, linked fund) + delete
+  assets/assetsUi.ts        Pure: LOCATION_LABELS, ACCOUNT_TYPE_ICONS, holdingTitle, signedDifference, groupAccounts
   categories/CategorySheet  Add / edit / archive / restore / delete a category
   dashboard/                SafeToSpendCard, MonthlySnapshot, RecurringCard (جاي قريب),
                             NetWorthCard, BackupReminder, homeInsights.ts (pure Home logic)
@@ -118,7 +120,7 @@ components/
   plan/labels.ts            BUCKET_TITLES, KIND_OPTIONS
   recurring/                recurringUi.ts (pure: ruleState, ruleDetailsOpen), RuleSheet (add/edit/delete rule), ConfirmOccurrenceSheet (تم),
                             labels.ts (Arabic frequency / mode / section labels)
-  settings/                 ExportSheet, RestoreSheet
+  settings/                 ExportSheet, RestoreSheet, settingsUi.ts (pure: backupAgeLabel, BACKUP_NUDGE)
   transactions/             TransactionRow (shared row), TransactionSheet (add/edit) and its
                             presentational parts CategoryPicker, AccountPicker, GoldFields,
                             MoreDetails; transactionUi.ts (pure: FILTERS, filterTransactions,
@@ -129,7 +131,7 @@ components/
                             Screen (outer layout + safe area), Fab,
                             DateFields (Past/Future), DatePicker(.web), FormSheet/FieldLabel/
                             FormInput, LoadingView, MonthSwitcher, ProgressBar, Segment,
-                            StatCard, icon-symbol(.ios), CurrencyText
+                            icon-symbol(.ios), CurrencyText
 
 store/                      ALL business logic lives here (pure, no React)
   types.ts                  Data model
@@ -215,13 +217,13 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 | `/` (`index`) | الرئيسية | Calm Wealth Home (see "Home" below): greeting + date + settings icon; safe to spend (hero) → /plan; one next-best-action insight; هذا الشهر snapshot → /transactions; جاي قريب → /recurring, /due; up to 3 funds → /fund/[id], "عرض كل الصناديق" → /goals; money available to plan (Assign/Cover sheets); net worth; backup nudge → /settings?export=1; last 5 transactions (tap to edit, "+ معاملة"). |
 | `/transactions` | المعاملات | MonthSwitcher; MonthlySnapshot for the selected month (no link); filter chips الكل/مصروف/دخل/تحويل/ذهب (UI-only, by type); days (FlatList), each a header row (day label · day net in textSecondary, never red) and one ListGroup of TransactionRows (tap → edit); EmptyState for an empty month, a one-line message for a filter with no match; "+" FAB → TransactionSheet. |
 | `/plan` | الخطة | Calm Wealth plan (see "Plan" below): MonthSwitcher; "خطة الشهر" + تعديل; MetricGroup الدخل المتوقع / المخطط / المتبقي للتخطيط + status line; safe-to-spend info row (ثابت/مرن explained); PlanLineRows by bucket (tap → LineSheet, saved via savePlan); "+ أضف بند" (AddLineSheet); fund contributions (tap → fund); spending outside the plan → /transactions; المعاملات المتكررة row. No plan: EmptyState + اقترح من مصروفي / انسخ خطة … / ابدأ من الصفر. |
-| `/assets` | الأصول | Summary (إجمالي الأصول / السيولة / الاستثمارات); accounts (tap → EditAccountSheet, delete); holdings with P&L (delete); "+" → add account (cash/bank/wallet) or gold (opening asset). |
+| `/assets` | الأصول | Hero "إجمالي الأصول" (`totalAssetsEGP`) + MetricGroup سيولة / ذهب واستثمارات (gold cell) / التزامات (only when liabilities exist, text color); الحسابات ("+ حساب") grouped مصر / السعودية, archived ones in a collapsed "مؤرشفة" group (tap → EditAccountSheet); الذهب (total grams) as ListRows (value; cost · signed value difference in textSecondary; "مربوط بـ {fund}" gold chip; tap → HoldingSheet) or EmptyState → TransactionSheet on ذهب; other holdings / الالتزامات only when present; "+" FAB → add account / opening gold. Web QA: Metro serves `/assets` itself, open this tab from Home. |
 | `/goals` | الصناديق | Calm Wealth funds (see "Funds, Recurring, Due" below): title; UnassignedPanel; MetricGroup إجمالي المحجوز / مطلوب الشهر ده / صناديق; sections الطوارئ · الأهداف · مصاريف دورية (empty ones skipped) of FundCards; EmptyState "لسه معندكش صناديق." + أنشئ صندوق طوارئ (FundSheet with emergency preselected); "+" FAB → FundSheet (goal). |
 | `/fund/[id]` | (stack) | Hero (type + icon, current من target, bar with gold part, % + status chip, due + months left) · next step · actions (one primary: إضافة مبلغ, or اتدفعت for sinking) · facts ListGroup · linked gold (+ "ربط ذهب" → FundSheet when gold is linkable) · movements (newest first, last); header "تعديل" → FundSheet (edit / delete). |
-| `/settings` | (stack) | Exchange rates, gold prices (24k/21k, 18k derived), tracking start, save; backups (export/restore, last backup); البنود ("إدارة البنود" → `/categories`); المعاملات المتكررة (link to `/recurring`, "تنبيهات المستحقات" switch, off by default, disabled on web); app lock toggle; "استيراد البيانات الافتتاحية"; version/runtime/update line. `?export=1` opens the export sheet. |
+| `/settings` | (stack) | Groups: السوق (rates + "آخر تحديث", gold 24k/21k + 18k computed) · التخطيط (tracking start + the single primary "حفظ الإعدادات" for rates/gold/date; إدارة البنود, المعاملات المتكررة, تنبيهات المستحقات switch) · البيانات (backup status "آخر نسخة احتياطية" + age, overdue chip + Home's sentence, secondary "تصدير نسخة"; استعادة نسخة; استيراد البيانات الافتتاحية) · الأمان (قفل التطبيق switch) · عن التطبيق (version; collapsed "تفاصيل تقنية": runtime / channel / update id). `?export=1` opens the export sheet. |
 | `/recurring` | (stack) | "جاي خلال 30 يوم": ListGroup of up to 12 items + MetricGroup دخل / مصروف (per-currency totals from `upcoming`); groups دخل · مصروفات · تحويلات; rows: name + amount, frequency · account(s) · الجاية, chips تلقائي/بتأكيد · متوقف · انتهى (muted title when not active), pause/resume Switch beside (not inside) the tappable area; tap → RuleSheet; EmptyState; "+" FAB (stack). |
 | `/due` | (stack) | Due inbox for `confirm` rules (oldest first): "فات ومتسجلش" (earlier months, amber "فات ميعاده" chip) and "المستحق الشهر ده"; rows in a ListGroup: name, amount (تقريباً), date · account, primary "تم" (ConfirmOccurrenceSheet) + tertiary "تخطّي"; EmptyState "مفيش حاجة مستنياك." + link to /recurring. |
-| `/categories` | (stack) | Sections مصروفات (by bucket: أساسيات / رفاهيات / عطاء) and دخل with active categories ("أساسي" badge on defaults), then مؤرشفة; tap → CategorySheet (rename; bucket for expenses; أرشفة / استرجاع / حذف); "+" FAB → CategorySheet (name, مصروف/دخل, bucket required for expenses). |
+| `/categories` | (stack) | Dense ListGroups أساسيات · رفاهيات · عطاء · دخل · مؤرشفة (empty sections skipped): name, neutral "أساسي" chip on defaults, chevron; archived rows muted (with their old bucket); tap → CategorySheet (name; مصروف/دخل on create; bucket required for expenses with an inline error; أرشفة / استرجاع secondary; احذف البند destructive — only for unused custom ones); "+" FAB. |
 
 ### Design system (Calm Wealth)
 
@@ -273,13 +275,13 @@ reordered inside Arabic text. Inputs of numbers stay LTR (AmountInput).
 | `FormField` | `label`, `helper?`, `error?`, children (input) | Error: danger border + dangerSurface + icon + text. `FormInput`/`FieldLabel` in FormSheet share the look: borderStrong, radius.md, minHeight 48, body, placeholder textMuted |
 | `ListRow` / `ListGroup` | `title`, `subtitle?`, `icon?`, `iconTone` neutral \| ok \| gold, `trailing?`, `chevron?`, `archived?`, `onPress?` | 36px icon tile, minHeight 56; group = surface, radius.lg, border, hairline separators |
 | `SectionHeader` | `title`, `actionLabel?`, `onAction?`, `trailing?` (non-pressable info) | section type + tertiary action |
-| `MetricGroup` | `metrics: {label, value}[]`, `accessibilityLabel?` | One grouped surface, equal cells, hairline dividers (MonthlySnapshot and the Plan summary) |
+| `MetricGroup` | `metrics: {label, value, tone?: 'gold'}[]`, `accessibilityLabel?` | One grouped surface, equal cells, hairline dividers (MonthlySnapshot and the Plan summary) |
 | `InsightCard` | `tone` ok \| attention \| danger, `message`, `icon?`, `actionLabel?`, `onAction?` | Grounds primary50 / warningSurface / dangerSurface |
 | `EmptyState` | `icon`, `title`, `body?`, `actionLabel?`, `onAction?` | Icon disc + primary Button |
 | `Fab` | unchanged API (`placement`, `FAB_CLEARANCE`) | primary700, pill, shadow.raised |
 | `FormSheet` | unchanged API (`useSheetInsets`) | background ground, hairline header, title 18 bold, cancel textSecondary, save primary700 |
 | `Screen` | unchanged | background = colors.background |
-| `StatCard`, `CurrencyText`, `LoadingView`, `MonthSwitcher` (no outer margin since phase 4; screens space it) | unchanged (StatCard `accentColor` now ignored) | Tokens; StatCard is a plain metric tile |
+| `CurrencyText`, `LoadingView`, `MonthSwitcher` (no outer margin since phase 4; screens space it) | unchanged | Tokens (StatCard was removed in phase 6) |
 
 Pure date helper: `components/ui/formatDateAr.ts` → `formatDateAr(dateKey|iso, {year})` ("٥ أكتوبر ٢٠٢٦");
 used by redesigned components instead of `utils/formatters.formatDate` (which prints English
@@ -314,8 +316,7 @@ Content padding `space.lg`, section gap `space.xxl`. Order (`app/(tabs)/index.ts
    when null. When null and a backup is due, the backup nudge takes this slot.
 4. **MonthlySnapshot** — "هذا الشهر": دخل / مصروف / صافي from `monthSummary` (EGP) in one
    grouped surface; expense in text color; net positive (+) green, negative "−" plain. Tap or
-   "كل المعاملات" → /transactions. Replaces the three StatCards (StatCard is still used by the
-   Transactions and Assets tabs).
+   "كل المعاملات" → /transactions. Replaced the three StatCards (StatCard was removed in phase 6).
 5. **جاي قريب** (`RecurringCard`) — up to 3 `upcomingItems` as ListRows (name, day label or "بعد
    N أيام", amount; income rows green tile). Header action "الكل" → /recurring; a calm warning
    link "عندك N … · راجعهم" → /due when confirm items are due and the insight isn't already
@@ -360,6 +361,29 @@ percent · "الموعد: …". Status mapping (`components/funds/labels.ts` →
 | pending | neutral "الشهر ده" | محتاج {fundRequiredMonthly} الشهر ده (hidden if ≤ 0) |
 | behind | attention "محتاج انتباه" (never red) | محتاج {fundRequiredMonthly} هذا الشهر للحاق بالخطة (hidden if ≤ 0) |
 | no_deadline | neutral "بدون موعد" | لسه محتاج {target − current} للوصول للهدف / وصلت للهدف |
+
+### Assets, Categories, Settings, Backup, Lock (Calm Wealth phase 6)
+
+- Assets / Categories / Settings: see the route table. Balances first; value differences are
+  secondary text with a sign, never green/red, no percent or arrows.
+- EditAccountSheet now holds the account delete (moved from a trash icon on the row; same
+  confirm, still refused with `ACCOUNT_IN_USE`). There is no account archive action.
+- HoldingSheet is read-only details + "احذف الأصل" (same confirm; a gold purchase still has to be
+  deleted from its transaction — `HOLDING_HAS_PURCHASE`).
+- `TransactionSheet` takes an optional `initialType` (new transactions only) for the Assets gold
+  empty state.
+- Export / Restore sheets: presentation only — the password checks, messages, `createBackup` /
+  `openBackup` / `restoreBackup` calls and file format are unchanged; their messages are also shown
+  inline (FormField error). Export uses a Segment (بكلمة سر / بدون كلمة سر) and an attention card
+  for unencrypted files; Restore shows "الاستعادة هتستبدل البيانات الحالية." above the preview
+  rows and keeps the confirm dialog.
+- Backup status in Settings uses `daysSinceBackup` / `needsBackupReminder` (same 7-day rule as
+  Home) and `backupAgeLabel`; the nudge sentence is shared (`BACKUP_NUDGE`).
+- Lock screen (`AppLockGate`, behavior unchanged): 72px primary50 disc with a lock icon, "Wealth"
+  (display), "بياناتك المالية محمية", primary "فتح التطبيق" (retries `authenticate`). On web the
+  lock is unavailable (switch disabled with the reason) and `authenticate` returns false.
+- Fund percent is capped (`fundPercent` in fundsUi.ts): past the target FundCard and the fund hero
+  show "100%" + "تخطيت الهدف"; the detail also shows "{real}% من الهدف".
 
 ### Funds, Recurring, Due (Calm Wealth phase 5)
 
@@ -873,6 +897,8 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
   editor discards unsaved plan edits (after a confirm) because a route can't open above the modal.
 - Numbers are formatted with Western digits (`en-US`) inside an Arabic UI.
 - `AGENTS.md` points to the SDK 54 docs although the project is on SDK 57.
+- Adding an account parses amounts with `parseFloat` (Western digits only), unlike the rest of the
+  app (`parseAmount`); the delete-account error suggests archiving, which has no UI yet.
 - On web, a Switch nested inside a Pressable also fires the row's press; keep switches as siblings
   of the tappable area (Recurring rows do).
 - Metro's file watcher doesn't always pick up edits on this drive during web QA; restart

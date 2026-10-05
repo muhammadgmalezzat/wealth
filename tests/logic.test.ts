@@ -9,6 +9,8 @@ import * as home from '@/components/dashboard/homeInsights';
 import * as fundsUi from '@/components/funds/fundsUi';
 import * as planUi from '@/components/plan/planUi';
 import * as recUi from '@/components/recurring/recurringUi';
+import * as settingsUi from '@/components/settings/settingsUi';
+import * as assetsUi from '@/components/assets/assetsUi';
 import * as txUi from '@/components/transactions/transactionUi';
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
@@ -2659,5 +2661,40 @@ describe('recurring UI helpers', () => {
     assert.equal(recUi.ruleDetailsOpen({ note: ' x ' }), true);
     assert.equal(recUi.ruleDetailsOpen({ note: '  ' }), false);
     assert.equal(recUi.ruleDetailsOpen({ toAmount: 100 }), true);
+  });
+});
+
+describe('funds UI: capped percent', () => {
+  it('caps the shown percent at 100 and keeps the real one', () => {
+    assert.deepEqual(fundsUi.fundPercent(0.42), { shown: 42, real: 42, over: false });
+    assert.deepEqual(fundsUi.fundPercent(1), { shown: 100, real: 100, over: false });
+    assert.deepEqual(fundsUi.fundPercent(1.79), { shown: 100, real: 179, over: true });
+    assert.deepEqual(fundsUi.fundPercent(-0.2), { shown: 0, real: 0, over: false });
+  });
+});
+
+describe('settings / assets UI helpers', () => {
+  it('backupAgeLabel words the age of the last backup', () => {
+    assert.equal(settingsUi.backupAgeLabel(null), 'لسه مفيش نسخة');
+    assert.equal(settingsUi.backupAgeLabel(0), 'النهارده');
+    assert.equal(settingsUi.backupAgeLabel(1), 'منذ يوم');
+    assert.equal(settingsUi.backupAgeLabel(2), 'منذ يومين');
+    assert.equal(settingsUi.backupAgeLabel(7), 'منذ 7 أيام');
+    assert.equal(settingsUi.backupAgeLabel(14), 'منذ 14 يوم');
+  });
+
+  it('holdingTitle, signedDifference and groupAccounts', () => {
+    const gold = { id: 'g', type: 'gold' as const, name: 'سبيكة 5 جم', weightGrams: 5, karat: 24 as const, purchaseCostEGP: 1, updatedAt: T0 };
+    assert.equal(assetsUi.holdingTitle(gold), 'سبيكة 5 جم — عيار 24');
+    assert.equal(assetsUi.holdingTitle({ ...gold, name: ' ' }), '5 جم — عيار 24');
+    assert.ok(assetsUi.signedDifference(1200).includes('+'));
+    assert.ok(assetsUi.signedDifference(-300).includes('−'));
+    const accs = [
+      account('a', 'EGP', 1),
+      account('b', 'SAR', 1, 'SA'),
+      { ...account('c', 'EGP', 0), archived: true },
+    ];
+    const g = assetsUi.groupAccounts(accs);
+    assert.deepEqual([g.EG.map((a) => a.id), g.SA.map((a) => a.id), g.archived.map((a) => a.id)], [['a'], ['b'], ['c']]);
   });
 });

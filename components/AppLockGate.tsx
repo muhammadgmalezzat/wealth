@@ -1,9 +1,11 @@
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { AppState, Modal, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Colors } from '@/constants/theme';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
+import { colors, space } from '@/constants/theme';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { authenticate } from '@/utils/appLock';
 
@@ -85,12 +87,19 @@ export function AppLockGate() {
           styles.overlay,
           { paddingTop: insets.top, paddingBottom: insets.bottom, paddingLeft: insets.left, paddingRight: insets.right },
         ]}>
-        <MaterialIcons name="lock" size={48} color={Colors.light.tint} />
-        <Text style={styles.title}>Wealth</Text>
+        <View style={styles.disc}>
+          <MaterialIcons name="lock" size={32} color={colors.primary700} />
+        </View>
+        <AppText variant="display" align="center">
+          Wealth
+        </AppText>
+        <AppText variant="secondary" color="textSecondary" align="center">
+          بياناتك المالية محمية
+        </AppText>
         {locked && (
-          <TouchableOpacity style={styles.button} onPress={unlock} activeOpacity={0.85}>
-            <Text style={styles.buttonText}>افتح التطبيق</Text>
-          </TouchableOpacity>
+          <View style={styles.action}>
+            <Button label="فتح التطبيق" icon="lock-open" onPress={unlock} />
+          </View>
         )}
       </View>
     </Modal>
@@ -100,26 +109,19 @@ export function AppLockGate() {
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: Colors.light.background,
+    backgroundColor: colors.background,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 16,
+    gap: space.sm,
   },
-  title: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: Colors.light.text,
+  disc: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: colors.primary50,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: space.sm,
   },
-  button: {
-    marginTop: 8,
-    paddingHorizontal: 28,
-    paddingVertical: 12,
-    borderRadius: 10,
-    backgroundColor: Colors.light.tint,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
+  action: { marginTop: space.xl },
 });

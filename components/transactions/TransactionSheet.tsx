@@ -37,6 +37,8 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 interface TransactionSheetProps {
   // Omit to add a new transaction.
   transaction?: Transaction;
+  // New transactions only: the type selected when the sheet opens (default expense).
+  initialType?: Transaction['type'];
   onClose: () => void;
 }
 
@@ -47,7 +49,7 @@ interface TransactionSheetProps {
 // Progressive disclosure (fastest path: amount → category → حفظ): type · amount (+ budget hint)
 // · category chips · account line(s) · date · gold fields · "تفاصيل أكتر" (note, one-time,
 // make recurring) · delete. All state and save logic stay here; the pieces are presentational.
-export function TransactionSheet({ transaction, onClose }: TransactionSheetProps) {
+export function TransactionSheet({ transaction, initialType, onClose }: TransactionSheetProps) {
   const state = useFinanceStore();
   const lastUsed = state.settings.lastUsed ?? {};
   const editedHolding =
@@ -92,7 +94,7 @@ export function TransactionSheet({ transaction, onClose }: TransactionSheetProps
       ? { from: transaction.fromAccountId, to: transaction.toAccountId }
       : transferDefaults();
 
-  const [type, setType] = useState<TxType>(transaction?.type ?? 'expense');
+  const [type, setType] = useState<TxType>(transaction?.type ?? initialType ?? 'expense');
   const [amountText, setAmountText] = useState(transaction ? String(transaction.amount) : '');
   const [accountId, setAccountId] = useState(initialFlow.accountId);
   const [categoryId, setCategoryId] = useState(initialFlow.categoryId);

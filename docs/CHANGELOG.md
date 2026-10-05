@@ -6,6 +6,39 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 6
+
+Calm Wealth — phase 6: Assets, Gold, Categories, Settings, Backup, App Lock.
+
+> JS-only (ships with `eas update` to 1.1.0 builds). No store, backup, data, schema or native
+> changes; backup files are structurally identical and a pre-phase-6 export restores unchanged.
+
+**For users**
+- Assets: total assets first, then cash vs gold & investments (and liabilities when you have
+  some); accounts grouped by Egypt / Saudi with "≈ ج.م" for other currencies; archived accounts in a
+  collapsed group; gold with its current value and, quietly, cost and value difference (no
+  red/green); "مربوط بـ …" when gold backs a fund; a clear empty state with "سجّل شراء ذهب".
+- Tap a gold item for its details and delete; account delete moved into the account sheet (which
+  can now also change the location).
+- Categories: a simple list per section with "أساسي" tags and muted archived ones; choosing the
+  type for a new expense category is required, with the message under the field.
+- Settings grouped as السوق / التخطيط / البيانات / الأمان / عن التطبيق; one save button; backup
+  status ("منذ 5 أيام"); technical details hidden by default.
+- Backup sheets: errors appear under the password field; restore warns calmly before replacing.
+- Lock screen: calm, centred, "بياناتك المالية محمية".
+- Fund cards show "100%" and "تخطيت الهدف" past the target (the detail also shows the real %).
+
+**Technical**
+- New: `components/assets/HoldingSheet.tsx`, `components/assets/assetsUi.ts`,
+  `components/settings/settingsUi.ts`, `fundPercent` in `components/funds/fundsUi.ts` (+3 tests;
+  163 total). Deleted `components/ui/StatCard.tsx` (no users left).
+- Rebuilt Assets, Categories and Settings screens; restyled EditAccountSheet, CategorySheet,
+  ExportSheet, RestoreSheet and AppLockGate with their logic unchanged (handlers diff empty; only
+  inline-error copies were added). `MetricGroup` gains a gold cell tone; `TransactionSheet` gains
+  `initialType`.
+
+---
+
 ## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth phase 5
 
 Calm Wealth — phase 5: Funds, Fund detail, Recurring, Due.

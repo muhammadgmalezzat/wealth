@@ -1,16 +1,25 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, Switch, View } from 'react-native';
 
+import { daysSinceBackup, needsBackupReminder } from '@/components/dashboard/BackupReminder';
 import { ExportSheet } from '@/components/settings/ExportSheet';
 import { RestoreSheet } from '@/components/settings/RestoreSheet';
-
+import { BACKUP_NUDGE, backupAgeLabel } from '@/components/settings/settingsUi';
+import { AppText } from '@/components/ui/AppText';
+import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { FutureDateField } from '@/components/ui/DateFields';
-import { FieldLabel, FormInput } from '@/components/ui/FormSheet';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput } from '@/components/ui/FormSheet';
+import { formatDateAr } from '@/components/ui/formatDateAr';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { LoadingView } from '@/components/ui/LoadingView';
 import { Screen } from '@/components/ui/Screen';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { SectionHeader } from '@/components/ui/SectionHeader';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { colors, space } from '@/constants/theme';
 import { openBackup, parseBackup, type BackupFile, type OpenedBackup } from '@/store/backup';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { appInfo } from '@/utils/appInfo';
@@ -18,7 +27,6 @@ import { appLockAvailability, authenticate, type LockAvailability } from '@/util
 import { pickBackupFile } from '@/utils/backupFiles';
 import { confirmAction, showMessage } from '@/utils/dialogs';
 import { errorMessage } from '@/utils/errorMessages';
-import { formatCurrency, formatDate } from '@/utils/formatters';
 import { newId } from '@/utils/id';
 import { enableReminders, remindersSupported } from '@/utils/notifications';
 import { parseAmount } from '@/utils/parseAmount';
@@ -39,6 +47,8 @@ export default function SettingsScreen() {
   const [exportOpen, setExportOpen] = useState(params.export === '1');
   const [restore, setRestore] = useState<{ file: BackupFile; opened?: OpenedBackup } | null>(null);
   const [lock, setLock] = useState<LockAvailability | null>(null);
+  // "تفاصيل تقنية" (runtime / channel / update) stays collapsed by default.
+  const [techOpen, setTechOpen] = useState(false);
 
   useEffect(() => {
     appLockAvailability().then(setLock);
@@ -88,8 +98,7 @@ export default function SettingsScreen() {
   };
 
   const info = appInfo();
-  const versionLine = [
-    `الإصدار ${info.version}`,
+  const techLine = [
     `runtime ${info.runtimeVersion ?? '—'}`,
     info.channel ? `القناة ${info.channel}` : null,
     `التحديث ${info.updateId ? info.updateId.slice(0, 8) : 'المدمج في التطبيق'}`,
@@ -97,9 +106,9 @@ export default function SettingsScreen() {
     .filter(Boolean)
     .join(' · ');
 
-  const lastBackupLabel = settings.lastBackupAt
-    ? `آخر نسخة احتياطية: ${formatDate(settings.lastBackupAt)}`
-    : 'لسه معملتش نسخة احتياطية';
+  // Same rule and wording as Home's backup nudge.
+  const backupDays = daysSinceBackup(settings.lastBackupAt);
+  const backupOverdue = needsBackupReminder(settings.lastBackupAt);
 
   const handleImport = () => {
     confirmAction({
@@ -126,116 +135,155 @@ export default function SettingsScreen() {
 
   return (
     <Screen scroll edges={['bottom']} contentStyle={styles.content}>
-      {/* ── Exchange rates ── */}
-      <Text style={styles.sectionTitle}>أسعار الصرف</Text>
-      <Card>
-        <FieldLabel>ريال سعودي ← جنيه</FieldLabel>
-        <FormInput value={sarText} onChangeText={setSarText} keyboardType="decimal-pad" />
-        <FieldLabel>دولار ← جنيه</FieldLabel>
-        <FormInput value={usdText} onChangeText={setUsdText} keyboardType="decimal-pad" />
-        <Text style={styles.hint}>آخر تحديث: {formatDate(settings.exchangeRates.lastUpdated)}</Text>
-      </Card>
+      {/* ── السوق ── */}
+      <View>
+        <SectionHeader title="السوق" />
+        <Card>
+          <FormField label="ريال سعودي ← جنيه">
+            <FormInput value={sarText} onChangeText={setSarText} keyboardType="decimal-pad" />
+          </FormField>
+          <FormField label="دولار ← جنيه" helper={`آخر تحديث: ${formatDateAr(settings.exchangeRates.lastUpdated)}`}>
+            <FormInput value={usdText} onChangeText={setUsdText} keyboardType="decimal-pad" />
+          </FormField>
+          <FormField label="سعر جرام الذهب عيار 24 (جنيه)">
+            <FormInput value={gold24Text} onChangeText={setGold24Text} keyboardType="decimal-pad" />
+          </FormField>
+          <FormField label="سعر جرام الذهب عيار 21 (جنيه)">
+            <FormInput value={gold21Text} onChangeText={setGold21Text} keyboardType="decimal-pad" />
+          </FormField>
+          <View style={styles.helpers}>
+            {gold24 !== null && (
+              <AppText variant="caption" color="textSecondary">
+                عيار 18 (محسوب): {formatMoney(gold24 * 0.75, 'EGP')}
+              </AppText>
+            )}
+            <AppText variant="caption" color="textSecondary">
+              آخر تحديث للذهب: {formatDateAr(settings.goldPriceUpdatedAt)}
+            </AppText>
+          </View>
+        </Card>
+      </View>
 
-      {/* ── Gold prices ── */}
-      <Text style={styles.sectionTitle}>سعر جرام الذهب (جنيه)</Text>
-      <Card>
-        <FieldLabel>عيار 24</FieldLabel>
-        <FormInput value={gold24Text} onChangeText={setGold24Text} keyboardType="decimal-pad" />
-        <FieldLabel>عيار 21</FieldLabel>
-        <FormInput value={gold21Text} onChangeText={setGold21Text} keyboardType="decimal-pad" />
-        {gold24 !== null && (
-          <Text style={styles.hint}>عيار 18 (محسوب): {formatCurrency(gold24 * 0.75, 'EGP')}</Text>
+      {/* ── التخطيط ── */}
+      <View>
+        <SectionHeader title="التخطيط" />
+        <Card>
+          <FormField label="بداية التتبع" helper="المعاملات قبل التاريخ ده مش بتدخل في ملخص الشهر.">
+            <FutureDateField value={trackingStart} onChange={setTrackingStart} />
+          </FormField>
+          {/* The only primary on the screen: saves rates, gold prices and the tracking start. */}
+          <View style={styles.save}>
+            <Button label="حفظ الإعدادات" block onPress={handleSave} />
+          </View>
+        </Card>
+        <View style={styles.listGap}>
+          <ListGroup>
+            <ListRow title="إدارة البنود" icon="category" chevron onPress={() => router.push('/categories')} />
+            <ListRow title="المعاملات المتكررة" icon="repeat" chevron onPress={() => router.push('/recurring')} />
+            <ListRow
+              title="تنبيهات المستحقات"
+              subtitle={
+                remindersSupported
+                  ? 'تنبيه الساعة 10 الصبح يوم استحقاق أي معاملة متكررة بتأكيد'
+                  : 'التنبيهات متاحة على الموبايل بس'
+              }
+              icon="notifications-none"
+              trailing={
+                <Switch
+                  value={!!settings.dueNotificationsEnabled}
+                  onValueChange={toggleDueReminders}
+                  disabled={!remindersSupported}
+                  trackColor={{ true: colors.primary600, false: colors.borderStrong }}
+                  thumbColor={colors.surface}
+                  accessibilityLabel="تنبيهات المستحقات"
+                />
+              }
+            />
+          </ListGroup>
+        </View>
+      </View>
+
+      {/* ── البيانات ── */}
+      <View>
+        <SectionHeader title="البيانات" />
+        <Card style={styles.backup}>
+          <View style={styles.backupRow}>
+            <AppText variant="bodyStrong" style={styles.flex}>
+              آخر نسخة احتياطية
+            </AppText>
+            <AppText variant="secondary" color="textSecondary">
+              {backupAgeLabel(backupDays)}
+            </AppText>
+          </View>
+          {backupOverdue && (
+            <View style={styles.overdue}>
+              <StatusChip label="محتاج نسخة" tone="attention" icon="schedule" />
+              <AppText variant="secondary">{BACKUP_NUDGE}</AppText>
+            </View>
+          )}
+          <Button label="تصدير نسخة" variant="secondary" icon="file-upload" block onPress={() => setExportOpen(true)} />
+        </Card>
+        <View style={styles.listGap}>
+          <ListGroup>
+            <ListRow title="استعادة نسخة" icon="restore" chevron onPress={handlePickBackup} />
+            <ListRow
+              title={importing ? 'جاري الاستيراد…' : 'استيراد البيانات الافتتاحية'}
+              subtitle="استبدال كل البيانات بالوضع الافتتاحي (الحسابات، الذهب، ومعاملات أغسطس وسبتمبر)."
+              icon="download"
+              chevron
+              onPress={importing ? undefined : handleImport}
+            />
+          </ListGroup>
+        </View>
+      </View>
+
+      {/* ── الأمان ── */}
+      <View>
+        <SectionHeader title="الأمان" />
+        <ListGroup>
+          <ListRow
+            title="قفل التطبيق"
+            subtitle={lock && !lock.available ? lock.reason : 'بيستخدم قفل الجهاز (بصمة أو رقم سري).'}
+            icon="lock-outline"
+            trailing={
+              <Switch
+                value={!!settings.appLockEnabled}
+                onValueChange={toggleAppLock}
+                disabled={!lock?.available}
+                trackColor={{ true: colors.primary600, false: colors.borderStrong }}
+                thumbColor={colors.surface}
+                accessibilityLabel="قفل التطبيق"
+              />
+            }
+          />
+        </ListGroup>
+      </View>
+
+      {/* ── عن التطبيق ── */}
+      <View>
+        <SectionHeader title="عن التطبيق" />
+        <ListGroup>
+          <ListRow
+            title="الإصدار"
+            trailing={
+              <AppText variant="bodyStrong" align="left" style={styles.tabular}>
+                {info.version}
+              </AppText>
+            }
+          />
+          <ListRow
+            title="تفاصيل تقنية"
+            icon={techOpen ? 'expand-less' : 'expand-more'}
+            onPress={() => setTechOpen((v) => !v)}
+            accessibilityLabel={techOpen ? 'إخفاء التفاصيل التقنية' : 'عرض التفاصيل التقنية'}
+          />
+        </ListGroup>
+        {techOpen && (
+          <AppText variant="caption" color="textSecondary" style={styles.tech}>
+            {techLine}
+          </AppText>
         )}
-        <Text style={styles.hint}>آخر تحديث: {formatDate(settings.goldPriceUpdatedAt)}</Text>
-      </Card>
-
-      {/* ── Tracking ── */}
-      <Text style={styles.sectionTitle}>بداية التتبع</Text>
-      <Card>
-        <FutureDateField value={trackingStart} onChange={setTrackingStart} />
-        <Text style={styles.hint}>المعاملات قبل التاريخ ده مش بتدخل في ملخص الشهر</Text>
-      </Card>
-
-      <TouchableOpacity style={styles.saveBtn} onPress={handleSave} activeOpacity={0.85}>
-        <Text style={styles.saveText}>حفظ الإعدادات</Text>
-      </TouchableOpacity>
-
-      {/* ── Categories ── */}
-      <Text style={styles.sectionTitle}>البنود</Text>
-      <Card>
-        <TouchableOpacity style={styles.secondaryBtn} onPress={() => router.push('/categories')} activeOpacity={0.85}>
-          <Text style={styles.secondaryText}>إدارة البنود</Text>
-        </TouchableOpacity>
-        <Text style={styles.hint}>إضافة، إعادة تسمية، نقل بين الأنواع، وأرشفة</Text>
-      </Card>
-
-      {/* ── Recurring ── */}
-      <Text style={styles.sectionTitle}>المعاملات المتكررة</Text>
-      <Card>
-        <TouchableOpacity style={styles.secondaryBtn} onPress={() => router.push('/recurring')} activeOpacity={0.85}>
-          <Text style={styles.secondaryText}>إدارة المعاملات المتكررة</Text>
-        </TouchableOpacity>
-        <View style={styles.switchRow}>
-          <Switch
-            value={!!settings.dueNotificationsEnabled}
-            onValueChange={toggleDueReminders}
-            disabled={!remindersSupported}
-          />
-          <Text style={styles.body}>تنبيهات المستحقات</Text>
-        </View>
-        <Text style={styles.hint}>
-          {remindersSupported
-            ? 'تنبيه الساعة 10 الصبح يوم استحقاق أي معاملة متكررة بتأكيد'
-            : 'التنبيهات متاحة على الموبايل بس'}
-        </Text>
-      </Card>
-
-      {/* ── Backups ── */}
-      <Text style={styles.sectionTitle}>النسخ الاحتياطي</Text>
-      <Card>
-        <Text style={styles.body}>{lastBackupLabel}</Text>
-        <TouchableOpacity style={styles.primaryBtn} onPress={() => setExportOpen(true)} activeOpacity={0.85}>
-          <Text style={styles.primaryText}>تصدير نسخة احتياطية</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.secondaryBtn} onPress={handlePickBackup} activeOpacity={0.85}>
-          <Text style={styles.secondaryText}>استعادة من نسخة احتياطية</Text>
-        </TouchableOpacity>
-      </Card>
-
-      {/* ── Security ── */}
-      <Text style={styles.sectionTitle}>الأمان</Text>
-      <Card>
-        <View style={styles.switchRow}>
-          <Switch
-            value={!!settings.appLockEnabled}
-            onValueChange={toggleAppLock}
-            disabled={!lock?.available}
-          />
-          <Text style={styles.body}>قفل التطبيق</Text>
-        </View>
-        <Text style={styles.hint}>
-          {lock && !lock.available
-            ? lock.reason
-            : 'بصمة أو قفل الشاشة عند فتح التطبيق، وبعد دقيقة في الخلفية'}
-        </Text>
-      </Card>
-
-      {/* ── Opening data ── */}
-      <Text style={styles.sectionTitle}>البيانات</Text>
-      <Card>
-        <Text style={styles.body}>
-          استبدال كل البيانات بالوضع الافتتاحي (الحسابات، الذهب، ومعاملات أغسطس وسبتمبر).
-        </Text>
-        <TouchableOpacity
-          style={[styles.importBtn, importing && styles.disabled]}
-          onPress={handleImport}
-          disabled={importing}
-          activeOpacity={0.85}>
-          <Text style={styles.importText}>{importing ? 'جاري الاستيراد…' : 'استيراد البيانات الافتتاحية'}</Text>
-        </TouchableOpacity>
-      </Card>
-      {/* ── Version ── */}
-      <Text style={styles.versionInfo}>{versionLine}</Text>
+      </View>
 
       {exportOpen && <ExportSheet onClose={() => setExportOpen(false)} />}
       {restore && (
@@ -246,89 +294,14 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
-  content: {
-    padding: 16,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: Colors.light.text,
-    textAlign: 'right',
-    marginTop: 20,
-    marginBottom: 10,
-  },
-  versionInfo: {
-    marginTop: 28,
-    fontSize: 11,
-    color: Colors.light.icon,
-    textAlign: 'center',
-  },
-  hint: {
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'right',
-    marginTop: 10,
-  },
-  body: {
-    fontSize: 14,
-    color: Colors.light.text,
-    textAlign: 'right',
-    lineHeight: 21,
-  },
-  saveBtn: {
-    marginTop: 20,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: Colors.light.tint,
-  },
-  saveText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  primaryBtn: {
-    marginTop: 14,
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: Colors.light.tint,
-  },
-  primaryText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  secondaryBtn: {
-    marginTop: 10,
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: Colors.light.tint + '15',
-  },
-  secondaryText: {
-    color: Colors.light.tint,
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  switchRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  importBtn: {
-    marginTop: 14,
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: FinanceColors.expense + '15',
-  },
-  importText: {
-    color: FinanceColors.expense,
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  disabled: {
-    opacity: 0.5,
-  },
+  content: { padding: space.lg, gap: space.lg },
+  helpers: { marginTop: space.md, gap: 2 },
+  save: { marginTop: space.lg },
+  listGap: { marginTop: space.md },
+  backup: { gap: space.md },
+  backupRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.sm },
+  overdue: { gap: space.xs },
+  flex: { flex: 1 },
+  tabular: { fontVariant: ['tabular-nums'] },
+  tech: { marginTop: space.sm, paddingHorizontal: space.sm },
 });

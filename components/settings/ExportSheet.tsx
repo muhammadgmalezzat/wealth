@@ -1,10 +1,13 @@
 import { getRandomBytes } from 'expo-crypto';
 import { useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
-import { Chip, ChipRow } from '@/components/ui/Chip';
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { AppText } from '@/components/ui/AppText';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { InsightCard } from '@/components/ui/InsightCard';
+import { Segment } from '@/components/ui/Segment';
+import { colors, space } from '@/constants/theme';
 import { backupFileName, createBackup, serializeBackup } from '@/store/backup';
 import { dataOf, useFinanceStore } from '@/store/useFinanceStore';
 import { saveBackupFile } from '@/utils/backupFiles';
@@ -25,14 +28,18 @@ export function ExportSheet({ onClose }: ExportSheetProps) {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
+  // Inline copy of the password checks' messages (the alerts stay).
+  const [pwError, setPwError] = useState<{ password?: string; confirm?: string }>({});
 
   const handleExport = async () => {
     if (encrypt) {
       if (password.length < MIN_PASSWORD_LENGTH) {
+        setPwError({ password: `كلمة السر لازم تكون ${MIN_PASSWORD_LENGTH} حروف على الأقل` });
         showMessage('تنبيه', `كلمة السر لازم تكون ${MIN_PASSWORD_LENGTH} حروف على الأقل`);
         return;
       }
       if (password !== confirm) {
+        setPwError({ confirm: 'كلمتين السر مش متطابقين' });
         showMessage('تنبيه', 'كلمتين السر مش متطابقين');
         return;
       }
@@ -63,31 +70,57 @@ export function ExportSheet({ onClose }: ExportSheetProps) {
       onSave={handleExport}
       saveLabel="تصدير"
       saveDisabled={busy}>
-      <ChipRow>
-        <Chip label="بكلمة سر (موصى به)" selected={encrypt} onPress={() => setEncrypt(true)} />
-        <Chip label="بدون كلمة سر" selected={!encrypt} onPress={() => setEncrypt(false)} />
-      </ChipRow>
+      <Segment<'yes' | 'no'>
+        options={[
+          { label: 'بكلمة سر (موصى به)', value: 'yes' },
+          { label: 'بدون كلمة سر', value: 'no' },
+        ]}
+        value={encrypt ? 'yes' : 'no'}
+        onChange={(v) => setEncrypt(v === 'yes')}
+      />
 
       {encrypt ? (
         <>
-          <FieldLabel>كلمة السر</FieldLabel>
-          <FormInput value={password} onChangeText={setPassword} secureTextEntry autoCapitalize="none" />
-          <FieldLabel>تأكيد كلمة السر</FieldLabel>
-          <FormInput value={confirm} onChangeText={setConfirm} secureTextEntry autoCapitalize="none" />
-          <Text style={styles.hint}>
-            كلمة السر مش بتتحفظ في أي مكان. لو نسيتها مش هتقدر تفتح النسخة دي.
-          </Text>
+          <FormField label="كلمة السر" helper={`${MIN_PASSWORD_LENGTH} حروف على الأقل.`} error={pwError.password}>
+            <FormInput
+              value={password}
+              onChangeText={(t) => {
+                setPassword(t);
+                setPwError({});
+              }}
+              secureTextEntry
+              autoCapitalize="none"
+              accessibilityLabel="كلمة السر"
+            />
+          </FormField>
+          <FormField
+            label="تأكيد كلمة السر"
+            helper="كلمة السر مش بتتحفظ في أي مكان. لو نسيتها مش هتقدر تفتح النسخة دي."
+            error={pwError.confirm}>
+            <FormInput
+              value={confirm}
+              onChangeText={(t) => {
+                setConfirm(t);
+                setPwError({});
+              }}
+              secureTextEntry
+              autoCapitalize="none"
+              accessibilityLabel="تأكيد كلمة السر"
+            />
+          </FormField>
         </>
       ) : (
-        <Text style={[styles.hint, styles.warning]}>
-          النسخة هتبقى مقروءة لأي حد يوصله الملف (كل أرصدتك ومعاملاتك).
-        </Text>
+        <View style={styles.warning}>
+          <InsightCard tone="attention" message="النسخة هتبقى مقروءة لأي حد يوصله الملف (كل أرصدتك ومعاملاتك)." />
+        </View>
       )}
 
       {busy && (
         <View style={styles.busy}>
-          <ActivityIndicator color={Colors.light.tint} />
-          <Text style={styles.hint}>{encrypt ? 'جاري التشفير… ممكن ياخد ثواني' : 'جاري التجهيز…'}</Text>
+          <ActivityIndicator color={colors.primary700} />
+          <AppText variant="caption" color="textSecondary" align="center">
+            {encrypt ? 'جاري التشفير… ممكن ياخد ثواني' : 'جاري التجهيز…'}
+          </AppText>
         </View>
       )}
     </FormSheet>
@@ -95,19 +128,6 @@ export function ExportSheet({ onClose }: ExportSheetProps) {
 }
 
 const styles = StyleSheet.create({
-  hint: {
-    fontSize: 12,
-    color: Colors.light.icon,
-    textAlign: 'right',
-    marginTop: 10,
-    lineHeight: 18,
-  },
-  warning: {
-    color: FinanceColors.expense,
-  },
-  busy: {
-    marginTop: 20,
-    alignItems: 'center',
-    gap: 8,
-  },
+  warning: { marginTop: space.lg },
+  busy: { marginTop: space.xl, alignItems: 'center', gap: space.sm },
 });

@@ -1,29 +1,45 @@
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
-import React, { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useState } from 'react';
+import { Pressable, StyleSheet, View } from 'react-native';
 
+import { ACCOUNT_TYPE_ICONS, groupAccounts, holdingTitle, LOCATION_LABELS, signedDifference } from '@/components/assets/assetsUi';
 import { EditAccountSheet } from '@/components/assets/EditAccountSheet';
+import { HoldingSheet } from '@/components/assets/HoldingSheet';
+import { TransactionSheet } from '@/components/transactions/TransactionSheet';
+import { AmountInput } from '@/components/ui/AmountInput';
+import { AppText } from '@/components/ui/AppText';
 import { Card } from '@/components/ui/Card';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { Fab, FAB_CLEARANCE } from '@/components/ui/Fab';
-import { FieldLabel, FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { FormField } from '@/components/ui/FormField';
+import { FormInput, FormSheet } from '@/components/ui/FormSheet';
+import { formatMoney } from '@/components/ui/formatMoney';
+import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { MetricGroup } from '@/components/ui/MetricGroup';
+import { Money } from '@/components/ui/Money';
 import { Screen } from '@/components/ui/Screen';
+import { SectionHeader } from '@/components/ui/SectionHeader';
 import { Segment } from '@/components/ui/Segment';
-import { StatCard } from '@/components/ui/StatCard';
-import { Colors, FinanceColors } from '@/constants/theme';
+import { StatusChip } from '@/components/ui/StatusChip';
+import { colors, opacity, space } from '@/constants/theme';
 import {
   accountBalance,
   accountBalanceEGP,
+  goldTotals,
   holdingPnlEGP,
   holdingsTotalEGP,
+  holdingValueEGP,
+  liabilitiesTotalEGP,
+  liabilityRemaining,
   liquidTotalEGP,
   totalAssetsEGP,
 } from '@/store/selectors';
 import type { Account, CurrencyCode, GoldKarat, Holding, Location } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toEGP } from '@/utils/currency';
-import { confirmAction, showMessage } from '@/utils/dialogs';
-import { formatCurrency } from '@/utils/formatters';
+import { showMessage } from '@/utils/dialogs';
+import { currencySymbol } from '@/utils/formatters';
 import { runAction } from '@/utils/runAction';
 
 // ---------------------------------------------------------------------------
@@ -54,124 +70,33 @@ const INITIAL_FORM: FormState = {
   location: 'EG',
 };
 
-const ACCOUNT_TYPE_LABELS: Record<Account['type'], string> = {
-  cash: 'نقدي',
-  bank: 'بنك',
-  wallet: 'محفظة',
-};
-
 // ---------------------------------------------------------------------------
-// Local sub-components
-// ---------------------------------------------------------------------------
-
-interface AccountRowProps {
-  account: Account;
-  balance: number;
-  balanceEGP: number;
-  onEdit: () => void;
-  onDelete: () => void;
-}
-
-function AccountRow({ account, balance, balanceEGP, onEdit, onDelete }: AccountRowProps) {
-  return (
-    <TouchableOpacity style={styles.assetRow} onPress={onEdit} activeOpacity={0.7}>
-      {/* Left: derived balance */}
-      <View style={styles.assetLeft}>
-        <Text style={styles.assetAmount}>{formatCurrency(balance, account.currency)}</Text>
-        <Text style={styles.assetEGP}>{formatCurrency(balanceEGP, 'EGP')}</Text>
-      </View>
-      {/* Right: name + badge */}
-      <View style={styles.assetRight}>
-        <Text style={styles.assetName}>{account.name}</Text>
-        <View style={[styles.badge, { backgroundColor: Colors.light.tint + '22' }]}>
-          <Text style={[styles.badgeText, { color: Colors.light.tint }]}>
-            {ACCOUNT_TYPE_LABELS[account.type]}
-          </Text>
-        </View>
-      </View>
-      {/* Delete */}
-      <TouchableOpacity onPress={onDelete} style={styles.deleteBtn} hitSlop={8}>
-        <MaterialIcons name="delete-outline" size={20} color={FinanceColors.expense} />
-      </TouchableOpacity>
-    </TouchableOpacity>
-  );
-}
-
-interface HoldingRowProps {
-  holding: Holding;
-  pnlEGP: number;
-  onDelete: () => void;
-}
-
-function HoldingRow({ holding, pnlEGP, onDelete }: HoldingRowProps) {
-  const hasCost = holding.purchaseCostEGP > 0;
-  const isProfit = pnlEGP >= 0;
-
-  return (
-    <View style={styles.assetRow}>
-      {/* Left: specs + PnL */}
-      <View style={styles.assetLeft}>
-        <Text style={styles.goldSpec}>
-          {holding.type === 'gold'
-            ? `${holding.weightGrams}g • ${holding.karat}k`
-            : formatCurrency(holding.quantity, holding.currency)}
-        </Text>
-        {hasCost && (
-          <View
-            style={[
-              styles.pnlBadge,
-              { backgroundColor: isProfit ? FinanceColors.income + '20' : FinanceColors.expense + '20' },
-            ]}>
-            <Text style={[styles.pnlText, { color: isProfit ? FinanceColors.income : FinanceColors.expense }]}>
-              {isProfit ? '+' : ''}
-              {formatCurrency(pnlEGP, 'EGP')}
-            </Text>
-          </View>
-        )}
-      </View>
-      {/* Right: name + cost */}
-      <View style={styles.assetRight}>
-        <Text style={styles.assetName}>{holding.name}</Text>
-        {hasCost && (
-          <Text style={styles.assetEGP}>{formatCurrency(holding.purchaseCostEGP, 'EGP')}</Text>
-        )}
-      </View>
-      {/* Delete */}
-      <TouchableOpacity onPress={onDelete} style={styles.deleteBtn} hitSlop={8}>
-        <MaterialIcons name="delete-outline" size={20} color={FinanceColors.expense} />
-      </TouchableOpacity>
-    </View>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Main screen
+// Main screen — "What do I own?": balances first, value differences secondary.
 // ---------------------------------------------------------------------------
 export default function AssetsScreen() {
   const state = useFinanceStore();
-  const { accounts, holdings, addAccount, addHolding, deleteAccount, deleteHolding } = state;
+  const { accounts, holdings, addAccount, addHolding } = state;
 
   const [modalVisible, setModalVisible] = useState(false);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [holdingId, setHoldingId] = useState<string | null>(null);
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [buyingGold, setBuyingGold] = useState(false);
 
   if (!state.hasHydrated) return <LoadingView />;
 
   const editingAccount = accounts.find((a) => a.id === editingAccountId);
+  const openHolding = holdings.find((h) => h.id === holdingId);
+  const groups = groupAccounts(accounts);
+  const gold = holdings.filter((h) => h.type === 'gold');
+  const otherHoldings = holdings.filter((h) => h.type !== 'gold');
+  const totals = goldTotals(state);
+  const fundOf = (holdingIdToFind: string) => state.funds.find((f) => f.linkedHoldingIds.includes(holdingIdToFind))?.name;
 
   // Helpers
   const set = <K extends keyof FormState>(key: K, val: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: val }));
-
-  const confirmDelete = (name: string, onConfirm: () => void) => {
-    confirmAction({
-      title: 'حذف الأصل',
-      message: `هل تريد حذف "${name}"؟`,
-      confirmText: 'حذف',
-      cancelText: 'إلغاء',
-      onConfirm: () => runAction('تعذّر الحذف', onConfirm),
-    });
-  };
 
   const handleSubmit = () => {
     const name = form.name.trim();
@@ -179,7 +104,6 @@ export default function AssetsScreen() {
       showMessage('تنبيه', 'الرجاء إدخال اسم الأصل');
       return;
     }
-
     const { type } = form;
     const saved =
       type === 'gold'
@@ -207,88 +131,204 @@ export default function AssetsScreen() {
               location: form.location,
             })
           );
-
     if (saved) {
       setForm(INITIAL_FORM);
       setModalVisible(false);
     }
   };
 
-  const openModal = () => {
-    setForm(INITIAL_FORM);
+  const openModal = (type: FormType = INITIAL_FORM.type) => {
+    setForm({ ...INITIAL_FORM, type });
     setModalVisible(true);
+  };
+
+  const accountRow = (account: Account) => (
+    <ListRow
+      key={account.id}
+      title={account.name}
+      subtitle={`${LOCATION_LABELS[account.location]} · ${currencySymbol(account.currency)}`}
+      subtitleLines={1}
+      icon={ACCOUNT_TYPE_ICONS[account.type]}
+      archived={account.archived}
+      trailing={
+        <Money
+          amount={accountBalance(state, account.id)}
+          currency={account.currency}
+          align="left"
+          converted={account.currency !== 'EGP' ? { amount: accountBalanceEGP(state, account), currency: 'EGP' } : undefined}
+        />
+      }
+      onPress={() => setEditingAccountId(account.id)}
+    />
+  );
+
+  const holdingRow = (holding: Holding) => {
+    const fundName = fundOf(holding.id);
+    const hasCost = holding.purchaseCostEGP > 0;
+    return (
+      <ListRow
+        key={holding.id}
+        title={holdingTitle(holding)}
+        subtitle={`${LOCATION_LABELS[holding.location ?? 'EG']} · القيمة الحالية`}
+        subtitleLines={1}
+        icon={holding.type === 'gold' ? 'diamond' : 'payments'}
+        iconTone={holding.type === 'gold' ? 'gold' : 'neutral'}
+        trailing={<Money amount={holdingValueEGP(state, holding)} currency="EGP" align="left" />}
+        accessory={
+          hasCost || fundName ? (
+            <View style={styles.holdingMeta}>
+              {hasCost && (
+                <AppText variant="caption" color="textSecondary" style={styles.tabular}>
+                  تكلفة الشراء {formatMoney(holding.purchaseCostEGP, 'EGP')} · فرق القيمة{' '}
+                  {signedDifference(holdingPnlEGP(state, holding))}
+                </AppText>
+              )}
+              {fundName && <StatusChip label={`مربوط بـ ${fundName}`} tone="gold" icon="link" />}
+            </View>
+          ) : undefined
+        }
+        onPress={() => setHoldingId(holding.id)}
+      />
+    );
   };
 
   return (
     <Screen
       scroll
       contentStyle={styles.content}
-      overlay={<Fab placement="tab" onPress={openModal} accessibilityLabel="إضافة أصل" />}>
-        {/* ── Summary row ──────────────────────────────────── */}
-        <View style={styles.summaryRow}>
-          <StatCard label="إجمالي الأصول" amountEGP={totalAssetsEGP(state)} accentColor={Colors.light.tint} />
-          <StatCard label="السيولة" amountEGP={liquidTotalEGP(state)} accentColor={Colors.light.tint} />
-          <StatCard label="الاستثمارات" amountEGP={holdingsTotalEGP(state)} accentColor={FinanceColors.gold} />
-        </View>
-
-        {/* ── Accounts ──────────────────────────────────────── */}
-        <Text style={styles.sectionTitle}>الحسابات</Text>
-        <Card style={styles.listCard}>
-          {accounts.length === 0 ? (
-            <Text style={styles.emptyText}>لا توجد حسابات</Text>
-          ) : (
-            accounts.map((account, idx) => (
-              <React.Fragment key={account.id}>
-                <AccountRow
-                  account={account}
-                  balance={accountBalance(state, account.id)}
-                  balanceEGP={accountBalanceEGP(state, account)}
-                  onEdit={() => setEditingAccountId(account.id)}
-                  onDelete={() => confirmDelete(account.name, () => deleteAccount(account.id))}
-                />
-                {idx < accounts.length - 1 && <View style={styles.divider} />}
-              </React.Fragment>
-            ))
-          )}
-        </Card>
-
-        {/* ── Holdings ─────────────────────────────────────── */}
-        <Text style={styles.sectionTitle}>الاستثمارات</Text>
-        <Card style={styles.listCard}>
-          {holdings.length === 0 ? (
-            <Text style={styles.emptyText}>لا توجد استثمارات</Text>
-          ) : (
-            holdings.map((holding, idx) => (
-              <React.Fragment key={holding.id}>
-                <HoldingRow
-                  holding={holding}
-                  pnlEGP={holdingPnlEGP(state, holding)}
-                  onDelete={() => confirmDelete(holding.name, () => deleteHolding(holding.id))}
-                />
-                {idx < holdings.length - 1 && <View style={styles.divider} />}
-              </React.Fragment>
-            ))
-          )}
-        </Card>
-
-
-      {/* ── Edit account modal ────────────────────────────── */}
-      {editingAccount && (
-        <EditAccountSheet
-          key={editingAccount.id}
-          account={editingAccount}
-          onClose={() => setEditingAccountId(null)}
+      overlay={<Fab placement="tab" onPress={() => openModal()} accessibilityLabel="إضافة أصل" />}>
+      {/* ── Hero ── */}
+      <Card variant="hero" style={styles.hero}>
+        <AppText variant="secondary" color="textSecondary">
+          إجمالي الأصول
+        </AppText>
+        <Money amount={totalAssetsEGP(state)} currency="EGP" size="lg" />
+        <MetricGroup
+          metrics={[
+            { label: 'سيولة', value: <Money amount={liquidTotalEGP(state)} currency="EGP" align="center" /> },
+            {
+              label: 'ذهب واستثمارات',
+              tone: 'gold',
+              value: <Money amount={holdingsTotalEGP(state)} currency="EGP" align="center" />,
+            },
+            ...(state.liabilities.length > 0
+              ? [{ label: 'التزامات', value: <Money amount={liabilitiesTotalEGP(state)} currency="EGP" align="center" /> }]
+              : []),
+          ]}
         />
+      </Card>
+
+      {/* ── Accounts ── */}
+      <View>
+        <SectionHeader title="الحسابات" actionLabel="+ حساب" onAction={() => openModal('cash')} />
+        {accounts.length === 0 ? (
+          <AppText variant="secondary" color="textSecondary">
+            لسه مفيش حسابات.
+          </AppText>
+        ) : (
+          <View style={styles.groups}>
+            {(['EG', 'SA'] as Location[]).map((loc) =>
+              groups[loc].length === 0 ? null : (
+                <View key={loc} style={styles.group}>
+                  <AppText variant="caption" color="textSecondary">
+                    {LOCATION_LABELS[loc]}
+                  </AppText>
+                  <ListGroup>{groups[loc].map(accountRow)}</ListGroup>
+                </View>
+              )
+            )}
+            {groups.archived.length > 0 && (
+              <View style={styles.group}>
+                <Pressable
+                  onPress={() => setArchivedOpen((v) => !v)}
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: archivedOpen }}
+                  style={({ pressed }) => [styles.toggle, pressed && { opacity: opacity.pressed }]}>
+                  <AppText variant="caption" color="textSecondary">
+                    مؤرشفة ({groups.archived.length})
+                  </AppText>
+                  <MaterialIcons name={archivedOpen ? 'expand-less' : 'expand-more'} size={20} color={colors.textSecondary} />
+                </Pressable>
+                {archivedOpen && <ListGroup>{groups.archived.map(accountRow)}</ListGroup>}
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+
+      {/* ── Gold ── */}
+      <View>
+        <SectionHeader
+          title="الذهب"
+          trailing={
+            gold.length > 0 ? (
+              <AppText variant="secondary" color="textSecondary" style={styles.tabular}>
+                {totals.totalGrams} جم
+              </AppText>
+            ) : undefined
+          }
+        />
+        {gold.length === 0 ? (
+          <Card variant="subtle">
+            <EmptyState
+              icon="diamond"
+              title="لسه معندكش ذهب مسجل."
+              body="سجّل شراء الذهب كأصل عشان يتحسب في ثروتك ويدعم أهدافك."
+              actionLabel="سجّل شراء ذهب"
+              onAction={() => setBuyingGold(true)}
+            />
+          </Card>
+        ) : (
+          <ListGroup>{gold.map(holdingRow)}</ListGroup>
+        )}
+      </View>
+
+      {/* ── Other investments (only if present) ── */}
+      {otherHoldings.length > 0 && (
+        <View>
+          <SectionHeader title="استثمارات تانية" />
+          <ListGroup>{otherHoldings.map(holdingRow)}</ListGroup>
+        </View>
       )}
 
-      {/* ── Add asset modal ───────────────────────────────── */}
-      <FormSheet
-        visible={modalVisible}
-        title="إضافة أصل"
-        onCancel={() => setModalVisible(false)}
-        onSave={handleSubmit}>
-        {/* Type */}
-        <FieldLabel>النوع</FieldLabel>
+      {/* ── Liabilities (only if present) ── */}
+      {state.liabilities.length > 0 && (
+        <View>
+          <SectionHeader title="الالتزامات" />
+          <ListGroup>
+            {state.liabilities.map((l) => (
+              <ListRow
+                key={l.id}
+                title={l.name}
+                subtitle={
+                  l.monthlyPayment
+                    ? `قسط شهري ${formatMoney(l.monthlyPayment, l.currency)} · من أصل ${formatMoney(l.principal, l.currency)}`
+                    : `من أصل ${formatMoney(l.principal, l.currency)}`
+                }
+                subtitleLines={2}
+                icon="event-note"
+                trailing={<Money amount={liabilityRemaining(state, l)} currency={l.currency} align="left" />}
+              />
+            ))}
+          </ListGroup>
+        </View>
+      )}
+
+      {editingAccount && (
+        <EditAccountSheet key={editingAccount.id} account={editingAccount} onClose={() => setEditingAccountId(null)} />
+      )}
+      {openHolding && (
+        <HoldingSheet
+          key={openHolding.id}
+          holding={openHolding}
+          fundName={fundOf(openHolding.id)}
+          onClose={() => setHoldingId(null)}
+        />
+      )}
+      {buyingGold && <TransactionSheet initialType="asset_purchase" onClose={() => setBuyingGold(false)} />}
+
+      {/* ── Add asset (opening balance / gold you already own) ── */}
+      <FormSheet visible={modalVisible} title="إضافة أصل" onCancel={() => setModalVisible(false)} onSave={handleSubmit}>
         <Segment<FormType>
           options={[
             { label: 'نقدي', value: 'cash' },
@@ -300,79 +340,58 @@ export default function AssetsScreen() {
           onChange={(v) => set('type', v)}
         />
 
-        {/* Name */}
-        <FieldLabel>الاسم</FieldLabel>
-        <FormInput
-          value={form.name}
-          onChangeText={(v) => set('name', v)}
-          placeholder="مثال: محفظة ريالات"
-        />
+        <FormField label="الاسم">
+          <FormInput value={form.name} onChangeText={(v) => set('name', v)} placeholder="مثال: محفظة ريالات" />
+        </FormField>
 
-        {/* Opening balance — accounts only */}
         {form.type !== 'gold' && (
-          <>
-            <FieldLabel>المبلغ</FieldLabel>
-            <FormInput
-              value={form.amount}
-              onChangeText={(v) => set('amount', v)}
-              placeholder="0"
-              keyboardType="decimal-pad"
-            />
-          </>
+          <FormField label="المبلغ">
+            <AmountInput value={form.amount} onChangeText={(v) => set('amount', v)} currency={form.currency} allowZero />
+          </FormField>
         )}
 
-        {/* Location */}
-        <FieldLabel>المكان</FieldLabel>
-        <Segment<Location>
-          options={[
-            { label: 'مصر', value: 'EG' },
-            { label: 'السعودية', value: 'SA' },
-          ]}
-          value={form.location}
-          onChange={(v) => set('location', v)}
-        />
+        <FormField label="المكان">
+          <Segment<Location>
+            options={[
+              { label: 'مصر', value: 'EG' },
+              { label: 'السعودية', value: 'SA' },
+            ]}
+            value={form.location}
+            onChange={(v) => set('location', v)}
+          />
+        </FormField>
 
-        {/* Currency */}
-        <FieldLabel>العملة</FieldLabel>
-        <Segment<CurrencyCode>
-          options={[
-            { label: 'ج.م', value: 'EGP' },
-            { label: 'ر.س', value: 'SAR' },
-            { label: '$', value: 'USD' },
-          ]}
-          value={form.currency}
-          onChange={(v) => set('currency', v)}
-        />
+        <FormField label="العملة">
+          <Segment<CurrencyCode>
+            options={[
+              { label: 'ج.م', value: 'EGP' },
+              { label: 'ر.س', value: 'SAR' },
+              { label: '$', value: 'USD' },
+            ]}
+            value={form.currency}
+            onChange={(v) => set('currency', v)}
+          />
+        </FormField>
 
-        {/* Gold-only fields */}
         {form.type === 'gold' && (
           <>
-            <FieldLabel>الوزن (جرام)</FieldLabel>
-            <FormInput
-              value={form.weightGrams}
-              onChangeText={(v) => set('weightGrams', v)}
-              placeholder="0"
-              keyboardType="decimal-pad"
-            />
-
-            <FieldLabel>العيار</FieldLabel>
-            <Segment<KaratOption>
-              options={[
-                { label: '18k', value: '18' },
-                { label: '21k', value: '21' },
-                { label: '24k', value: '24' },
-              ]}
-              value={form.karat}
-              onChange={(v) => set('karat', v)}
-            />
-
-            <FieldLabel>سعر الشراء (بالعملة المختارة)</FieldLabel>
-            <FormInput
-              value={form.purchasePrice}
-              onChangeText={(v) => set('purchasePrice', v)}
-              placeholder="0"
-              keyboardType="decimal-pad"
-            />
+            <FormField label="الوزن (جرام)">
+              <FormInput value={form.weightGrams} onChangeText={(v) => set('weightGrams', v)} placeholder="0" keyboardType="decimal-pad" />
+            </FormField>
+            <FormField label="العيار">
+              <Segment<KaratOption>
+                options={[
+                  { label: 'عيار 24', value: '24' },
+                  { label: 'عيار 21', value: '21' },
+                  { label: 'عيار 18', value: '18' },
+                ]}
+                value={form.karat}
+                onChange={(v) => set('karat', v)}
+              />
+            </FormField>
+            <FormField label="سعر الشراء (بالعملة المختارة)" helper="ذهب عندك من قبل؛ لو اشتريته دلوقتي سجّله من «شراء ذهب» في المعاملات.">
+              <FormInput value={form.purchasePrice} onChangeText={(v) => set('purchasePrice', v)} placeholder="0" keyboardType="decimal-pad" />
+            </FormField>
           </>
         )}
       </FormSheet>
@@ -380,107 +399,12 @@ export default function AssetsScreen() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
 const styles = StyleSheet.create({
-  content: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: FAB_CLEARANCE,
-  },
-
-  // Summary
-  summaryRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 20,
-  },
-
-  // Section
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: Colors.light.text,
-    textAlign: 'right',
-    marginBottom: 10,
-  },
-  listCard: {
-    padding: 0,
-    marginBottom: 20,
-    overflow: 'hidden',
-  },
-  divider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: FinanceColors.progressTrack,
-    marginHorizontal: 16,
-  },
-  emptyText: {
-    textAlign: 'center',
-    color: Colors.light.icon,
-    fontSize: 14,
-    paddingVertical: 24,
-  },
-
-  // Asset rows
-  assetRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-  },
-  assetLeft: {
-    flex: 1,
-    alignItems: 'flex-start',
-    gap: 4,
-  },
-  assetRight: {
-    alignItems: 'flex-end',
-    marginHorizontal: 12,
-    gap: 4,
-  },
-  assetName: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.light.text,
-    textAlign: 'right',
-  },
-  assetAmount: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.light.text,
-  },
-  assetEGP: {
-    fontSize: 12,
-    color: Colors.light.icon,
-  },
-  badge: {
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  badgeText: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  deleteBtn: {
-    padding: 4,
-  },
-
-  // Gold rows
-  goldSpec: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: FinanceColors.gold,
-  },
-  pnlBadge: {
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  pnlText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
+  content: { paddingHorizontal: space.lg, paddingTop: space.sm, paddingBottom: FAB_CLEARANCE, gap: space.xl },
+  hero: { gap: space.sm },
+  groups: { gap: space.md },
+  group: { gap: space.xs },
+  toggle: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs, minHeight: 36 },
+  holdingMeta: { gap: space.xs, marginTop: 2 },
+  tabular: { fontVariant: ['tabular-nums'] },
 });

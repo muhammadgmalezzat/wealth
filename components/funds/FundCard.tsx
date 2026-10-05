@@ -1,5 +1,6 @@
 import { Pressable, StyleSheet, View } from 'react-native';
 
+import { fundPercent } from '@/components/funds/fundsUi';
 import { FUND_STATUS, fundStatusSentence } from '@/components/funds/labels';
 import { AppText } from '@/components/ui/AppText';
 import { Card } from '@/components/ui/Card';
@@ -32,6 +33,8 @@ export function FundCard({ fund, state, onPress }: FundCardProps) {
   const chip = FUND_STATUS[status];
   const current = fundCurrent(state, fund.id);
   const progress = fundProgress(state, fund.id);
+  // Capped at 100% ("تخطيت الهدف" past the target).
+  const pct = fundPercent(progress);
   const linked = fundLinkedValue(state, fund.id);
   const due = fundDueDate(fund);
   const sentence = fundStatusSentence(status, {
@@ -51,6 +54,7 @@ export function FundCard({ fund, state, onPress }: FundCardProps) {
           <AppText variant="bodyStrong" style={styles.name} numberOfLines={2}>
             {fund.name}
           </AppText>
+          {pct.over && <StatusChip label="تخطيت الهدف" tone="ok" />}
           <StatusChip label={chip.label} tone={chip.tone} />
         </View>
 
@@ -72,7 +76,7 @@ export function FundCard({ fund, state, onPress }: FundCardProps) {
             {sentence ?? ''}
           </AppText>
           <AppText variant="caption" color="textSecondary" style={styles.percent}>
-            {`\u2066${Math.round(progress * 100)}%\u2069`}
+            {`\u2066${pct.shown}%\u2069`}
           </AppText>
         </View>
 

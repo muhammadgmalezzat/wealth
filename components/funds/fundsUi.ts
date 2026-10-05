@@ -65,3 +65,18 @@ export function movementKind(movement: Pick<FundMovement, 'amount' | 'note'>): M
   if (movement.amount >= 0) return 'allocation';
   return movement.note?.startsWith('اتدفعت') ? 'payment' : 'withdrawal';
 }
+
+export interface PercentDisplay {
+  // What the chip/caption shows: capped at 100.
+  shown: number;
+  // The real rounded percent (may exceed 100), for secondary text.
+  real: number;
+  // Progress past the target.
+  over: boolean;
+}
+
+// Fund progress as a capped percent: "100%" + "تخطيت الهدف" past the target, real figure kept.
+export function fundPercent(progress: number): PercentDisplay {
+  const real = Math.round(Math.max(0, progress) * 100);
+  return { shown: Math.min(100, real), real, over: progress > 1 + 1e-9 };
+}
