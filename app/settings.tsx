@@ -1,6 +1,6 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { StyleSheet, Switch, View } from 'react-native';
+import { Platform, StyleSheet, Switch, View } from 'react-native';
 
 import { daysSinceBackup, needsBackupReminder } from '@/components/dashboard/BackupReminder';
 import { ExportSheet } from '@/components/settings/ExportSheet';
@@ -28,7 +28,7 @@ import { pickBackupFile } from '@/utils/backupFiles';
 import { confirmAction, showMessage } from '@/utils/dialogs';
 import { errorMessage } from '@/utils/errorMessages';
 import { newId } from '@/utils/id';
-import { enableReminders, remindersSupported } from '@/utils/notifications';
+import { enableReminders, notificationsAvailable } from '@/utils/notifications';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
@@ -183,16 +183,18 @@ export default function SettingsScreen() {
             <ListRow
               title="تنبيهات المستحقات"
               subtitle={
-                remindersSupported
+                notificationsAvailable()
                   ? 'تنبيه الساعة 10 الصبح يوم استحقاق أي معاملة متكررة بتأكيد'
-                  : 'التنبيهات متاحة على الموبايل بس'
+                  : Platform.OS === 'web'
+                    ? 'التنبيهات متاحة على الموبايل بس'
+                    : 'متاحة في التطبيق المثبت بس، مش في Expo Go'
               }
               icon="notifications-none"
               trailing={
                 <Switch
-                  value={!!settings.dueNotificationsEnabled}
+                  value={notificationsAvailable() && !!settings.dueNotificationsEnabled}
                   onValueChange={toggleDueReminders}
-                  disabled={!remindersSupported}
+                  disabled={!notificationsAvailable()}
                   trackColor={{ true: colors.primary600, false: colors.borderStrong }}
                   thumbColor={colors.surface}
                   accessibilityLabel="تنبيهات المستحقات"

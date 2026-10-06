@@ -1,7 +1,6 @@
 import { fromEGP, toEGP } from '@/utils/currency';
 import { monthOf, monthsUntil, shiftMonth, toMonthKey } from '@/utils/dates';
-// planning.ts imports this module too; daysLeftInMonth is only used at call time, so the cycle is safe.
-import { daysLeftInMonth } from './planning';
+import { daysLeftInMonth } from './shared';
 import type {
   Account,
   Category,

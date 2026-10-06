@@ -15,4 +15,8 @@ export async function cancelReminders(): Promise<void> {}
 
 export async function replaceReminders(_reminders: Reminder[]): Promise<void> {}
 
+export function notificationsAvailable(): boolean {
+  return false;
+}
+
 export const remindersSupported = false;

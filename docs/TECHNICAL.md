@@ -810,6 +810,9 @@ each transaction's `rateToEGP` snapshot**.
 - `planProgress`: per line `spent`, `remaining = limit − spent`, `pct = spent/limit` (1 if limit 0 and spent > 0); bucket totals from lines; `totalPlanned = Σ limits`; `totalSpent` = all expenses of the month; `unplannedSpent` = spend in categories without a line; contributions `allocated` = this month's net movements converted to plan currency
 - `unplannedAmount = expectedIncome − Σ limits − Σ contributions` (goal: 0)
 - `safeToSpend = Σ max(0, remaining)` over **flexible** lines (null without plan)
+- `daysInMonth` / `daysLeftInMonth` live in `store/shared.ts` (re-exported by planning.ts) so
+  selectors.ts and planning.ts don't import each other (planning → selectors only; no cycles,
+  checked with `npx madge --circular`).
 - `daysLeftInMonth`: current month `daysInMonth − today + 1`, future full month, past 0; `safeToSpendToday = safe / daysLeft` (0 if none)
 - `overspentLines`: lines with `remaining < 0`
 - `spendImpact(month, categoryId, amount, amountCurrency?)`: `remainingAfter = remaining − converted amount`, `overBy = max(0, −remainingAfter)`; null without plan/line
@@ -879,6 +882,12 @@ File (`wealth-backup-YYYY-MM-DD.json`):
   cancels this app's `due-*` notifications and reschedules `reminderSchedule()` (DATE triggers)
   whenever rules or transactions change; turning it off cancels them. The notification shows
   "مستحق النهارده" + rule name and amount. No-ops on web.
+  `expo-notifications` is never imported at module level (in Expo Go on Android, SDK 53+, merely
+  loading it throws and would crash `app/_layout.tsx` through RecurringRunner). It is loaded once
+  with `import()` on first use, only when `Constants.executionEnvironment` is not `StoreClient`;
+  `setNotificationHandler` runs at that point. In Expo Go every function is a no-op and
+  `notificationsAvailable()` is false, so Settings disables the switch ("متاحة في التطبيق المثبت
+  بس، مش في Expo Go") and shows it off. Nothing else imports `expo-notifications`.
 
 ---
 

@@ -1,9 +1,10 @@
 import { fromEGP, toEGP } from '@/utils/currency';
-import { fromDateKey, monthOf, shiftMonth, toDateKey, toMonthKey } from '@/utils/dates';
+import { fromDateKey, monthOf, shiftMonth, toDateKey } from '@/utils/dates';
 import { FIXED_CATEGORY_IDS } from './defaultCategories';
 import type { PlanInput } from './operations';
 import { isLive, monthlyEquivalent } from './recurring';
 import { fundsByPriority, fundSuggestedMonthly } from './selectors';
+import { daysInMonth, daysLeftInMonth } from './shared';
 import type {
   CurrencyCode,
   ExpenseBucket,
@@ -68,18 +69,8 @@ export function spendByCategory(state: State, month: string, currency: CurrencyC
   return totals;
 }
 
-export function daysInMonth(month: string): number {
-  const [y, m] = month.split('-').map(Number);
-  return new Date(y, m, 0).getDate();
-}
-
-// Days of `month` still ahead, today included: all of a future month, none of a past one.
-export function daysLeftInMonth(month: string, now: Date = new Date()): number {
-  const current = toMonthKey(now);
-  if (month < current) return 0;
-  if (month > current) return daysInMonth(month);
-  return daysInMonth(month) - now.getDate() + 1;
-}
+// Moved to shared.ts (selectors needs them too); re-exported so callers keep importing from here.
+export { daysInMonth, daysLeftInMonth };
 
 // --- Suggestion ---------------------------------------------------------------
 

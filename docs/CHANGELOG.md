@@ -6,6 +6,23 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Expo Go crash fix
+
+> JS-only (ships with `eas update` to 1.1.0 builds). No native, schema or data change.
+
+**For users**
+- The app no longer crashes on start in Expo Go on Android. There, "تنبيهات المستحقات" is disabled
+  with "متاحة في التطبيق المثبت بس، مش في Expo Go"; the installed app keeps reminders as before.
+
+**Technical**
+- `utils/notifications.ts`: no module-level `expo-notifications` import; lazy `import()` on first
+  use, skipped in Expo Go (`ExecutionEnvironment.StoreClient`); new `notificationsAvailable()`
+  (also on web, false); public API unchanged (`remindersSupported` kept).
+- Require cycle selectors ↔ planning removed: `daysInMonth` / `daysLeftInMonth` moved to the new
+  `store/shared.ts` (planning re-exports them).
+
+---
+
 ## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Calm Wealth redesign (summary)
 
 The whole Calm Wealth redesign in one place. JS-only: ships with `eas update` to 1.1.0 builds; no
