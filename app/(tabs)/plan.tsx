@@ -23,6 +23,7 @@ import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { colors, opacity, space } from '@/constants/theme';
+import { isReviewed } from '@/store/nextActions';
 import { emptyPlan, planProgress, planSuggestion, previousPlanMonth, safeToSpend } from '@/store/planning';
 import type { ExpenseBucket } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
@@ -48,6 +49,8 @@ export default function PlanScreen() {
 
   const progress = planProgress(state, month);
   const previous = previousPlanMonth(state, month);
+  // Past months can be reviewed (summary, plan vs actual) from here.
+  const reviewLink = month < toMonthKey(new Date()) ? <ReviewLink month={month} reviewed={isReviewed(state, month)} /> : null;
   const category = (id: string) => state.categories.find((c) => c.id === id);
   const fundName = (id: string) => state.funds.find((f) => f.id === id)?.name ?? '—';
 
@@ -78,6 +81,7 @@ export default function PlanScreen() {
           )}
           <Button label="ابدأ من الصفر" variant="tertiary" onPress={() => create('scratch')} />
         </View>
+        {reviewLink}
         <RecurringLink />
       </Screen>
     );
@@ -108,6 +112,8 @@ export default function PlanScreen() {
   return (
     <Screen scroll contentStyle={styles.content}>
       <MonthSwitcher month={month} onChange={setMonth} />
+
+      {reviewLink}
 
       {/* ── Summary ── */}
       <View style={styles.block}>
@@ -286,6 +292,22 @@ export default function PlanScreen() {
         />
       )}
     </Screen>
+  );
+}
+
+function ReviewLink({ month, reviewed }: { month: string; reviewed: boolean }) {
+  return (
+    <ListGroup>
+      <ListRow
+        title={`مراجعة ${formatMonthLabel(month)}`}
+        subtitle="الملخص، الخطة مقابل الفعلي، وخطوتك الجاية"
+        icon="fact-check"
+        iconTone={reviewed ? 'ok' : 'neutral'}
+        accessory={reviewed ? <StatusChip label="اتراجع" tone="ok" icon="check" /> : undefined}
+        chevron
+        onPress={() => router.push({ pathname: '/review', params: { month } })}
+      />
+    </ListGroup>
   );
 }
 

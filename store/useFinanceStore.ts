@@ -52,6 +52,9 @@ export function dataOf(s: FinanceState): FinanceState {
     liabilities: s.liabilities,
     recurringRules: s.recurringRules,
     monthlyPlans: s.monthlyPlans,
+    netWorthSnapshots: s.netWorthSnapshots,
+    actionDismissals: s.actionDismissals,
+    monthlyReviews: s.monthlyReviews,
     settings: s.settings,
     tombstones: s.tombstones,
   };
@@ -116,6 +119,12 @@ interface FinanceActions {
   savePlan: (plan: ops.PlanInput) => void;
   copyPlan: (fromMonth: string, toMonth: string) => void;
   deletePlan: (month: string) => void;
+
+  // Upserts this month's net worth snapshot (and fills missing past months). No-op when unchanged.
+  recordNetWorthSnapshots: () => void;
+  // Snoozes a Next Best Action for 24 hours.
+  dismissAction: (actionId: string) => void;
+  completeMonthlyReview: (month: string) => void;
 
   updateRates: (rates: ExchangeRates) => void;
   updateSettings: (update: ops.SettingsUpdate) => void;
@@ -231,6 +240,16 @@ export const useFinanceStore = create<FinanceStore>()(
       savePlan: (plan) => set(ops.savePlan(get(), plan, ctx)),
       copyPlan: (fromMonth, toMonth) => set(ops.copyPlan(get(), fromMonth, toMonth, ctx)),
       deletePlan: (month) => set(ops.deletePlan(get(), month, ctx)),
+
+      recordNetWorthSnapshots: () => {
+        const patch = ops.recordNetWorthSnapshots(get(), ctx);
+        if (Object.keys(patch).length > 0) set(patch);
+      },
+      dismissAction: (actionId) => set(ops.dismissAction(get(), actionId, ctx)),
+      completeMonthlyReview: (month) => {
+        const patch = ops.completeMonthlyReview(get(), month, ctx);
+        if (Object.keys(patch).length > 0) set(patch);
+      },
 
       updateRates: (rates) => set(ops.updateRates(get(), rates)),
       updateSettings: (update) => set(ops.updateSettings(get(), update, ctx)),

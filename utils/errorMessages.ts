@@ -82,6 +82,7 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   NOT_A_SINKING_FUND: () => 'هذا الصندوق ليس صندوق مصاريف دورية',
   DUPLICATE_ENTRY: (d) => `${entity(d)} موجود في الخطة بالفعل`,
   PLAN_EXISTS: () => 'فيه خطة للشهر ده بالفعل',
+  ACTION_NOT_DISMISSIBLE: () => 'الخطوة دي مهمة ومينفعش تتأجل',
   OCCURRENCE_NOT_DUE: () => 'المستحق ده اتسجل أو اتخطى بالفعل',
   CATEGORY_NAME_TAKEN: () => 'فيه بند بنفس الاسم بالفعل',
   CATEGORY_KIND_LOCKED: () => 'مينفعش تغيّر بند من مصروف لدخل أو العكس',

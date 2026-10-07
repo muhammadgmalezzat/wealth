@@ -3,15 +3,16 @@ import { router } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
-import { BackupReminder, needsBackupReminder } from '@/components/dashboard/BackupReminder';
-import { homeFunds, nextBestAction } from '@/components/dashboard/homeInsights';
+import { homeFunds } from '@/components/dashboard/homeInsights';
 import { MonthlySnapshot } from '@/components/dashboard/MonthlySnapshot';
 import { NetWorthCard } from '@/components/dashboard/NetWorthCard';
+import { NextActionsCard } from '@/components/dashboard/NextActionsCard';
 import { RecurringCard } from '@/components/dashboard/RecurringCard';
 import { SafeToSpendCard } from '@/components/dashboard/SafeToSpendCard';
 import { AssignSheet } from '@/components/funds/AssignSheet';
 import { CoverSheet } from '@/components/funds/CoverSheet';
 import { FundCard } from '@/components/funds/FundCard';
+import { FundSheet } from '@/components/funds/FundSheet';
 import { UnassignedPanel } from '@/components/funds/UnassignedPanel';
 import { TransactionRow } from '@/components/transactions/TransactionRow';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
@@ -24,41 +25,54 @@ import { LoadingView } from '@/components/ui/LoadingView';
 import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { colors, opacity, space } from '@/constants/theme';
+import { nextActions, pendingReviewMonth, REVIEW_PROMPT_DAYS, type NextAction } from '@/store/nextActions';
+import { planFor } from '@/store/planning';
 import { recentTransactions } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
+import { toMonthKey } from '@/utils/dates';
+import { formatMonthLabel } from '@/utils/formatters';
+import { runAction } from '@/utils/runAction';
 
 // 'add' opens an empty transaction sheet; an id opens it for editing.
 type TxSheetTarget = 'add' | { id: string } | null;
 
-// Home answers "what should I know / do now?": daily decisions first (safe to spend, the one
-// next action, this month, what's coming), long-term figures after (funds, net worth).
+// Home answers "what should I know / do now?": daily decisions first (safe to spend, last
+// month's review early in the month, the next best actions, this month, what's coming),
+// long-term figures after (funds, net worth).
 export default function HomeScreen() {
   const state = useFinanceStore();
   const [txSheet, setTxSheet] = useState<TxSheetTarget>(null);
-  const [fundSheet, setFundSheet] = useState<'assign' | 'cover' | null>(null);
+  const [fundSheet, setFundSheet] = useState<'assign' | 'cover' | 'emergency' | null>(null);
 
   if (!state.hasHydrated) return <LoadingView />;
 
   const now = new Date();
-  const action = nextBestAction(state, now);
+  // Early in the month the review gets its own card, so the action list doesn't repeat it.
+  const reviewMonth = now.getDate() <= REVIEW_PROMPT_DAYS ? pendingReviewMonth(state, now) : null;
+  const hasPlan = !!planFor(state, toMonthKey(now));
+  const actions = nextActions(state, now).filter(
+    (a) =>
+      !(reviewMonth && a.id === `review-${reviewMonth}`) &&
+      // Without a plan the safe-to-spend card already asks for one.
+      !(!hasPlan && a.id.startsWith('plan-'))
+  );
+  const top = actions[0];
   const funds = homeFunds(state, now);
   const recentTx = recentTransactions(state, 5);
   const editingTx = txSheet && txSheet !== 'add' ? state.transactions.find((t) => t.id === txSheet.id) : undefined;
-  // The backup nudge takes the insight slot only when nothing stronger is there.
-  const backupDue = needsBackupReminder(state.settings.lastBackupAt, now);
-  // The insight already says what the unassigned panel would say.
-  const hideUnassigned = action?.kind === 'cover' || action?.kind === 'assign';
+  // The top action already says what the unassigned panel would say.
+  const hideUnassigned = top?.id === 'cover' || top?.id === 'assign';
 
-  const runAction = () => {
-    if (!action) return;
-    if (action.kind === 'cover') setFundSheet('cover');
-    else if (action.kind === 'assign') setFundSheet('assign');
-    else if (action.kind === 'due') router.push('/due');
-    else if (action.kind === 'upcoming') router.push('/recurring');
-    else if (action.kind === 'fund' && action.fundId) {
-      router.push({ pathname: '/fund/[id]', params: { id: action.fundId } });
-    }
+  const run = ({ cta }: NextAction) => {
+    const { route, params = {} } = cta;
+    if (route === 'cover' || route === 'assign') setFundSheet(route);
+    else if (route === 'new-emergency') setFundSheet('emergency');
+    else if (route === '/fund/[id]') router.push({ pathname: '/fund/[id]', params: { id: params.id ?? '', ...params } });
+    else if (route === '/review') router.push({ pathname: '/review', params });
+    else if (route === '/settings') router.push({ pathname: '/settings', params });
+    else router.push(route);
   };
+  const dismiss = (action: NextAction) => runAction('تعذّر التأجيل', () => state.dismissAction(action.id));
 
   return (
     <Screen scroll contentStyle={styles.content}>
@@ -66,15 +80,22 @@ export default function HomeScreen() {
 
       <SafeToSpendCard state={state} now={now} />
 
-      {action ? (
-        <InsightCard tone={action.tone} message={action.message} actionLabel={action.actionLabel} onAction={runAction} />
-      ) : (
-        backupDue && <BackupReminder lastBackupAt={state.settings.lastBackupAt} />
+      {reviewMonth && (
+        <InsightCard
+          tone="ok"
+          icon="event-note"
+          title="راجع الشهر اللي فات"
+          message={`شوف ${formatMonthLabel(reviewMonth)} كان عامل إزاي وجهّز خطة الشهر ده.`}
+          actionLabel="ابدأ المراجعة"
+          onAction={() => router.push({ pathname: '/review', params: { month: reviewMonth } })}
+        />
       )}
+
+      <NextActionsCard actions={actions} onRun={run} onDismiss={dismiss} />
 
       <MonthlySnapshot state={state} now={now} />
 
-      <RecurringCard state={state} now={now} dueShownElsewhere={action?.kind === 'due'} />
+      <RecurringCard state={state} now={now} dueShownElsewhere={actions.some((a) => a.id === 'due')} />
 
       <View>
         <SectionHeader title="الصناديق" actionLabel="عرض كل الصناديق" onAction={() => router.push('/goals')} />
@@ -100,9 +121,7 @@ export default function HomeScreen() {
 
       {!hideUnassigned && <UnassignedPanel state={state} />}
 
-      <NetWorthCard state={state} />
-
-      {action && backupDue && <BackupReminder lastBackupAt={state.settings.lastBackupAt} />}
+      <NetWorthCard state={state} now={now} />
 
       <View>
         <SectionHeader title="آخر المعاملات" actionLabel="+ معاملة" onAction={() => setTxSheet('add')} />
@@ -130,6 +149,7 @@ export default function HomeScreen() {
       {editingTx && <TransactionSheet key={editingTx.id} transaction={editingTx} onClose={() => setTxSheet(null)} />}
       {fundSheet === 'assign' && <AssignSheet onClose={() => setFundSheet(null)} />}
       {fundSheet === 'cover' && <CoverSheet onClose={() => setFundSheet(null)} />}
+      {fundSheet === 'emergency' && <FundSheet initialType="emergency" onClose={() => setFundSheet(null)} />}
     </Screen>
   );
 }

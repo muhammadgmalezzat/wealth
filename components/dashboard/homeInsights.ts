@@ -1,101 +1,32 @@
-import { formatMoney } from '@/components/ui/formatMoney';
-import { dueOccurrences, upcoming, type Occurrence } from '@/store/recurring';
-import { fundDueDate, fundRequiredMonthly, fundsByPriority, fundStatus, unassignedEGP } from '@/store/selectors';
+import type { ComponentProps } from 'react';
+import type MaterialIcons from '@expo/vector-icons/MaterialIcons';
+
+import type { InsightTone } from '@/components/ui/InsightCard';
+import type { ActionSeverity } from '@/store/nextActions';
+import { upcoming, type Occurrence } from '@/store/recurring';
+import { fundDueDate, fundsByPriority, fundStatus } from '@/store/selectors';
 import type { FinanceState, Fund } from '@/store/types';
-import { fromDateKey, toDateKey } from '@/utils/dates';
+import { toDateKey } from '@/utils/dates';
 
 // Read-only helpers for the Home screen, built only on existing selectors. Pure (no React
-// Native), so they are unit-tested in tests/logic.test.ts.
+// Native), so they are unit-tested in tests/logic.test.ts. What to do next comes from the Next
+// Best Action engine (store/nextActions.ts).
 
-export type HomeActionKind = 'cover' | 'due' | 'upcoming' | 'fund' | 'assign';
+// Moved to utils (the action engine uses them too); re-exported for existing callers.
+export { daysBetween } from '@/utils/dates';
+export { dueCountPhrase, withinDaysPhrase } from '@/utils/formatters';
 
-export interface HomeAction {
-  kind: HomeActionKind;
-  tone: 'ok' | 'attention' | 'danger';
-  message: string;
-  actionLabel: string;
-  // 'fund' only: the fund to open.
-  fundId?: string;
-}
-
-// Same tolerance as the unassigned panel (float noise isn't money).
-const EPSILON = 0.005;
-const UPCOMING_DAYS = 3;
 const UPCOMING_LIST_DAYS = 30;
 
-// "مستحق واحد" / "مستحقين" / "3 مستحقات" / "11 مستحق".
-export function dueCountPhrase(n: number): string {
-  if (n === 1) return 'مستحق واحد محتاج مراجعة';
-  if (n === 2) return 'مستحقين محتاجين مراجعة';
-  if (n >= 3 && n <= 10) return `${n} مستحقات محتاجة مراجعة`;
-  return `${n} مستحق محتاج مراجعة`;
-}
+type IconName = ComponentProps<typeof MaterialIcons>['name'];
 
-// "خلال يوم" / "خلال يومين" / "خلال 3 أيام".
-export function withinDaysPhrase(days: number): string {
-  if (days <= 1) return 'خلال يوم';
-  if (days === 2) return 'خلال يومين';
-  if (days <= 10) return `خلال ${days} أيام`;
-  return `خلال ${days} يوم`;
-}
-
-// Whole days from `from` to `to` (local date keys; rounding absorbs DST hours).
-export function daysBetween(from: string, to: string): number {
-  return Math.round((fromDateKey(to).getTime() - fromDateKey(from).getTime()) / 86_400_000);
-}
-
-// The single most useful thing to do now, or null. Priority:
-// 1. fund money was spent (unassigned < 0) → cover
-// 2. 'confirm' recurring items are due → review them
-// 3. an item is due within 3 days → look at what's coming
-// 4. a fund is behind (≤ 7 days left in the month) and needs money → allocate; 'pending' never
-// 5. money without a job (unassigned > 0) → assign
-export function nextBestAction(state: FinanceState, now: Date = new Date()): HomeAction | null {
-  const today = toDateKey(now);
-  const unassigned = unassignedEGP(state);
-
-  if (unassigned < -EPSILON) {
-    return { kind: 'cover', tone: 'danger', message: 'استخدمت جزء من فلوس الصناديق.', actionLabel: 'غطّي الفرق' };
-  }
-
-  const due = dueOccurrences(state, today, 'confirm');
-  if (due.length > 0) {
-    return { kind: 'due', tone: 'attention', message: `عندك ${dueCountPhrase(due.length)}.`, actionLabel: 'راجعهم' };
-  }
-
-  const soon = upcoming(state, UPCOMING_DAYS, today).items[0];
-  if (soon) {
-    return {
-      kind: 'upcoming',
-      tone: 'attention',
-      message: `${soon.rule.name} مستحق ${withinDaysPhrase(daysBetween(today, soon.date))}.`,
-      actionLabel: 'راجع المستحقات',
-    };
-  }
-
-  for (const fund of fundsByPriority(state)) {
-    if (fundStatus(state, fund.id, now) !== 'behind') continue;
-    const required = fundRequiredMonthly(state, fund.id, now) ?? 0;
-    if (required <= EPSILON) continue;
-    return {
-      kind: 'fund',
-      tone: 'attention',
-      message: `${fund.name} محتاج ${formatMoney(required, fund.currency)} هذا الشهر عشان يفضل على المسار.`,
-      actionLabel: 'خصص الآن',
-      fundId: fund.id,
-    };
-  }
-
-  if (unassigned > EPSILON) {
-    return {
-      kind: 'assign',
-      tone: 'ok',
-      message: `عندك ${formatMoney(unassigned, 'EGP')} لسه محتاجة تتوزع.`,
-      actionLabel: 'وزّع أموالك',
-    };
-  }
-  return null;
-}
+// How an action's severity looks on the existing InsightCard / ListRow tones.
+export const SEVERITY_LOOK: Record<ActionSeverity, { tone: InsightTone; icon: IconName; listTone: 'neutral' | 'ok' | 'gold' }> = {
+  urgent: { tone: 'danger', icon: 'error-outline', listTone: 'neutral' },
+  warning: { tone: 'attention', icon: 'info-outline', listTone: 'neutral' },
+  opportunity: { tone: 'ok', icon: 'lightbulb-outline', listTone: 'ok' },
+  info: { tone: 'ok', icon: 'info-outline', listTone: 'neutral' },
+};
 
 // Funds for Home: behind first, then pending (this month's contribution not in yet), then the
 // nearest due date, then priority order.

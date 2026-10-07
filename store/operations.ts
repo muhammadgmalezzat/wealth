@@ -1,7 +1,9 @@
 import { fromEGP, rateToEGP, toEGP } from '@/utils/currency';
 import { addMonthsToDate, isDateKey, isMonthKey, shiftDate, toDateKey } from '@/utils/dates';
 import { planIdFor } from './migrations';
+import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
+import { syncedSnapshots } from './snapshots';
 import {
   FinanceValidationError,
   type FinanceEntity,
@@ -19,6 +21,7 @@ import {
 } from './selectors';
 import type {
   Account,
+  ActionDismissal,
   AssetPurchaseTransaction,
   Category,
   CurrencyCode,
@@ -34,6 +37,7 @@ import type {
   Liability,
   Location,
   MonthlyPlan,
+  MonthlyReview,
   PlanLine,
   RecurringRule,
   Settings,
@@ -1201,6 +1205,45 @@ export function deletePlan(state: State, month: string, ctx: OpContext): Patch {
   };
 }
 
+// --- Net worth snapshots, action snoozes, monthly reviews -------------------
+
+// Fills in missing past months and upserts the current month's snapshot. {} when nothing
+// changed, so calling it after every change never loops.
+export function recordNetWorthSnapshots(state: State, ctx: OpContext): Patch {
+  const netWorthSnapshots = syncedSnapshots(state, ctx.now());
+  return netWorthSnapshots ? { netWorthSnapshots } : {};
+}
+
+// "مش دلوقتي": hides a Next Best Action for 24 hours. Urgent ones (due items, spent fund money)
+// can't be snoozed. Snoozes that have run out are dropped on the way.
+export function dismissAction(state: State, actionId: string, ctx: OpContext): Patch {
+  if (!actionId || NON_DISMISSIBLE_ACTION_IDS.includes(actionId)) fail('ACTION_NOT_DISMISSIBLE', { id: actionId });
+  const now = ctx.now();
+  const expired = state.actionDismissals.filter((d) => d.actionId !== actionId && Date.parse(d.until) <= now.getTime());
+  const dismissal: ActionDismissal = stamp(
+    { id: actionId, actionId, until: new Date(now.getTime() + SNOOZE_MS).toISOString() },
+    ctx
+  );
+  return {
+    actionDismissals: [
+      ...state.actionDismissals.filter((d) => d.actionId !== actionId && !expired.includes(d)),
+      dismissal,
+    ],
+    ...(expired.length > 0 ? { tombstones: logDeletes(state, 'actionDismissal', expired.map((d) => d.id), ctx) } : {}),
+  };
+}
+
+// "خلّصت المراجعة": marks a month (not a future one) as reviewed. Finishing again keeps the
+// first completion.
+export function completeMonthlyReview(state: State, month: string, ctx: OpContext): Patch {
+  if (!isMonthKey(month) || month > toDateKey(ctx.now()).slice(0, 7)) fail('INVALID_MONTH');
+  if (state.monthlyReviews.some((r) => r.month === month)) return {};
+  const review: MonthlyReview = stamp({ id: reviewIdFor(month), month, completedAt: ctx.now().toISOString() }, ctx);
+  return { monthlyReviews: [...state.monthlyReviews, review] };
+}
+
+export const reviewIdFor = (month: string) => `review-${month}`;
+
 // --- Settings ---------------------------------------------------------------
 
 export function updateRates(state: State, rates: ExchangeRates): Patch {
@@ -1263,6 +1306,9 @@ const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones'>; entit
   { key: 'liabilities', entity: 'liability' },
   { key: 'recurringRules', entity: 'recurringRule' },
   { key: 'monthlyPlans', entity: 'monthlyPlan' },
+  { key: 'netWorthSnapshots', entity: 'netWorthSnapshot' },
+  { key: 'actionDismissals', entity: 'actionDismissal' },
+  { key: 'monthlyReviews', entity: 'monthlyReview' },
 ];
 
 const syncKey = (item: object) =>

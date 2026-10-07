@@ -6,6 +6,59 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-06) — 1.1.0 · data v7 (OTA update) · Next Best Action, net worth change, Monthly Review
+
+> JS-only (ships with `eas update` to 1.1.0 builds): no new or upgraded native module, no
+> `app.json` change. Persisted data moves v6 → v7 (raw v6 payload saved first, as for every
+> migration); backups are now written as schema 7, and v0–v6 backups still restore.
+
+**For users**
+- Home's "أهم حاجة دلوقتي" now lists every useful next step in order (due items, spent fund
+  money, overspent budget lines, last month's review, this month's plan, emergency fund, a
+  periodic bill due within two weeks, a fund behind this month, money without a job, prices
+  older than a week, a backup older than a week). The top one is a card; the rest open under
+  "كمان X حاجات". "بعدين" hides a step for 24 hours (not for due items or spent fund money).
+- The separate backup reminder card is gone; it is now one of those steps.
+- "هذا الشهر" on Home shows income, spending, what went into funds and what was invested.
+- "صافي الثروة" shows how much it changed since last month (amount and %, green up / red down).
+- New **مراجعة الشهر** screen: summary with savings rate and net worth change, plan vs actual,
+  top 5 spending categories plus one-time expenses, funds, and the next step (suggest or copy
+  next month's plan, distribute leftover money). "خلّصت المراجعة" marks the month done. Opened
+  from Home (a card in the first 7 days of the month, or the action) and from past months in
+  the Plan tab.
+- "Add to fund" steps open the fund with its allocate sheet already open.
+- Settings: the opening-data row no longer names specific months.
+
+**Technical**
+- Model v7 (`store/types.ts`): `netWorthSnapshots` (`nw-YYYY-MM`, `estimated?`),
+  `actionDismissals` (id = action id, `until`), `monthlyReviews` (`review-YYYY-MM`); all synced
+  (`updatedAt`, new `SyncEntity` values, included in `replaceAllData` / backups / `dataOf`).
+- `migrateV6toV7`: adds the collections and backfills estimated snapshots for past months since
+  `trackingStartDate` (≤ 36) via the new `netWorthAsOf`; idempotent. `FinanceStateV6` type added.
+- New pure modules: `store/nextActions.ts` (11 rules, `allActions` / `nextActions`,
+  `isSnoozed`, `pendingReviewMonth`, `NON_DISMISSIBLE_ACTION_IDS`, `SNOOZE_MS`; backup helpers
+  moved here from the deleted `components/dashboard/BackupReminder.tsx`), `store/snapshots.ts`
+  (`syncedSnapshots`, `missingPastSnapshots`, `netWorthChange`, `monthNetWorthChange`),
+  `store/review.ts` (`monthReview`).
+- Selectors: `netWorthFigures`, `netWorthAsOf`, `monthFlows`, `fundMonthShortfall` (`fundStatus`
+  refactored onto a shared month-pace helper, same results).
+- Operations / store actions: `recordNetWorthSnapshots` (no-op when unchanged),
+  `dismissAction` (new error `ACTION_NOT_DISMISSIBLE`), `completeMonthlyReview`.
+- `components/SnapshotRunner.tsx` (root): records on hydration, foreground and 1.5 s after
+  changes to accounts / transactions / holdings / liabilities / settings.
+- UI: `NextActionsCard`, `app/review.tsx` (stack "مراجعة {month}"), Plan tab review row,
+  `fund/[id]?allocate=1`, NetWorthCard change line, MonthlySnapshot Home variant (2×2 cells).
+  `InsightCard` gained optional `title` and `dismissLabel` / `onDismiss` (existing tokens only).
+  `homeInsights.nextBestAction` removed; `dueCountPhrase` / `withinDaysPhrase` moved to
+  `utils/formatters.ts` and `daysBetween` to `utils/dates.ts` (re-exported). New
+  `formatPercent`, `daysAgoPhrase`, `moreThingsPhrase`.
+- Tests: 184 (rules on/off, ordering, snooze, non-dismissible, snapshots upsert/backfill, net
+  worth change, review numbers, migration v6 → v7).
+- Rolling back to an older update after this one runs: the v6 code keeps working on v7 data
+  (newer version, no migration runs) but drops the v7 collections on its next save.
+
+---
+
 ## Unreleased (2026-10-05) — 1.1.0 · data v6 (OTA update) · Expo Go crash fix
 
 > JS-only (ships with `eas update` to 1.1.0 builds). No native, schema or data change.

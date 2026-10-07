@@ -52,9 +52,10 @@ const TYPE_ICONS: Record<Fund['type'], ComponentProps<typeof MaterialIcons>['nam
 // Progress and the next action first, history last: hero · next step · actions · facts · linked
 // gold · movements. "تعديل" in the header opens FundSheet (edit / delete).
 export default function FundDetailScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  // Home's next actions link here with ?allocate=1 to open the allocate sheet right away.
+  const { id, allocate } = useLocalSearchParams<{ id: string; allocate?: string }>();
   const state = useFinanceStore();
-  const [sheet, setSheet] = useState<SheetKind>(null);
+  const [sheet, setSheet] = useState<SheetKind>(allocate === '1' ? 'allocate' : null);
 
   if (!state.hasHydrated) return <LoadingView />;
 

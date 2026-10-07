@@ -36,9 +36,13 @@ import {
   migrateV3toV4,
   migrateV4toV5,
   migrateV5toV6,
+  migrateV6toV7,
   type FinanceStateV1,
 } from '@/store/migrations';
+import * as nba from '@/store/nextActions';
 import * as planning from '@/store/planning';
+import * as reviewLogic from '@/store/review';
+import * as snapshots from '@/store/snapshots';
 import * as recurring from '@/store/recurring';
 import * as ops from '@/store/operations';
 import {
@@ -55,7 +59,9 @@ import {
   liabilitiesTotalEGP,
   liquidByCurrency,
   liquidTotalEGP,
+  monthFlows,
   monthSummary,
+  netWorthAsOf,
   netWorthByLocation,
   netWorthEGP,
   openingBalanceForCurrentBalance,
@@ -72,7 +78,7 @@ import {
 import type { FinanceState, Fund, RecurringRule, Transaction } from '@/store/types';
 import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
-import { formatDayLabel } from '@/utils/formatters';
+import { formatDayLabel, formatPercent, moreThingsPhrase } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 
 // --- Fixtures ---------------------------------------------------------------
@@ -99,6 +105,9 @@ function emptyState(): FinanceState {
     liabilities: [],
     recurringRules: [],
     monthlyPlans: [],
+    netWorthSnapshots: [],
+    actionDismissals: [],
+    monthlyReviews: [],
     settings: {
       exchangeRates: RATES,
       goldPrice24kEGP: 6000,
@@ -2103,7 +2112,6 @@ describe('migration v5 → v6', () => {
   it('is idempotent and runs in the chain', () => {
     const once = migrateV5toV6(v5(), MIGRATION_CTX);
     assert.deepEqual(migrateV5toV6(once, { now: '2031-01-01T00:00:00.000Z', newId: () => 'x' }), once);
-    assert.equal(CURRENT_VERSION, 6);
     const { state } = migratePersistedState(v5(), 5, MIGRATION_CTX);
     assert.equal(state.recurringRules[0].mode, 'confirm');
   });
@@ -2243,73 +2251,519 @@ describe('category management', () => {
 
 // --- Home insights (Calm Wealth phase 2) ---------------------------------------
 
-describe('home: nextBestAction', () => {
-  // NOW = 15 Oct 2026. Fund "goal" is behind: deadline next year, nothing allocated this month.
-  const behindFund = () => fund({ id: 'goal', name: 'جواز', targetAmount: 12000, deadline: '2027-09-30', priority: 1 });
-  const base = (overrides: Partial<FinanceState> = {}): FinanceState => ({
+describe('next best actions: rules and ordering', () => {
+  const OCT_26 = new Date(2026, 9, 26, 12);
+  const ids = (s: FinanceState, now = NOW) => nba.nextActions(s, now).map((a) => a.id);
+  const expense = (id: string, categoryId: string, amount: number, date: string, extra: Partial<Transaction> = {}): Transaction =>
+    ({
+      id,
+      type: 'expense',
+      amount,
+      currency: 'EGP',
+      accountId: 'egp',
+      categoryId,
+      date,
+      rateToEGP: 1,
+      createdAt: `${date}T10:00:00.000Z`,
+      updatedAt: T0,
+      ...extra,
+    }) as Transaction;
+  const recentSettings = (s: FinanceState): FinanceState => ({
+    ...s,
+    settings: {
+      ...s.settings,
+      exchangeRates: { ...RATES, lastUpdated: '2026-10-25T00:00:00.000Z' },
+      goldPriceUpdatedAt: '2026-10-25T00:00:00.000Z',
+      lastBackupAt: '2026-10-25T00:00:00.000Z',
+    },
+  });
+
+  // Triggers every rule that can hold at once (2 and 5 exclude 9 and 3, tested below).
+  const busy = (): FinanceState => ({
     ...emptyState(),
-    accounts: [account('egp', 'EGP', 10000)],
-    ...overrides,
+    accounts: [account('egp', 'EGP', 100000), account('sar', 'SAR', 1000, 'SA')],
+    recurringRules: [rule({ id: 'r', startDate: '2026-10-05' })],
+    transactions: [
+      expense('oct', CATEGORY_IDS.groceries, 500, '2026-10-10'),
+      expense('sep', CATEGORY_IDS.groceries, 300, '2026-09-10'),
+    ],
+    monthlyPlans: [
+      {
+        id: 'plan-2026-10',
+        month: '2026-10',
+        currency: 'EGP',
+        expectedIncome: 0,
+        lines: [{ categoryId: CATEGORY_IDS.groceries, limit: 100, kind: 'flexible' }],
+        fundContributions: [],
+        createdAt: T0,
+        updatedAt: T0,
+      },
+    ],
+    funds: [
+      fund({ id: 'car', name: 'تأمين العربية', type: 'sinking', targetAmount: 5000, frequency: 'yearly', nextDueDate: '2026-11-05', priority: 1 }),
+      fund({ id: 'goal', name: 'جواز', targetAmount: 12000, deadline: '2027-09-30', priority: 2 }),
+    ],
+    holdings: [
+      { id: 'g', type: 'gold', name: 'gold', weightGrams: 10, karat: 21, purchaseCostEGP: 50000, updatedAt: T0 },
+    ],
   });
-  const kind = (s: FinanceState) => home.nextBestAction(s, NOW)?.kind ?? null;
 
-  it('returns null when there is nothing to do', () => {
-    assert.equal(home.nextBestAction({ ...emptyState() }, NOW), null);
+  it('lists every applicable rule in priority order', () => {
+    assert.deepEqual(ids(busy(), OCT_26), [
+      'due',
+      'overspent',
+      'review-2026-09',
+      'emergency',
+      'sinking-car',
+      'behind-goal',
+      'assign',
+      'prices',
+      'backup',
+    ]);
+    const actions = nba.nextActions(busy(), OCT_26);
+    assert.deepEqual(
+      actions.map((a) => a.priority),
+      [1, 3, 4, 6, 7, 8, 9, 10, 11]
+    );
+    const by = (id: string) => actions.find((a) => a.id === id)!;
+    assert.equal(by('due').title, 'عندك مستحق واحد محتاج مراجعة');
+    assert.equal(by('due').cta.route, '/due');
+    assert.ok(by('overspent').title.startsWith('عدّيت ميزانية: أكل وبقالة'));
+    approx(by('overspent').amount!, 400);
+    assert.deepEqual(by('review-2026-09').cta, { label: 'ابدأ المراجعة', route: '/review', params: { month: '2026-09' } });
+    assert.ok(by('sinking-car').title.startsWith('فاضل '));
+    assert.ok(by('sinking-car').title.endsWith(' على تأمين العربية'));
+    assert.equal(by('sinking-car').subtitle, 'مستحق خلال 10 أيام.');
+    // The sinking fund is "soon", so it isn't listed again as behind.
+    assert.ok(!actions.some((a) => a.id === 'behind-car'));
+    assert.ok(by('behind-goal').title.startsWith('صندوق جواز متأخر '));
+    approx(by('behind-goal').amount!, 1000); // 12,000 over 12 months
+    assert.deepEqual(by('behind-goal').cta.params, { id: 'goal', allocate: '1' });
+    assert.equal(by('assign').cta.route, 'assign');
+    assert.equal(by('prices').title, 'حدّث أسعار الذهب والصرف');
+    assert.deepEqual(by('backup').cta, { label: 'تصدير نسخة', route: '/settings', params: { export: '1' } });
   });
 
-  it('puts covering spent fund money first', () => {
-    const s = base({
-      funds: [behindFund()],
-      fundMovements: [{ id: 'm', fundId: 'goal', amount: 15000, date: '2026-09-01', updatedAt: T0 }],
+  it('puts covering spent fund money right after due items, and asks for a plan when there is none', () => {
+    const s: FinanceState = {
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 1000)],
+      funds: [fund({ id: 'goal', name: 'جواز', deadline: '2027-09-30' })],
+      fundMovements: [{ id: 'm', fundId: 'goal', amount: 5000, date: '2026-09-01', updatedAt: T0 }],
       recurringRules: [rule({ id: 'r', startDate: '2026-10-05' })],
-    });
-    const action = home.nextBestAction(s, NOW)!;
-    assert.equal(action.kind, 'cover');
-    assert.equal(action.tone, 'danger');
-    assert.equal(action.actionLabel, 'غطّي الفرق');
+    };
+    assert.deepEqual(ids(s), ['due', 'cover', 'plan-2026-10', 'emergency', 'backup']);
+    const cover = nba.nextActions(s, NOW)[1];
+    assert.equal(cover.severity, 'urgent');
+    assert.equal(cover.cta.route, 'cover');
+    approx(cover.amount!, 4000);
+    assert.ok(cover.title.startsWith('صرفت ') && cover.title.endsWith(' من فلوس مخصصة'));
   });
 
-  it('then due confirm items, with Arabic number agreement', () => {
-    const one = base({ funds: [behindFund()], recurringRules: [rule({ id: 'r', startDate: '2026-10-05' })] });
-    const action = home.nextBestAction(one, NOW)!;
-    assert.equal(action.kind, 'due');
-    assert.equal(action.message, 'عندك مستحق واحد محتاج مراجعة.');
-    const two = base({ recurringRules: [rule({ id: 'r', startDate: '2026-09-05', dayOfMonth: 5 })] });
-    assert.equal(home.nextBestAction(two, NOW)!.message, 'عندك مستحقين محتاجين مراجعة.');
+  it('marks only due items and spent fund money as non-dismissible', () => {
+    const s: FinanceState = {
+      ...busy(),
+      funds: [...busy().funds, fund({ id: 'big', deadline: '2027-09-30', priority: 9 })],
+      fundMovements: [{ id: 'm', fundId: 'big', amount: 500000, date: '2026-09-01', updatedAt: T0 }],
+    };
+    for (const a of nba.allActions(s, OCT_26)) {
+      assert.equal(a.dismissible, !['due', 'cover'].includes(a.id), a.id);
+    }
+  });
+
+  it('starts empty for a new user except the plan and emergency fund', () => {
+    assert.deepEqual(ids(emptyState()), ['plan-2026-10', 'emergency']);
+  });
+
+  it('turns rules off when they no longer apply', () => {
+    // Fresh prices and backup, last month reviewed, no due items, plan within limits.
+    const s = recentSettings({
+      ...busy(),
+      recurringRules: [],
+      monthlyReviews: [{ id: 'review-2026-09', month: '2026-09', completedAt: T0, updatedAt: T0 }],
+      transactions: [expense('oct', CATEGORY_IDS.groceries, 50, '2026-10-10')],
+    });
+    assert.deepEqual(ids(s, OCT_26), ['emergency', 'sinking-car', 'behind-goal', 'assign']);
+    // Prices are only nagged about when the data uses them.
+    const egpOnly: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 100)] };
+    assert.ok(!ids(egpOnly).includes('prices'));
+    // Last month without transactions has nothing to review.
+    assert.ok(!ids({ ...busy(), transactions: [] }, OCT_26).some((id) => id.startsWith('review-')));
+  });
+
+  it('nudges a sinking fund only within 14 days and while it is short', () => {
+    const sinking = (nextDueDate: string, saved = 0): FinanceState => ({
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 100000)],
+      funds: [fund({ id: 'car', type: 'sinking', targetAmount: 5000, frequency: 'yearly', nextDueDate })],
+      fundMovements: saved ? [{ id: 'm', fundId: 'car', amount: saved, date: '2026-09-01', updatedAt: T0 }] : [],
+    });
+    assert.ok(ids(sinking('2026-10-29')).includes('sinking-car')); // 14 days
+    assert.ok(!ids(sinking('2026-10-30')).includes('sinking-car')); // 15 days
+    assert.equal(nba.nextActions(sinking('2026-10-15'), NOW).find((a) => a.id === 'sinking-car')!.subtitle, 'مستحق النهارده.');
+    assert.equal(nba.nextActions(sinking('2026-10-10'), NOW).find((a) => a.id === 'sinking-car')!.subtitle, 'ميعاده فات.');
+    assert.ok(!ids(sinking('2026-10-20', 5000)).includes('sinking-car'));
+  });
+
+  it('asks to start or top up the emergency fund against a month of essentials', () => {
+    const history = ['2026-07-03', '2026-08-03', '2026-09-03'].map((d, i) =>
+      expense(`rent-${i}`, 'cat-essentials-rent', 3000, d)
+    );
+    const withFund = (saved: number): FinanceState => ({
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 100000)],
+      transactions: history,
+      funds: [fund({ id: 'em', type: 'emergency', targetAmount: 18000 })],
+      fundMovements: [{ id: 'm', fundId: 'em', amount: saved, date: '2026-09-01', updatedAt: T0 }],
+    });
+    const thin = nba.nextActions(withFund(1000), NOW).find((a) => a.id === 'emergency')!;
+    assert.equal(thin.title, 'ابدأ صندوق الطوارئ');
+    approx(thin.amount!, 2000);
+    assert.deepEqual(thin.cta.params, { id: 'em', allocate: '1' });
+    assert.ok(!ids(withFund(3000)).includes('emergency'));
+    // Without a fund the action creates one.
+    assert.equal(nba.nextActions(emptyState(), NOW).find((a) => a.id === 'emergency')!.cta.route, 'new-emergency');
+  });
+
+  it('nudges stale gold or FX prices and an old backup after 7 days', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const sixDaysAgo = new Date(NOW.getTime() - 6 * DAY).toISOString();
+    const s: FinanceState = {
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 100)],
+      holdings: [{ id: 'g', type: 'gold', name: 'gold', weightGrams: 1, karat: 24, purchaseCostEGP: 1, updatedAt: T0 }],
+      settings: { ...emptyState().settings, goldPriceUpdatedAt: sixDaysAgo, lastBackupAt: sixDaysAgo },
+    };
+    // 6 days: fine.
+    assert.ok(!ids(s).includes('prices') && !ids(s).includes('backup'));
+    const later = new Date(NOW.getTime() + DAY);
+    const prices = nba.nextActions(s, later).find((a) => a.id === 'prices')!;
+    assert.equal(prices.title, 'حدّث سعر الذهب');
+    assert.equal(prices.severity, 'info');
+    assert.equal(nba.nextActions(s, later).find((a) => a.id === 'backup')!.subtitle, 'آخر نسخة منذ 7 أيام.');
+    assert.equal(nba.needsBackupReminder(undefined, NOW), true);
+    assert.equal(nba.daysSinceBackup(new Date(NOW.getTime() - DAY).toISOString(), NOW), 1);
+  });
+
+  it('agrees Arabic counts in phrases', () => {
+    assert.equal(home.dueCountPhrase(2), 'مستحقين محتاجين مراجعة');
     assert.equal(home.dueCountPhrase(3), '3 مستحقات محتاجة مراجعة');
     assert.equal(home.dueCountPhrase(11), '11 مستحق محتاج مراجعة');
-    // Auto rules are recorded by the app, so they never ask for review.
-    assert.notEqual(kind(base({ recurringRules: [rule({ id: 'r', startDate: '2026-10-05', mode: 'auto' })] })), 'due');
+    assert.deepEqual([1, 2, 3, 11].map(moreThingsPhrase), ['كمان حاجة واحدة', 'كمان حاجتين', 'كمان 3 حاجات', 'كمان 11 حاجة']);
+  });
+});
+
+describe('next best actions: snooze', () => {
+  const s = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 1000)],
+    recurringRules: [rule({ id: 'r', startDate: '2026-10-05' })],
   });
 
-  it('then an item due within 3 days', () => {
-    const s = base({ funds: [behindFund()], recurringRules: [rule({ id: 'rent', name: 'إيجار', startDate: '2026-10-17' })] });
-    const action = home.nextBestAction(s, NOW)!;
-    assert.equal(action.kind, 'upcoming');
-    assert.equal(action.message, 'إيجار مستحق خلال يومين.');
-    // Four days away is not "soon".
-    assert.equal(kind(base({ recurringRules: [rule({ id: 'r', startDate: '2026-10-19' })] })), 'assign');
+  it('hides a dismissible action for 24 hours, then shows it again', () => {
+    const ctx = makeCtx();
+    const snoozed = apply(s(), ops.dismissAction(s(), 'assign', ctx));
+    assert.equal(snoozed.actionDismissals.length, 1);
+    assert.equal(snoozed.actionDismissals[0].until, new Date(NOW.getTime() + nba.SNOOZE_MS).toISOString());
+    assert.ok(!nba.nextActions(snoozed, NOW).some((a) => a.id === 'assign'));
+    assert.ok(nba.allActions(snoozed, NOW).some((a) => a.id === 'assign'));
+    const almost = new Date(NOW.getTime() + nba.SNOOZE_MS - 1);
+    assert.ok(!nba.nextActions(snoozed, almost).some((a) => a.id === 'assign'));
+    const after = new Date(NOW.getTime() + nba.SNOOZE_MS + 1);
+    assert.ok(nba.nextActions(snoozed, after).some((a) => a.id === 'assign'));
   });
 
-  it('then a fund that is behind, before assigning money', () => {
-    // No recurring rules in this fixture, so nothing due/upcoming can outrank the fund step.
-    const s = base({ funds: [behindFund()] });
-    const OCT_26 = new Date(2026, 9, 26, 12);
-    assert.deepEqual(recurring.dueOccurrences(s, '2026-10-26'), []);
-    assert.deepEqual(recurring.upcoming(s, 3, '2026-10-26').items, []);
-    const action = home.nextBestAction(s, OCT_26)!;
-    assert.equal(action.kind, 'fund');
-    assert.equal(action.fundId, 'goal');
-    assert.ok(action.message.startsWith('جواز محتاج '));
-    // Mid-month (NOW, 17 days left) the fund is only pending: no fund step.
-    assert.equal(home.nextBestAction(s, NOW)!.kind, 'assign');
+  it('refuses to snooze due items and spent fund money, and ignores such records', () => {
+    for (const id of ['due', 'cover']) {
+      assert.throws(
+        () => ops.dismissAction(s(), id, makeCtx()),
+        (e: unknown) => e instanceof FinanceValidationError && e.code === 'ACTION_NOT_DISMISSIBLE'
+      );
+    }
+    const forced: FinanceState = {
+      ...s(),
+      actionDismissals: [{ id: 'due', actionId: 'due', until: '2027-01-01T00:00:00.000Z', updatedAt: T0 }],
+    };
+    assert.equal(nba.nextActions(forced, NOW)[0].id, 'due');
   });
 
-  it('then money without a job', () => {
-    const action = home.nextBestAction(base(), NOW)!;
-    assert.equal(action.kind, 'assign');
-    assert.equal(action.tone, 'ok');
-    assert.ok(action.message.includes('10,000'));
+  it('re-snoozing replaces the record and drops expired ones (with tombstones)', () => {
+    const ctx = makeCtx();
+    const old: FinanceState = {
+      ...s(),
+      actionDismissals: [{ id: 'backup', actionId: 'backup', until: '2026-10-01T00:00:00.000Z', updatedAt: T0 }],
+    };
+    const once = apply(old, ops.dismissAction(old, 'assign', ctx));
+    assert.deepEqual(once.actionDismissals.map((d) => d.actionId), ['assign']);
+    assert.deepEqual(once.tombstones.map((t) => [t.entity, t.id]), [['actionDismissal', 'backup']]);
+    const twice = apply(once, ops.dismissAction(once, 'assign', ctx));
+    assert.equal(twice.actionDismissals.length, 1);
+  });
+});
+
+describe('net worth snapshots', () => {
+  const base = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [{ ...account('egp', 'EGP', 1000), openingDate: '2026-08-01' }],
+    transactions: [
+      {
+        id: 'in',
+        type: 'income',
+        amount: 500,
+        currency: 'EGP',
+        accountId: 'egp',
+        categoryId: 'cat-income-salary',
+        date: '2026-09-10',
+        rateToEGP: 1,
+        createdAt: T0,
+        updatedAt: T0,
+      },
+    ],
+    settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' },
+  });
+
+  it('backfills past months as estimates and upserts the current month', () => {
+    const list = snapshots.syncedSnapshots(base(), NOW)!;
+    assert.deepEqual(
+      list.map((s) => [s.id, s.month, s.netWorthEGP, !!s.estimated]),
+      [
+        ['nw-2026-08', '2026-08', 1000, true],
+        ['nw-2026-09', '2026-09', 1500, true],
+        ['nw-2026-10', '2026-10', 1500, false],
+      ]
+    );
+    assert.equal(list[2].takenAt, NOW.toISOString());
+    assert.equal(list[2].updatedAt, NOW.toISOString());
+    assert.equal(list[2].liquidEGP, 1500);
+    assert.equal(list[2].holdingsEGP, 0);
+  });
+
+  it('writes nothing when nothing changed, and only the current month when it did', () => {
+    const ctx = makeCtx();
+    const once = apply(base(), ops.recordNetWorthSnapshots(base(), ctx));
+    assert.deepEqual(ops.recordNetWorthSnapshots(once, ctx), {});
+    const richer = { ...once, accounts: [{ ...once.accounts[0], openingBalance: 3000 }] };
+    const updated = ops.recordNetWorthSnapshots(richer, ctx).netWorthSnapshots!;
+    assert.deepEqual(updated.map((s) => s.netWorthEGP), [1000, 1500, 3500]);
+  });
+
+  it('leaves out what came after a month ended', () => {
+    const s: FinanceState = {
+      ...base(),
+      holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 1, purchaseDate: '2026-09-15', updatedAt: T0 }],
+      liabilities: [{ id: 'l', name: 'loan', principal: 200, currency: 'EGP', startDate: '2026-10-01', updatedAt: T0 }],
+    };
+    assert.equal(netWorthAsOf(s, '2026-08-31').netWorthEGP, 1000);
+    assert.equal(netWorthAsOf(s, '2026-09-30').netWorthEGP, 1500 + 6000);
+    assert.equal(netWorthAsOf(s, '2026-09-30').holdingsEGP, 6000);
+    assert.equal(netWorthAsOf(s, '2026-10-31').netWorthEGP, 1500 + 6000 - 200);
+  });
+
+  it('measures the change against last month (hidden without a snapshot)', () => {
+    assert.equal(snapshots.netWorthChange(base(), NOW), null);
+    const s: FinanceState = { ...base(), netWorthSnapshots: snapshots.syncedSnapshots(base(), NOW)! };
+    const richer = { ...s, accounts: [{ ...s.accounts[0], openingBalance: 1500 }] };
+    const change = snapshots.netWorthChange(richer, NOW)!;
+    assert.equal(change.fromMonth, '2026-09');
+    approx(change.amountEGP, 500);
+    approx(change.pct, 1 / 3);
+    // Over September: Sept's end vs August's.
+    approx(snapshots.monthNetWorthChange(s, '2026-09', NOW)!.amountEGP, 500);
+    assert.equal(snapshots.monthNetWorthChange(s, '2026-08', NOW), null);
+    // From zero there is no percentage.
+    const fromZero: FinanceState = {
+      ...richer,
+      netWorthSnapshots: [{ ...s.netWorthSnapshots[1], netWorthEGP: 0 }],
+    };
+    assert.equal(snapshots.netWorthChange(fromZero, NOW)!.pct, null);
+  });
+});
+
+describe('migration v6 → v7', () => {
+  const v6 = () => {
+    const { netWorthSnapshots: _n, actionDismissals: _a, monthlyReviews: _r, ...rest } = {
+      ...emptyState(),
+      accounts: [{ ...account('egp', 'EGP', 1000), openingDate: '2026-08-01' }],
+      settings: { ...emptyState().settings, trackingStartDate: '2026-08-20' },
+    };
+    return rest;
+  };
+
+  it('adds the collections and backfills past months since tracking started', () => {
+    const migrated = migrateV6toV7(v6(), MIGRATION_CTX);
+    assert.deepEqual(migrated.actionDismissals, []);
+    assert.deepEqual(migrated.monthlyReviews, []);
+    assert.deepEqual(
+      migrated.netWorthSnapshots.map((s) => [s.month, s.netWorthEGP, s.estimated, s.takenAt]),
+      [
+        ['2026-08', 1000, true, MIGRATION_CTX.now],
+        ['2026-09', 1000, true, MIGRATION_CTX.now],
+      ]
+    );
+  });
+
+  it('is idempotent and keeps existing snapshots', () => {
+    const once = migrateV6toV7(v6(), MIGRATION_CTX);
+    assert.deepEqual(migrateV6toV7(once, MIGRATION_CTX), once);
+    const kept = { ...once.netWorthSnapshots[0], netWorthEGP: 777, estimated: undefined };
+    const again = migrateV6toV7({ ...once, netWorthSnapshots: [kept] }, MIGRATION_CTX);
+    assert.deepEqual(again.netWorthSnapshots.map((s) => [s.month, s.netWorthEGP]), [
+      ['2026-08', 777],
+      ['2026-09', 1000],
+    ]);
+  });
+
+  it('runs as part of the chain', () => {
+    assert.equal(CURRENT_VERSION, 7);
+    const { state } = migratePersistedState(v6(), 6, MIGRATION_CTX);
+    assert.equal(state.netWorthSnapshots.length, 2);
+    // Tracking that starts this month has nothing to backfill.
+    const fresh = { ...v6(), settings: { ...v6().settings, trackingStartDate: '2026-10-01' } };
+    assert.deepEqual(migrateV6toV7(fresh, MIGRATION_CTX).netWorthSnapshots, []);
+  });
+});
+
+describe('monthly review', () => {
+  const SEP = '2026-09';
+  const tx = (id: string, type: 'income' | 'expense', categoryId: string, amount: number, extra: Partial<Transaction> = {}): Transaction =>
+    ({
+      id,
+      type,
+      amount,
+      currency: 'EGP',
+      accountId: 'egp',
+      categoryId,
+      date: '2026-09-10',
+      rateToEGP: 1,
+      createdAt: T0,
+      updatedAt: T0,
+      ...extra,
+    }) as Transaction;
+  const s = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 20000)],
+    transactions: [
+      tx('salary', 'income', 'cat-income-salary', 10000),
+      tx('rent', 'expense', 'cat-essentials-rent', 3000),
+      tx('food', 'expense', CATEGORY_IDS.groceries, 2000),
+      tx('dining', 'expense', 'cat-lifestyle-dining', 200),
+      tx('sofa', 'expense', 'cat-essentials-home-setup', 1500, { oneTime: true, note: 'كنبة' }),
+      {
+        id: 'gold',
+        type: 'asset_purchase',
+        amount: 4000,
+        currency: 'EGP',
+        accountId: 'egp',
+        holdingId: 'g',
+        date: '2026-09-12',
+        rateToEGP: 1,
+        createdAt: T0,
+        updatedAt: T0,
+      },
+    ],
+    holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 4000, updatedAt: T0 }],
+    funds: [fund({ id: 'goal', name: 'جواز', targetAmount: 50000 }), fund({ id: 'done', targetAmount: 100, priority: 2 })],
+    fundMovements: [
+      { id: 'm1', fundId: 'goal', amount: 1000, date: '2026-09-15', updatedAt: T0 },
+      { id: 'm2', fundId: 'done', amount: 100, date: '2026-08-15', updatedAt: T0 },
+    ],
+    monthlyPlans: [
+      {
+        id: 'plan-2026-09',
+        month: SEP,
+        currency: 'EGP',
+        expectedIncome: 10000,
+        lines: [
+          { categoryId: 'cat-essentials-rent', limit: 3000, kind: 'fixed' },
+          { categoryId: CATEGORY_IDS.groceries, limit: 1500, kind: 'flexible' },
+          { categoryId: 'cat-lifestyle-dining', limit: 1000, kind: 'flexible' },
+        ],
+        fundContributions: [{ fundId: 'goal', amount: 1000 }],
+        createdAt: T0,
+        updatedAt: T0,
+      },
+    ],
+    netWorthSnapshots: [
+      { id: 'nw-2026-08', month: '2026-08', netWorthEGP: 20000, liquidEGP: 20000, holdingsEGP: 0, takenAt: T0, updatedAt: T0 },
+      { id: 'nw-2026-09', month: SEP, netWorthEGP: 23000, liquidEGP: 17000, holdingsEGP: 6000, takenAt: T0, updatedAt: T0 },
+    ],
+  });
+
+  it('summarises income, expenses, savings rate and net worth change', () => {
+    const r = reviewLogic.monthReview(s(), SEP, NOW);
+    assert.equal(r.incomeEGP, 10000);
+    // The gold purchase is not an expense.
+    assert.equal(r.expenseEGP, 6700);
+    assert.equal(r.netEGP, 3300);
+    approx(r.savingsRate, 0.33);
+    approx(r.netWorthChange!.amountEGP, 3000);
+    approx(r.netWorthChange!.pct, 0.15);
+  });
+
+  it('compares the plan with what was spent', () => {
+    const plan = reviewLogic.monthReview(s(), SEP, NOW).plan!;
+    // Buckets cover planned lines only; the sofa (no line) is "outside the plan".
+    assert.deepEqual(plan.buckets.essentials, { planned: 4500, spent: 5000 });
+    assert.deepEqual(plan.buckets.lifestyle, { planned: 1000, spent: 200 });
+    assert.deepEqual(plan.over.map((l) => [l.categoryId, l.remaining]), [[CATEGORY_IDS.groceries, -500]]);
+    assert.deepEqual(plan.under.map((l) => [l.categoryId, l.remaining]), [['cat-lifestyle-dining', 800]]);
+    // The sofa had no line.
+    assert.equal(plan.unplannedSpent, 1500);
+    assert.equal(reviewLogic.monthReview(s(), '2026-08', NOW).plan, null);
+  });
+
+  it('lists the top regular categories and one-time expenses separately', () => {
+    const r = reviewLogic.monthReview(s(), SEP, NOW);
+    assert.deepEqual(r.topCategories, [
+      { categoryId: 'cat-essentials-rent', amountEGP: 3000 },
+      { categoryId: CATEGORY_IDS.groceries, amountEGP: 2000 },
+      { categoryId: 'cat-lifestyle-dining', amountEGP: 200 },
+    ]);
+    assert.deepEqual(r.oneTime, [{ id: 'sofa', categoryId: 'cat-essentials-home-setup', amountEGP: 1500, date: '2026-09-10', note: 'كنبة' }]);
+    assert.equal(r.oneTimeTotalEGP, 1500);
+    // At most five.
+    const many = { ...s(), transactions: Array.from({ length: 8 }, (_, i) => tx(`t${i}`, 'expense', DEFAULT_CATEGORIES.filter((c) => c.kind === 'expense')[i].id, 100 + i)) };
+    assert.equal(reviewLogic.monthReview(many, SEP, NOW).topCategories.length, 5);
+  });
+
+  it('shows fund allocations against the plan, completed funds and the next step', () => {
+    const r = reviewLogic.monthReview(s(), SEP, NOW);
+    assert.deepEqual(r.funds, [{ fundId: 'goal', allocated: 1000, planned: 1000 }]);
+    assert.deepEqual(r.completedFunds.map((f) => f.id), ['done']);
+    assert.equal(r.nextMonth, '2026-10');
+    assert.equal(r.nextMonthHasPlan, false);
+    assert.equal(r.copyFromMonth, SEP);
+    approx(r.unassignedEGP, 20000 + 10000 - 6700 - 4000 - 1100);
+    assert.equal(r.reviewed, false);
+  });
+
+  it('finishing marks the month reviewed (once; never a future month)', () => {
+    const ctx = makeCtx();
+    const done = apply(s(), ops.completeMonthlyReview(s(), SEP, ctx));
+    assert.deepEqual(done.monthlyReviews.map((m) => [m.id, m.month, m.completedAt]), [['review-2026-09', SEP, NOW.toISOString()]]);
+    assert.equal(reviewLogic.monthReview(done, SEP, NOW).reviewed, true);
+    assert.deepEqual(ops.completeMonthlyReview(done, SEP, ctx), {});
+    assert.throws(
+      () => ops.completeMonthlyReview(s(), '2026-11', ctx),
+      (e: unknown) => e instanceof FinanceValidationError && e.code === 'INVALID_MONTH'
+    );
+    // Reviewed months stop the action.
+    assert.equal(nba.pendingReviewMonth(s(), NOW), SEP);
+    assert.equal(nba.pendingReviewMonth(done, NOW), null);
+  });
+
+  it('monthFlows splits where the money went', () => {
+    const flows = monthFlows(s(), SEP);
+    assert.equal(flows.incomeEGP, 10000);
+    assert.equal(flows.expenseEGP, 6700);
+    assert.equal(flows.savedToFundsEGP, 1000);
+    assert.equal(flows.investedEGP, 4000);
+  });
+
+  it('formats percentages with the sign isolated', () => {
+    assert.equal(formatPercent(0.335), '⁦‎33.5%⁩');
+    assert.equal(formatPercent(0.1, true), '⁦‎+10%⁩');
+    assert.equal(formatPercent(-0.04, true), '⁦‎−4%⁩');
   });
 });
 

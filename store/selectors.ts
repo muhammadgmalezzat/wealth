@@ -127,6 +127,31 @@ export function netWorthEGP(state: State): number {
   return liquidTotalEGP(state) + holdingsTotalEGP(state) - liabilitiesTotalEGP(state);
 }
 
+export interface NetWorthFigures {
+  netWorthEGP: number;
+  liquidEGP: number;
+  holdingsEGP: number;
+}
+
+export function netWorthFigures(state: State): NetWorthFigures {
+  return { netWorthEGP: netWorthEGP(state), liquidEGP: liquidTotalEGP(state), holdingsEGP: holdingsTotalEGP(state) };
+}
+
+// Best-effort net worth at the end of `date` ('YYYY-MM-DD'), at CURRENT rates and prices (there
+// is no price history): transactions dated after it are left out, as are accounts opened,
+// holdings bought and liabilities started after it. Missing dates count as "always there".
+export function netWorthAsOf(state: State, date: string): NetWorthFigures {
+  const onOrBefore = (d: string | undefined) => !d || d.slice(0, 10) <= date;
+  const past: State = {
+    ...state,
+    accounts: state.accounts.filter((a) => onOrBefore(a.openingDate)),
+    transactions: state.transactions.filter((tx) => onOrBefore(tx.date)),
+    holdings: state.holdings.filter((h) => onOrBefore(h.purchaseDate)),
+    liabilities: state.liabilities.filter((l) => onOrBefore(l.startDate)),
+  };
+  return netWorthFigures(past);
+}
+
 // Net worth split by where things are. Holdings without a location count as Egypt, and so
 // do liabilities (they have no location), so EG + SA always equals netWorthEGP.
 export function netWorthByLocation(state: State): Record<Location, number> {
@@ -239,9 +264,29 @@ export const BEHIND_DAYS_LEFT = 7;
 // the fund was created this month, behind otherwise.
 export function fundStatus(state: State, fundId: string, now: Date = new Date()): FundStatus {
   const fund = findFund(state, fundId);
-  const due = fund && fundDueDate(fund);
-  if (!fund || !due) return 'no_deadline';
+  const pace = monthPace(state, fundId, now);
+  if (!fund || !pace) return 'no_deadline';
+  const { required, allocatedThisMonth } = pace;
+  const month = toMonthKey(now);
 
+  if (required <= 0) return 'ahead';
+  if (allocatedThisMonth < required) {
+    const createdThisMonth = toMonthKey(new Date(fund.createdAt)) === month;
+    return createdThisMonth || daysLeftInMonth(month, now) > BEHIND_DAYS_LEFT ? 'pending' : 'behind';
+  }
+  return allocatedThisMonth > required * 1.1 ? 'ahead' : 'on_track';
+}
+
+interface MonthPace {
+  // Fund currency: what this month needed at its start, and what was allocated so far.
+  required: number;
+  allocatedThisMonth: number;
+}
+
+function monthPace(state: State, fundId: string, now: Date): MonthPace | null {
+  const fund = findFund(state, fundId);
+  const due = fund && fundDueDate(fund);
+  if (!fund || !due) return null;
   const month = toMonthKey(now);
   const allocatedThisMonth = sum(
     state.fundMovements
@@ -250,14 +295,14 @@ export function fundStatus(state: State, fundId: string, now: Date = new Date())
   );
   const currentAtMonthStart = fundCurrent(state, fundId) - allocatedThisMonth;
   const remainingAtMonthStart = Math.max(0, fund.targetAmount - currentAtMonthStart);
-  const required = remainingAtMonthStart / monthsUntil(due, now);
+  return { required: remainingAtMonthStart / monthsUntil(due, now), allocatedThisMonth };
+}
 
-  if (required <= 0) return 'ahead';
-  if (allocatedThisMonth < required) {
-    const createdThisMonth = toMonthKey(new Date(fund.createdAt)) === month;
-    return createdThisMonth || daysLeftInMonth(month, now) > BEHIND_DAYS_LEFT ? 'pending' : 'behind';
-  }
-  return allocatedThisMonth > required * 1.1 ? 'ahead' : 'on_track';
+// Fund currency still missing from this month's required amount (what fundStatus measures);
+// 0 when on track or without a due date.
+export function fundMonthShortfall(state: State, fundId: string, now: Date = new Date()): number {
+  const pace = monthPace(state, fundId, now);
+  return pace ? Math.max(0, pace.required - pace.allocatedThisMonth) : 0;
 }
 
 // Active funds, highest priority (lowest number) first.
@@ -472,6 +517,31 @@ export function monthSummary(state: State, month: string, options: MonthSummaryO
   summary.netCashFlow = summary.incomeEGP - summary.expenseEGP;
   summary.savingsRate = summary.incomeEGP > 0 ? summary.netCashFlow / summary.incomeEGP : null;
   return summary;
+}
+
+export interface MonthFlows {
+  incomeEGP: number;
+  expenseEGP: number;
+  // Net fund movements of the month (allocations minus withdrawals), at current rates.
+  savedToFundsEGP: number;
+  // Asset purchases (cash turned into holdings), at their snapshot rates.
+  investedEGP: number;
+}
+
+// Where the month's money went: monthSummary's income and expenses plus what was put into funds
+// and invested. Like monthSummary, ignores dates before trackingStartDate.
+export function monthFlows(state: State, month: string): MonthFlows {
+  const { incomeEGP, expenseEGP } = monthSummary(state, month);
+  const start = state.settings.trackingStartDate;
+  const inMonth = (date: string) => monthOf(date) === month && date >= start;
+  return {
+    incomeEGP,
+    expenseEGP,
+    savedToFundsEGP: fundAmountsEGP(state, state.fundMovements.filter((m) => inMonth(m.date))),
+    investedEGP: sum(
+      state.transactions.filter((tx) => tx.type === 'asset_purchase' && inMonth(tx.date)).map((tx) => tx.amount * tx.rateToEGP)
+    ),
+  };
 }
 
 // Average monthly essentials (one-time expenses excluded) over the 3 full months before

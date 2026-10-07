@@ -5,17 +5,30 @@ import { Card } from '@/components/ui/Card';
 import { Money } from '@/components/ui/Money';
 import { colors, radius, space } from '@/constants/theme';
 import { holdingsTotalEGP, liquidTotalEGP, netWorthByLocation, netWorthEGP } from '@/store/selectors';
+import { netWorthChange } from '@/store/snapshots';
 import type { FinanceState } from '@/store/types';
+import { formatMonthLabel, formatPercent } from '@/utils/formatters';
 
-// "صافي الثروة": total, the Egypt / Saudi split, and liquid vs gold & investments (all EGP).
-export function NetWorthCard({ state }: { state: FinanceState }) {
+// "صافي الثروة": total, the change since last month's snapshot (hidden without one), the
+// Egypt / Saudi split, and liquid vs gold & investments (all EGP).
+export function NetWorthCard({ state, now = new Date() }: { state: FinanceState; now?: Date }) {
   const byLocation = netWorthByLocation(state);
+  const change = netWorthChange(state, now);
+  const tone = change && change.amountEGP < -0.005 ? 'danger' : 'positive';
   return (
     <Card style={styles.card}>
       <AppText variant="secondary" color="textSecondary">
         صافي الثروة
       </AppText>
       <Money amount={netWorthEGP(state)} currency="EGP" size="lg" />
+      {change && (
+        <View style={styles.change} accessibilityLabel="التغير عن الشهر اللي فات">
+          <Money amount={change.amountEGP} currency="EGP" size="row" showSign tone={tone} />
+          <AppText variant="caption" color={tone === 'danger' ? 'danger' : 'primary700'}>
+            {change.pct !== null ? `${formatPercent(change.pct, true)} ` : ''}عن {formatMonthLabel(change.fromMonth)}
+          </AppText>
+        </View>
+      )}
 
       <View style={styles.lines}>
         <Line label="مصر" amount={byLocation.EG} />
@@ -58,6 +71,8 @@ function Part({ label, amount, gold = false }: { label: string; amount: number; 
 
 const styles = StyleSheet.create({
   card: { gap: space.xs },
+  // RTL: the amount on the right, the percentage after it.
+  change: { flexDirection: 'row-reverse', alignItems: 'center', flexWrap: 'wrap', gap: space.sm },
   lines: { marginTop: space.md },
   line: { flexDirection: 'row-reverse', alignItems: 'center', minHeight: 44, gap: space.sm },
   separator: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border },

@@ -1,6 +1,6 @@
 # Wealth — Technical Documentation
 
-> Written from the code as of persisted-state **version 6** (`store/migrations.ts → CURRENT_VERSION`).
+> Written from the code as of persisted-state **version 7** (`store/migrations.ts → CURRENT_VERSION`).
 > Examples use the fake data in `store/seed.example.ts`. **Never copy figures from
 > `store/seed.local.ts` (the owner's real data) into docs, tests or issues.**
 
@@ -85,8 +85,8 @@ Notes:
 
 ```
 app/                        expo-router routes
-  _layout.tsx               Root Stack: (tabs), fund/[id], settings, recurring, due, categories;
-                            mounts <RecurringRunner/> and <AppLockGate/>
+  _layout.tsx               Root Stack: (tabs), fund/[id], settings, recurring, due, categories,
+                            review; mounts <RecurringRunner/>, <SnapshotRunner/> and <AppLockGate/>
   (tabs)/_layout.tsx        Bottom tabs (order): index, transactions, plan, assets, goals
   (tabs)/index.tsx          الرئيسية — dashboard
   (tabs)/transactions.tsx   المعاملات — month list grouped by day
@@ -98,16 +98,19 @@ app/                        expo-router routes
   recurring.tsx             المعاملات المتكررة — rules list (stack)
   due.tsx                   المستحقات — due inbox (stack)
   categories.tsx            البنود — category management (stack)
+  review.tsx                مراجعة الشهر — monthly review, ?month=YYYY-MM (stack)
 
 components/
   AppLockGate.tsx           Biometric/PIN lock overlay (Modal)
   RecurringRunner.tsx       Invisible: processDue after hydration / on foreground; syncs reminders
+  SnapshotRunner.tsx        Invisible: upserts this month's net worth snapshot (hydration, foreground, debounced changes)
   assets/EditAccountSheet   Edit account name, location, "current balance"; delete
   assets/HoldingSheet       Holding details (value, cost, value difference, linked fund) + delete
   assets/assetsUi.ts        Pure: LOCATION_LABELS, ACCOUNT_TYPE_ICONS, holdingTitle, signedDifference, groupAccounts
   categories/CategorySheet  Add / edit / archive / restore / delete a category
   dashboard/                SafeToSpendCard, MonthlySnapshot, RecurringCard (جاي قريب),
-                            NetWorthCard, BackupReminder, homeInsights.ts (pure Home logic)
+                            NetWorthCard (+ change vs last month), NextActionsCard,
+                            homeInsights.ts (pure Home logic)
   funds/                    fundsUi.ts (pure: fundsSummary, fundNextStep, movementKind), FundCard, FundSheet (create/edit), AssignSheet (وزّعها),
                             CoverSheet (غطّيها), MoveMoneySheet (إضافة/سحب),
                             PaySinkingSheet (اتدفعت), UnassignedPanel, labels.ts
@@ -139,8 +142,11 @@ store/                      ALL business logic lives here (pure, no React)
   planning.ts               Monthly plan math (suggestion, progress, safe to spend…)
   recurring.ts              Recurring schedule engine (occurrences, due, upcoming, reminders)
   operations.ts             Validated state transitions → patches; sync bookkeeping
+  nextActions.ts            Next Best Action engine (rules, priority, snooze)
+  snapshots.ts              Monthly net worth snapshots (backfill, upsert, change)
+  review.ts                 Monthly review numbers
   errors.ts                 FinanceValidationError + typed codes
-  migrations.ts             v0 → v6 migration chain
+  migrations.ts             v0 → v7 migration chain
   backup.ts                 Backup file format, AES-GCM/PBKDF2, open/validate/preview
   defaultCategories.ts      20 default categories (stable ids), FIXED_CATEGORY_IDS
   useFinanceStore.ts        Zustand store + persist config (the only RN-aware store file)
@@ -149,8 +155,9 @@ store/                      ALL business logic lives here (pure, no React)
 
 utils/
   currency.ts               rateToEGP / toEGP / fromEGP
-  dates.ts                  date keys, month keys, shiftMonth, monthsUntil, addMonthsToDate
-  formatters.ts             formatCurrency, formatDate, formatDayLabel, formatMonthLabel
+  dates.ts                  date keys, month keys, shiftMonth, monthsUntil, addMonthsToDate, daysBetween
+  formatters.ts             formatCurrency, formatDate, formatDayLabel, formatMonthLabel,
+                            formatPercent, Arabic count phrases (dueCountPhrase, daysAgoPhrase…)
   parseAmount.ts            Arabic/Western digits, separators → number
   errorMessages.ts          Error code → Arabic text (single place)
   runAction.ts              try action → show Arabic error
@@ -162,7 +169,7 @@ utils/
   id.ts                     newId() = expo-crypto randomUUID
 
 constants/                  theme.ts (design tokens), currencies.ts (DEFAULT_RATES), market.ts
-tests/logic.test.ts         164 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         184 tests over store/*, utils/* and the pure UI helpers
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
 .easignore                  EAS upload filter (keeps store/seed.local.ts)
@@ -175,8 +182,8 @@ app.json / eas.json         Expo + EAS config
 Root `Stack` (`app/_layout.tsx`): `(tabs)` (no header), `fund/[id]` (title "الصندوق", replaced by
 the fund name; back "رجوع"),
 `settings` (title "الإعدادات"), `recurring` ("المعاملات المتكررة"), `due` ("المستحقات"),
-`categories` ("البنود").
-`<RecurringRunner/>` (renders nothing) and `<AppLockGate/>` sit above everything.
+`categories` ("البنود"), `review` ("مراجعة الشهر", replaced by "مراجعة {month}").
+`<RecurringRunner/>` and `<SnapshotRunner/>` (render nothing) and `<AppLockGate/>` sit above everything.
 `<StatusBar style="dark" />` (light theme only, dark icons on the light background).
 
 ### Layout & safe-area conventions
@@ -216,15 +223,16 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 
 | Route | Tab title | What it does |
 |---|---|---|
-| `/` (`index`) | الرئيسية | Calm Wealth Home (see "Home" below): greeting + date + settings icon; safe to spend (hero) → /plan; one next-best-action insight; هذا الشهر snapshot → /transactions; جاي قريب → /recurring, /due; up to 3 funds → /fund/[id], "عرض كل الصناديق" → /goals; money available to plan (Assign/Cover sheets); net worth; backup nudge → /settings?export=1; last 5 transactions (tap to edit, "+ معاملة"). |
+| `/` (`index`) | الرئيسية | Calm Wealth Home (see "Home" below): greeting + date + settings icon; safe to spend (hero) → /plan; early-month "راجع الشهر اللي فات" card → /review; next best action card + "كمان X حاجات" list (store/nextActions.ts); هذا الشهر (income / spent / saved to funds / invested) → /transactions; جاي قريب → /recurring, /due; up to 3 funds → /fund/[id], "عرض كل الصناديق" → /goals; money available to plan (Assign/Cover sheets); net worth + change vs last month; last 5 transactions (tap to edit, "+ معاملة"). |
 | `/transactions` | المعاملات | MonthSwitcher; MonthlySnapshot for the selected month (no link); filter chips الكل/مصروف/دخل/تحويل/ذهب (UI-only, by type); days (FlatList), each a header row (day label · day net in textSecondary, never red) and one ListGroup of TransactionRows (tap → edit); EmptyState for an empty month, a one-line message for a filter with no match; "+" FAB → TransactionSheet. |
-| `/plan` | الخطة | Calm Wealth plan (see "Plan" below): MonthSwitcher; "خطة الشهر" + تعديل; MetricGroup الدخل المتوقع / المخطط / المتبقي للتخطيط + status line; safe-to-spend info row (ثابت/مرن explained); PlanLineRows by bucket (tap → LineSheet, saved via savePlan); "+ أضف بند" (AddLineSheet); fund contributions (tap → fund); spending outside the plan → /transactions; المعاملات المتكررة row. No plan: EmptyState + اقترح من مصروفي / انسخ خطة … / ابدأ من الصفر. |
+| `/plan` | الخطة | Calm Wealth plan (see "Plan" below): MonthSwitcher; "خطة الشهر" + تعديل; MetricGroup الدخل المتوقع / المخطط / المتبقي للتخطيط + status line; safe-to-spend info row (ثابت/مرن explained); PlanLineRows by bucket (tap → LineSheet, saved via savePlan); "+ أضف بند" (AddLineSheet); fund contributions (tap → fund); spending outside the plan → /transactions; المعاملات المتكررة row. No plan: EmptyState + اقترح من مصروفي / انسخ خطة … / ابدأ من الصفر. Past months: "مراجعة {month}" row → /review?month= (chip "اتراجع" once done). |
 | `/assets` | الأصول | Hero "إجمالي الأصول" (`totalAssetsEGP`) + MetricGroup سيولة / ذهب واستثمارات (gold cell) / التزامات (only when liabilities exist, text color); الحسابات ("+ حساب") grouped مصر / السعودية, archived ones in a collapsed "مؤرشفة" group (tap → EditAccountSheet); الذهب (total grams) as ListRows (value; cost · signed value difference in textSecondary; "مربوط بـ {fund}" gold chip; tap → HoldingSheet) or EmptyState → TransactionSheet on ذهب; other holdings / الالتزامات only when present; "+" FAB → add account / opening gold. Web QA: Metro serves `/assets` itself, open this tab from Home. |
 | `/goals` | الصناديق | Calm Wealth funds (see "Funds, Recurring, Due" below): title; UnassignedPanel; MetricGroup إجمالي المحجوز / مطلوب الشهر ده / صناديق; sections الطوارئ · الأهداف · مصاريف دورية (empty ones skipped) of FundCards; EmptyState "لسه معندكش صناديق." + أنشئ صندوق طوارئ (FundSheet with emergency preselected); "+" FAB → FundSheet (goal). |
-| `/fund/[id]` | (stack) | Hero (type + icon, current من target, bar with gold part, % + status chip, due + months left) · next step · actions (one primary: إضافة مبلغ, or اتدفعت for sinking) · facts ListGroup · linked gold (+ "ربط ذهب" → FundSheet when gold is linkable) · movements (newest first, last); header "تعديل" → FundSheet (edit / delete). |
-| `/settings` | (stack) | Groups: السوق (rates + "آخر تحديث", gold 24k/21k + 18k computed) · التخطيط (tracking start + the single primary "حفظ الإعدادات" for rates/gold/date; إدارة البنود, المعاملات المتكررة, تنبيهات المستحقات switch) · البيانات (backup status "آخر نسخة احتياطية" + age, overdue chip + Home's sentence, secondary "تصدير نسخة"; استعادة نسخة; استيراد البيانات الافتتاحية) · الأمان (قفل التطبيق switch) · عن التطبيق (version; collapsed "تفاصيل تقنية": runtime / channel / update id). `?export=1` opens the export sheet. |
+| `/fund/[id]` | (stack) | Hero (type + icon, current من target, bar with gold part, % + status chip, due + months left) · next step · actions (one primary: إضافة مبلغ, or اتدفعت for sinking) · facts ListGroup · linked gold (+ "ربط ذهب" → FundSheet when gold is linkable) · movements (newest first, last); header "تعديل" → FundSheet (edit / delete). `?allocate=1` (Home's fund actions) opens the allocate sheet. |
+| `/settings` | (stack) | Groups: السوق (rates + "آخر تحديث", gold 24k/21k + 18k computed) · التخطيط (tracking start + the single primary "حفظ الإعدادات" for rates/gold/date; إدارة البنود, المعاملات المتكررة, تنبيهات المستحقات switch) · البيانات (backup status "آخر نسخة احتياطية" + age, overdue chip + Home's sentence, secondary "تصدير نسخة"; استعادة نسخة; استيراد البيانات الافتتاحية) · الأمان (قفل التطبيق switch) · عن التطبيق (version; collapsed "تفاصيل تقنية": runtime / channel / update id). `?export=1` opens the export sheet (Home's backup action). |
 | `/recurring` | (stack) | "جاي خلال 30 يوم": ListGroup of up to 12 items + MetricGroup دخل / مصروف (per-currency totals from `upcoming`); groups دخل · مصروفات · تحويلات; rows: name + amount, frequency · account(s) · الجاية, chips تلقائي/بتأكيد · متوقف · انتهى (muted title when not active), pause/resume Switch beside (not inside) the tappable area; tap → RuleSheet; EmptyState; "+" FAB (stack). |
 | `/due` | (stack) | Due inbox for `confirm` rules (oldest first): "فات ومتسجلش" (earlier months, amber "فات ميعاده" chip) and "المستحق الشهر ده"; rows in a ListGroup: name, amount (تقريباً), date · account, primary "تم" (ConfirmOccurrenceSheet) + tertiary "تخطّي"; EmptyState "مفيش حاجة مستنياك." + link to /recurring. |
+| `/review` | (stack) | Monthly review, `?month=YYYY-MM` (default last month): الملخص · الخطة مقابل الفعلي · أكتر 5 بنود صرف + مصاريف مرة واحدة · الصناديق · خطوتك الجاية (suggest / copy next month's plan, وزّع الفايض); primary "خلّصت المراجعة" marks it reviewed. See "Monthly review" below. |
 | `/categories` | (stack) | Dense ListGroups أساسيات · رفاهيات · عطاء · دخل · مؤرشفة (empty sections skipped): name, neutral "أساسي" chip on defaults, chevron; archived rows muted (with their old bucket); tap → CategorySheet (name; مصروف/دخل on create; bucket required for expenses with an inline error; أرشفة / استرجاع secondary; احذف البند destructive — only for unused custom ones); "+" FAB. |
 
 ### Design system (Calm Wealth)
@@ -358,7 +366,7 @@ and 150% zoom; these need a real device (Android first):
   list.bullet.rectangle → receipt-long, calendar → event-note, wallet.pass →
   account-balance-wallet, target → track-changes.
 
-### Home (Calm Wealth phase 2)
+### Home (Calm Wealth phase 2 · Next Best Action in data v7)
 
 One question: *what should I know / do now?* Daily decisions first, long-term figures after.
 Content padding `space.lg`, section gap `space.xxl`. Order (`app/(tabs)/index.tsx`):
@@ -369,42 +377,78 @@ Content padding `space.lg`, section gap `space.xxl`. Order (`app/(tabs)/index.ts
    "حتى نهاية الشهر · حوالي {safeToSpendToday} يومياً", StatusChip ok "خطتك ماشية كويس" or
    attention "في بند محتاج انتباه" + "صرف {lines} عدى الخطة" (`overspentLines`). No plan →
    explanation + primary "اعمل خطة الشهر" → /plan (never a 0). Tap → /plan.
-3. **Next best action** — at most one `InsightCard` from `nextBestAction` (table below); nothing
-   when null. When null and a backup is due, the backup nudge takes this slot.
-4. **MonthlySnapshot** — "هذا الشهر": دخل / مصروف / صافي from `monthSummary` (EGP) in one
-   grouped surface; expense in text color; net positive (+) green, negative "−" plain. Tap or
-   "كل المعاملات" → /transactions. Replaced the three StatCards (StatCard was removed in phase 6).
-5. **جاي قريب** (`RecurringCard`) — up to 3 `upcomingItems` as ListRows (name, day label or "بعد
+3. **Review prompt** — days 1–7 of a month (`REVIEW_PROMPT_DAYS`) while `pendingReviewMonth` is
+   set: InsightCard ok "راجع الشهر اللي فات" + "ابدأ المراجعة" → /review?month=. The matching
+   `review-YYYY-MM` action is then left out of the list below.
+4. **NextActionsCard** — `nextActions(state, now)` (store/nextActions.ts, table below), minus the
+   review action when (3) shows and minus `plan-*` when there is no plan (the hero already asks).
+   The first action is an InsightCard (tone/icon from `SEVERITY_LOOK`: urgent → danger, warning
+   → attention, opportunity → ok + lightbulb, info → ok + info icon) with title, subtitle, the
+   CTA and — when `dismissible` — "بعدين" (`dismissAction`, 24 h). The rest sit behind a toggle
+   "كمان {حاجة واحدة / حاجتين / N حاجات / N حاجة}" as ListRows (tap = run the CTA). CTA routes:
+   `/due`, `/plan`, `/review` (+month), `/settings` (+export=1), `/fund/[id]` (+allocate=1 opens
+   the allocate sheet), or sheets Home owns: `cover` (CoverSheet), `assign` (AssignSheet),
+   `new-emergency` (FundSheet initialType emergency).
+5. **MonthlySnapshot** — "هذا الشهر" from `monthFlows` (EGP): دخل / مصروف, then اتحوّش للصناديق
+   (net fund movements of the month at current rates) / استثمار (asset purchases at snapshot
+   rates, gold cell), two MetricGroups of two cells. Tap or "كل المعاملات" → /transactions. (The
+   Transactions screen keeps the 3-cell دخل / مصروف / صافي variant.)
+6. **جاي قريب** (`RecurringCard`) — up to 3 `upcomingItems` as ListRows (name, day label or "بعد
    N أيام", amount; income rows green tile). Header action "الكل" → /recurring; a calm warning
-   link "عندك N … · راجعهم" → /due when confirm items are due and the insight isn't already
-   about them. Hidden without content.
-6. **الصناديق** — up to 3 `homeFunds` as FundCards; "عرض كل الصناديق" → /goals; subtle hint when
+   link "عندك N … · راجعهم" → /due when confirm items are due and no `due` action is listed.
+   Hidden without content.
+7. **الصناديق** — up to 3 `homeFunds` as FundCards; "عرض كل الصناديق" → /goals; subtle hint when
    there are none.
-7. **UnassignedPanel** — positive: "فلوس متاحة للتخطيط" + "وزّع أموالك" (AssignSheet); negative:
-   dangerSurface card "استخدمت جزء من فلوس الصناديق." + "غطّي الفرق" (CoverSheet) — the only
-   danger styling on Home; zero: nothing. Hidden when the insight is `cover`/`assign`.
-8. **NetWorthCard** — "صافي الثروة" (Money lg), مصر / السعودية lines (`netWorthByLocation`),
-   سيولة / ذهب واستثمارات (gold dot) on a subtle strip.
-9. **BackupReminder** — InsightCard attention "يفضل تعمل نسخة احتياطية…" + "تصدير نسخة" →
-   /settings?export=1; same 7-day rule (`needsBackupReminder`); here only when an insight took
-   the top slot.
+8. **UnassignedPanel** — positive: "فلوس متاحة للتخطيط" + "وزّع أموالك" (AssignSheet); negative:
+   dangerSurface card "استخدمت جزء من فلوس الصناديق." + "غطّي الفرق" (CoverSheet); zero: nothing.
+   Hidden when the top action is `cover`/`assign`.
+9. **NetWorthCard** — "صافي الثروة" (Money lg); under it the change since last month's snapshot
+   (`netWorthChange`: Money with sign, green ≥ 0 / danger < 0, "{±x.x%} عن {month}"; no % when it
+   started at 0; hidden without a snapshot); مصر / السعودية lines (`netWorthByLocation`), سيولة /
+   ذهب واستثمارات (gold dot) on a subtle strip.
 10. **آخر المعاملات** — 5 `recentTransactions` in a ListGroup of TransactionRows ("+ معاملة" opens
     TransactionSheet; tap a row to edit); EmptyState "لسه مسجلتش معاملات." + "سجّل معاملة".
 
-**`components/dashboard/homeInsights.ts`** (pure; unit-tested) — `nextBestAction(state, now)`:
+The separate BackupReminder card is gone: the backup nudge is rule 11 of the engine.
 
-| # | Condition | Tone | Message | Action |
-|---|---|---|---|---|
-| 1 | `unassignedEGP < −0.005` | danger | استخدمت جزء من فلوس الصناديق. | غطّي الفرق → CoverSheet |
-| 2 | `dueOccurrences(today, 'confirm')` not empty | attention | عندك {N: مستحق واحد / مستحقين / N مستحقات / N مستحق} محتاج… مراجعة. | راجعهم → /due |
-| 3 | first of `upcoming(3 days)` | attention | {name} مستحق خلال {يوم / يومين / N أيام}. | راجع المستحقات → /recurring |
-| 4 | first fund (priority order) with `fundStatus = behind` (never `pending`) and `fundRequiredMonthly > 0` | attention | {fund} محتاج {amount} هذا الشهر عشان يفضل على المسار. | خصص الآن → /fund/[id] |
-| 5 | `unassignedEGP > 0.005` | ok | عندك {amount} لسه محتاجة تتوزع. | وزّع أموالك → AssignSheet |
-| — | otherwise | | null | |
+**Next Best Action engine** (`store/nextActions.ts`, pure, unit-tested). `allActions(state, now)`
+returns every applicable action sorted by `priority` (= rule number; stable within a rule, funds in
+priority order); `nextActions` drops snoozed ones. Each action:
+`{ id, priority, severity, title, subtitle?, amount?, currency?, cta: { label, route, params? }, dismissible }`.
 
-`homeFunds(state, now, max = 3)`: behind first, then pending, then nearest due date (funds with a due date
-before those without), then `fundsByPriority` order. `upcomingItems(state, now, max = 3)`: the
-first items of `upcoming(30 days)`. Helpers `dueCountPhrase`, `withinDaysPhrase`, `daysBetween`.
+| # | id | Condition | Severity | Title | CTA |
+|---|---|---|---|---|---|
+| 1 | `due` | `dueOccurrences(today, 'confirm')` not empty | urgent | عندك {dueCountPhrase} | راجعهم → /due |
+| 2 | `cover` | `unassignedEGP < −0.005` | urgent | صرفت {X} من فلوس مخصصة | غطّي الفرق → CoverSheet |
+| 3 | `overspent` | this month's plan has `overspentLines` | warning | عدّيت ميزانية: {names} | افتح الخطة → /plan |
+| 4 | `review-YYYY-MM` | `pendingReviewMonth`: last month had transactions (≥ trackingStartDate) and no `monthlyReviews` entry | opportunity | راجع شهر {month} | ابدأ المراجعة → /review?month= |
+| 5 | `plan-YYYY-MM` | no plan this month | warning | اعمل خطة الشهر | اعمل الخطة → /plan |
+| 6 | `emergency` | no active emergency fund → create; or emergency cash (EGP) < 1 month of essentials (`suggestedEmergencyTarget(3)/3`, needs history) → allocate | opportunity | ابدأ صندوق الطوارئ | أنشئ الصندوق → FundSheet / خصص الآن → fund |
+| 7 | `sinking-<id>` | sinking fund with `nextDueDate − today ≤ 14` days (overdue included) and `target − fundCurrent > 0` | warning | فاضل {X} على {fund} | خصص الآن → /fund/[id]?allocate=1 |
+| 8 | `behind-<id>` | `fundStatus = behind`, `fundMonthShortfall > 0`, not already listed in 7 | warning | {صندوق name} متأخر {shortfall} الشهر ده | خصص الآن → /fund/[id]?allocate=1 |
+| 9 | `assign` | `unassignedEGP > 0.005` | opportunity | عندك {X} بدون وظيفة، وزّعها | وزّع أموالك → AssignSheet |
+| 10 | `prices` | gold price (when gold holdings exist) or rates (when any non-EGP account / holding / fund / plan exists) updated ≥ 7 days ago | info | حدّث {سعر الذهب / أسعار الصرف / أسعار الذهب والصرف} | حدّث الأسعار → /settings |
+| 11 | `backup` | there is data (transactions, funds or holdings) and `needsBackupReminder` (never, or ≥ 7 days) | info | اعمل نسخة احتياطية | تصدير نسخة → /settings?export=1 |
+
+Snooze: `dismissAction(actionId)` stores `{ id = actionId, actionId, until = now + 24 h }`
+(`SNOOZE_MS`), replacing an earlier snooze of the same action and dropping expired ones (with
+tombstones). `NON_DISMISSIBLE_ACTION_IDS = ['due', 'cover']`: the operation refuses them
+(`ACTION_NOT_DISMISSIBLE`) and `isSnoozed` ignores any record for them. Ids that embed a month or
+fund make a snooze apply to that situation only. `fundMonthShortfall` (selectors) = this month's
+required amount at month start − allocated this month, floored at 0 — the gap `fundStatus`
+measures. `daysSince` / `daysSinceBackup` / `needsBackupReminder` moved here from the removed
+`components/dashboard/BackupReminder.tsx` (Settings imports them from here).
+
+**`components/dashboard/homeInsights.ts`** (pure; unit-tested): `homeFunds(state, now, max = 3)`:
+behind first, then pending, then nearest due date (funds with a due date before those without),
+then `fundsByPriority` order. `upcomingItems(state, now, max = 3)`: the first items of
+`upcoming(30 days)`. `SEVERITY_LOOK`. `dueCountPhrase`, `withinDaysPhrase` (now in
+`utils/formatters.ts`) and `daysBetween` (now in `utils/dates.ts`) are re-exported. The old
+single-action `nextBestAction` was replaced by the engine.
+
+**InsightCard** gained optional `title` (bodyStrong above the message, which then turns
+textSecondary) and `dismissLabel` / `onDismiss` (a quiet textSecondary action after the main one).
+No new tokens or styles.
 
 **FundCard** (Home and the Funds tab): name (bodyStrong) + StatusChip · "{current} من {target}" ·
 ProgressBar (attention when behind; `goldPortion = fundLinkedValue / target`) · one sentence +
@@ -418,6 +462,49 @@ percent · "الموعد: …". Status mapping (`components/funds/labels.ts` →
 | pending | neutral "الشهر ده" | محتاج {fundRequiredMonthly} الشهر ده (hidden if ≤ 0) |
 | behind | attention "محتاج انتباه" (never red) | محتاج {fundRequiredMonthly} هذا الشهر للحاق بالخطة (hidden if ≤ 0) |
 | no_deadline | neutral "بدون موعد" | لسه محتاج {target − current} للوصول للهدف / وصلت للهدف |
+
+### Monthly review (`app/review.tsx`, data v7)
+
+Stack screen "مراجعة {month}" (`?month=YYYY-MM`; invalid, missing or future → last month).
+Numbers from `monthReview(state, month, now)` (`store/review.ts`, pure, unit-tested):
+
+1. **الملخص** — MetricGroups دخل / مصروف / صافي (`monthSummary`, EGP) and نسبة التحويش
+   (`savingsRate`, "—" without income) / تغير صافي الثروة (`monthNetWorthChange`: the month's
+   snapshot — live figures for the current month — minus the previous month's; "—" when either
+   is missing). Chip "اتراجع" when already reviewed.
+2. **الخطة مقابل الفعلي** — per bucket "{spent} من {planned}" with chip "زيادة X" / "فاضل X"
+   (`planProgress` buckets: planned lines only), up to 3 most overspent lines ("عدّت الخطة") and 3
+   with most left ("وفّرت فيها"), "مصروف خارج الخطة". Without a plan: a subtle note.
+3. **أكتر 5 بنود صرف** — regular expenses per category (one-time excluded; asset purchases are
+   never expenses), share of the month's expenses; then **مصاريف مرة واحدة** one by one with
+   their total.
+4. **الصناديق** — every fund with a planned contribution or a movement that month: net allocated
+   vs planned (plan currency, EGP without a plan), chip "اتخصص" / "أقل من الخطة"; then active
+   funds that reached their target ("وصل للهدف").
+5. **خطوتك الجاية** — next month has a plan → chip + "افتح الخطة"; otherwise "اقترح خطة الشهر
+   الجاي" (`savePlan(planSuggestion)`) and "انسخ خطة {latest planned month before it}"
+   (`copyPlan`). "وزّع الفايض ({unassigned})" → AssignSheet when unassigned > 0.
+
+The primary "خلّصت المراجعة" calls `completeMonthlyReview(month)` (adds
+`{ id: review-YYYY-MM, month, completedAt }`; once per month; `INVALID_MONTH` for a bad or future
+month) and goes back. Entry points: action rule 4, Home's early-month card, and the Plan tab
+("مراجعة {month}" row above the plan / empty state for past months, chip "اتراجع" once done).
+
+### Net worth snapshots (`store/snapshots.ts`, `components/SnapshotRunner.tsx`, data v7)
+
+- `syncedSnapshots(state, now)`: past months from `trackingStartDate`'s month (at most 36 back)
+  without a snapshot get an `estimated` one (`netWorthAsOf(month end)`); the current month's is
+  set to the live `netWorthFigures` (net worth, liquid, holdings, EGP). Returns null when nothing
+  changes (figures within 0.005), so writing never loops. Op `recordNetWorthSnapshots`.
+- `netWorthAsOf(state, date)` (selectors): accounts whose `openingDate` is after `date`,
+  transactions dated after it, holdings bought (`purchaseDate`) and liabilities started after it
+  are left out; missing dates count as always there. Valued at **current** rates and prices (no
+  price history), so estimates of past months move with today's gold price and rates.
+- `SnapshotRunner` (mounted in `app/_layout.tsx` next to RecurringRunner): records after
+  hydration, when the app returns to the foreground, and 1.5 s after the last change to
+  accounts, transactions, holdings, liabilities or settings.
+- `netWorthChange(state, now)`: live net worth − last month's snapshot (`pct` = change ÷
+  |start|, null from 0); null without the snapshot.
 
 ### Assets, Categories, Settings, Backup, Lock (Calm Wealth phase 6)
 
@@ -610,8 +697,11 @@ Every synced entity has `updatedAt` (set only by operations).
 - **MonthlyPlan** `{ id = plan-YYYY-MM, month, currency, expectedIncome, lines: PlanLine[], fundContributions: PlannedContribution[], createdAt, updatedAt }`
   - `PlanLine { categoryId, limit, kind: fixed|flexible }`, `PlannedContribution { fundId, amount }` (plan currency)
 - **Settings** `{ exchangeRates {SAR_EGP, USD_EGP, lastUpdated}, goldPrice24kEGP, goldPrice21kEGP, goldPriceUpdatedAt, trackingStartDate, deviceId, lastBackupAt?, appLockEnabled?, dueNotificationsEnabled?, lastUsed? }`
-- **Tombstone** `{ entity: SyncEntity, id, deletedAt }` — deletion log for a future sync.
-- **FinanceState** `{ accounts, categories, transactions, funds, fundMovements, holdings, liabilities, recurringRules, monthlyPlans, settings, tombstones }`
+- **NetWorthSnapshot** (v7) `{ id = nw-YYYY-MM, month, netWorthEGP, liquidEGP, holdingsEGP, takenAt, estimated?, updatedAt }` — one per month; the current month follows the live figures, `estimated` marks months filled in afterwards.
+- **ActionDismissal** (v7) `{ id = actionId, actionId, until (ISO), updatedAt }` — a snoozed Next Best Action.
+- **MonthlyReview** (v7) `{ id = review-YYYY-MM, month, completedAt, updatedAt }` — a finished review.
+- **Tombstone** `{ entity: SyncEntity, id, deletedAt }` — deletion log for a future sync. `SyncEntity` also covers `netWorthSnapshot`, `actionDismissal`, `monthlyReview` (v7).
+- **FinanceState** `{ accounts, categories, transactions, funds, fundMovements, holdings, liabilities, recurringRules, monthlyPlans, netWorthSnapshots, actionDismissals, monthlyReviews, settings, tombstones }`
 
 ```mermaid
 erDiagram
@@ -638,7 +728,7 @@ erDiagram
   Every action calls a pure function from `operations.ts` with `get()` and the context
   `{ newId: expo-crypto randomUUID, now: () => new Date() }`, then `set(patch)`. Actions throw
   `FinanceValidationError`; UI wraps them with `runAction` (Arabic alert).
-- `persist` middleware: key **`@wealth_finance_state`**, `version: CURRENT_VERSION` (6),
+- `persist` middleware: key **`@wealth_finance_state`**, `version: CURRENT_VERSION` (7),
   `partialize` = `dataOf()` (data only; no actions or `hasHydrated`).
 - Storage: `legacyAwareStorage` wraps AsyncStorage; if the stored JSON has no `state` envelope
   (pre-Zustand data) it is presented as `{ state, version: 0 }` so it migrates instead of being
@@ -675,8 +765,9 @@ greater than the stored one. Used by `persist.migrate` **and** by backup restore
 | v3 → v4 | `updatedAt ??= createdAt ?? now` on every entity; `tombstones ??= []`; `settings.deviceId ||= newId()`. |
 | v4 → v5 | Legacy plans `{ month, expectedIncomeEGP, bucketLimitsEGP }` → `{ id: plan-YYYY-MM, currency: 'EGP', expectedIncome, lines: [], fundContributions: [] }` (bucket limits can't map to categories); monthly-plan tombstones keyed by month are re-keyed to `plan-YYYY-MM`. |
 | v5 → v6 | Legacy rules `{ type, nextDate, … }` → `RecurringRule`: `kind = type`, `interval: 1`, `dayOfMonth` = day of `nextDate` (not for weekly), `startDate = nextDate`, `mode: 'confirm'` (nothing is recorded without the user), `variableAmount: false`, `skippedDates: []`, `createdAt = updatedAt ?? now`. Rules that already have `kind` pass through unchanged. |
+| v6 → v7 | `netWorthSnapshots ??= []`, `actionDismissals ??= []`, `monthlyReviews ??= []`; then every past month from `trackingStartDate`'s month (at most 36) up to the month before `now` that has no snapshot gets an `estimated` one from `netWorthAsOf(month end)` at the current rates/prices, `takenAt = now`. The current month is left to the SnapshotRunner. Existing snapshots are never changed. |
 
-Idempotence rules: v2→v3 … v5→v6 only fill missing values and keep existing ones, so
+Idempotence rules: v2→v3 … v6→v7 only fill missing values and keep existing ones, so
 running them twice yields the same result (tested). Before migrating, the raw payload is
 saved to `@wealth_finance_state_backup_v{N}`.
 
@@ -912,8 +1003,8 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts` (164 tests, ~20 s; the encrypted round
-trip uses the real 200k-iteration KDF). Suites: migrations (v0–v6), net worth, funds, unassigned,
+`npm run test:logic` → `tsx --test tests/logic.test.ts` (184 tests, ~20 s; the encrypted round
+trip uses the real 200k-iteration KDF). Suites: migrations (v0–v7), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,
 emergency suggestion, dates, opening-data import (skipped when `seed.local.ts` is absent),
@@ -923,7 +1014,7 @@ weekly, endDate), recurring processing (processDue idempotence, skipped dates, r
 paused/ended rules, confirm/skip and missed months, resume, link from a transaction, delete keeps
 history), recurring in the plan (monthly equivalent, SAR/EGP conversion, upcoming totals),
 category management (unique names, kind lock, archive vs delete, use by rules/plans, pickers vs
-reports, bucket move → plan totals, atomic addCategoryWithPlanLine).
+reports, bucket move → plan totals, atomic addCategoryWithPlanLine), next best actions (every rule
 
 Adding tests: import pure modules (`@/store/*`, `@/utils/*` — never React Native ones), build
 state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
@@ -942,7 +1033,7 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 - `DEFAULT_TRACKING_START_DATE` is the owner's date ('2026-08-05') for every install.
 - `fundStatus` counts any movement dated this month — e.g. a migrated opening allocation — as
   this month's contribution.
-- `planProgress` puts a line whose category is missing into أساسيات (default bucket).
+- Net worth snapshots of past months that were never recorded live (everything before v7, or is missing into أساسيات (default bucket).
 - A plan line with a 0 limit and any spending is "over" (pct = 1); the UI says "مفيش ميزانية
   للبند ده: اتصرف X" instead of an over-by amount.
 - Plan "fixed" suggestion averages over all window months (a bill paid for 3 months shows ⅓/month).
@@ -989,8 +1080,8 @@ backups, app lock, sync bookkeeping, EAS builds + OTA updates, recurring income/
 transfers (auto or confirm, due inbox, plan integration, local reminders), category management
 (add/rename/move/archive) and a better "أضف بند".
 
-**Next:** a new Home with a "next best action",
-monthly review (plan vs actual, carry-over), liabilities UI.
+**Done (data v7):** Next Best Action engine on Home, net worth change vs last month, monthly
+review. **Next:** carry-over of unspent plan money, liabilities UI.
 
 **V2:** live gold & FX prices, allocation engine (where should new money go), priority engine
 across funds/plan, server sync (using `updatedAt` + tombstones + `deviceId`).
@@ -1002,9 +1093,10 @@ across funds/plan, server sync (using `updatedAt` + tombstones + `deviceId`).
 ```
 Wealth — Expo SDK 57 / RN 0.86 / React 19.2 / TS 6 strict / expo-router 57, Arabic RTL UI.
 Single-user, offline, local-first. Zustand 5 + persist → AsyncStorage key @wealth_finance_state,
-persist version 6 (store/migrations.ts CURRENT_VERSION; chain v0→v6, idempotent, raw backup
+persist version 7 (store/migrations.ts CURRENT_VERSION; chain v0→v7, idempotent, raw backup
 before migrating). All logic is pure TS in store/: types.ts (model), selectors.ts (derived
-figures), planning.ts (monthly plan), recurring.ts (schedule engine), operations.ts (validated, atomic transitions → patches,
+figures), planning.ts (monthly plan), recurring.ts (schedule engine), nextActions.ts (Next Best
+Action rules 1–11 + 24 h snooze), snapshots.ts (monthly net worth), review.ts (monthly review), operations.ts (validated, atomic transitions → patches,
 updatedAt + tombstones), errors.ts (codes → Arabic in utils/errorMessages.ts), backup.ts.
 useFinanceStore.ts is the only RN-aware store file (seed loading, persist, SSR guard, snapshots).
 

@@ -221,6 +221,37 @@ export interface MonthlyPlan extends Synced {
   createdAt: string;
 }
 
+// Net worth at the end of a month (EGP, at the rates/prices of `takenAt`). The current month's
+// snapshot is upserted while the app runs, so after the month ends it holds the month's last
+// value. Months filled in afterwards (migration, months the app wasn't opened) are `estimated`:
+// recomputed from what existed at the month's end, valued at the rates/prices of `takenAt`
+// (there is no price history).
+// One per month; the id derives from the month (nw-YYYY-MM).
+export interface NetWorthSnapshot extends Synced {
+  id: string;
+  month: string; // 'YYYY-MM'
+  netWorthEGP: number;
+  liquidEGP: number;
+  holdingsEGP: number;
+  takenAt: string;
+  estimated?: boolean;
+}
+
+// A Next Best Action snoozed until `until` (ISO). One per action id (the record's id is the
+// action id).
+export interface ActionDismissal extends Synced {
+  id: string;
+  actionId: string;
+  until: string;
+}
+
+// A month whose review was finished. One per month; the id derives from the month (review-YYYY-MM).
+export interface MonthlyReview extends Synced {
+  id: string;
+  month: string; // 'YYYY-MM'
+  completedAt: string;
+}
+
 export interface ExchangeRates {
   SAR_EGP: number;
   USD_EGP: number;
@@ -263,7 +294,10 @@ export type SyncEntity =
   | 'holding'
   | 'liability'
   | 'recurringRule'
-  | 'monthlyPlan';
+  | 'monthlyPlan'
+  | 'netWorthSnapshot'
+  | 'actionDismissal'
+  | 'monthlyReview';
 
 // Log of deletions for a future server sync. Deleted data is really removed from its
 // collection; selectors never look at tombstones.
@@ -283,6 +317,9 @@ export interface FinanceState {
   liabilities: Liability[];
   recurringRules: RecurringRule[];
   monthlyPlans: MonthlyPlan[];
+  netWorthSnapshots: NetWorthSnapshot[];
+  actionDismissals: ActionDismissal[];
+  monthlyReviews: MonthlyReview[];
   settings: Settings;
   tombstones: Tombstone[];
 }

@@ -2,7 +2,6 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Platform, StyleSheet, Switch, View } from 'react-native';
 
-import { daysSinceBackup, needsBackupReminder } from '@/components/dashboard/BackupReminder';
 import { ExportSheet } from '@/components/settings/ExportSheet';
 import { RestoreSheet } from '@/components/settings/RestoreSheet';
 import { BACKUP_NUDGE, backupAgeLabel } from '@/components/settings/settingsUi';
@@ -21,6 +20,7 @@ import { SectionHeader } from '@/components/ui/SectionHeader';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { colors, space } from '@/constants/theme';
 import { openBackup, parseBackup, type BackupFile, type OpenedBackup } from '@/store/backup';
+import { daysSinceBackup, needsBackupReminder } from '@/store/nextActions';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { appInfo } from '@/utils/appInfo';
 import { appLockAvailability, authenticate, type LockAvailability } from '@/utils/appLock';
@@ -35,7 +35,7 @@ import { runAction } from '@/utils/runAction';
 export default function SettingsScreen() {
   const state = useFinanceStore();
   const { settings } = state;
-  // The Dashboard's backup reminder links here with ?export=1.
+  // Home's backup action links here with ?export=1.
   const params = useLocalSearchParams<{ export?: string }>();
 
   const [sarText, setSarText] = useState(String(settings.exchangeRates.SAR_EGP));
@@ -106,7 +106,7 @@ export default function SettingsScreen() {
     .filter(Boolean)
     .join(' · ');
 
-  // Same rule and wording as Home's backup nudge.
+  // Same rule as Home's backup action.
   const backupDays = daysSinceBackup(settings.lastBackupAt);
   const backupOverdue = needsBackupReminder(settings.lastBackupAt);
 
@@ -230,7 +230,7 @@ export default function SettingsScreen() {
             <ListRow title="استعادة نسخة" icon="restore" chevron onPress={handlePickBackup} />
             <ListRow
               title={importing ? 'جاري الاستيراد…' : 'استيراد البيانات الافتتاحية'}
-              subtitle="استبدال كل البيانات بالوضع الافتتاحي (الحسابات، الذهب، ومعاملات أغسطس وسبتمبر)."
+              subtitle="استبدال كل البيانات بالوضع الافتتاحي (الحسابات والذهب والمعاملات الأولى)."
               icon="download"
               chevron
               onPress={importing ? undefined : handleImport}

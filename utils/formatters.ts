@@ -48,6 +48,47 @@ export function formatMonthLabel(month: string): string {
   return fromDateKey(`${month}-01`).toLocaleDateString('ar-EG', { month: 'long', year: 'numeric' });
 }
 
+// 0.123 → "12.3%", with showSign "+12.3%" / "−4%". Isolated left-to-right (like formatMoney) so
+// Arabic text around it can't move the sign or the % sign.
+export function formatPercent(ratio: number, showSign = false): string {
+  const pct = Math.round(ratio * 1000) / 10;
+  const sign = pct < 0 ? '−' : showSign && pct > 0 ? '+' : '';
+  return `⁦‎${sign}${Math.abs(pct)}%⁩`;
+}
+
+// "مستحق واحد" / "مستحقين" / "3 مستحقات" / "11 مستحق" (+ "محتاج مراجعة" agreeing with it).
+export function dueCountPhrase(n: number): string {
+  if (n === 1) return 'مستحق واحد محتاج مراجعة';
+  if (n === 2) return 'مستحقين محتاجين مراجعة';
+  if (n >= 3 && n <= 10) return `${n} مستحقات محتاجة مراجعة`;
+  return `${n} مستحق محتاج مراجعة`;
+}
+
+// "خلال يوم" / "خلال يومين" / "خلال 3 أيام" / "خلال 14 يوم".
+export function withinDaysPhrase(days: number): string {
+  if (days <= 1) return 'خلال يوم';
+  if (days === 2) return 'خلال يومين';
+  if (days <= 10) return `خلال ${days} أيام`;
+  return `خلال ${days} يوم`;
+}
+
+// "النهارده" · "منذ يوم" · "منذ يومين" · "منذ 5 أيام" · "منذ 14 يوم".
+export function daysAgoPhrase(days: number): string {
+  if (days <= 0) return 'النهارده';
+  if (days === 1) return 'منذ يوم';
+  if (days === 2) return 'منذ يومين';
+  if (days <= 10) return `منذ ${days} أيام`;
+  return `منذ ${days} يوم`;
+}
+
+// "كمان حاجة واحدة" · "كمان حاجتين" · "كمان 3 حاجات" · "كمان 11 حاجة".
+export function moreThingsPhrase(n: number): string {
+  if (n === 1) return 'كمان حاجة واحدة';
+  if (n === 2) return 'كمان حاجتين';
+  if (n <= 10) return `كمان ${n} حاجات`;
+  return `كمان ${n} حاجة`;
+}
+
 export function formatNumber(value: number, decimals = 2): string {
   return value.toLocaleString('en-US', {
     minimumFractionDigits: 0,

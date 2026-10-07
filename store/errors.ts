@@ -36,7 +36,8 @@ export type FinanceErrorCode =
   | 'CATEGORY_NAME_TAKEN'
   | 'CATEGORY_KIND_LOCKED'
   | 'DEFAULT_CATEGORY_DELETE'
-  | 'PLAN_NOT_FOUND';
+  | 'PLAN_NOT_FOUND'
+  | 'ACTION_NOT_DISMISSIBLE';
 
 export type FinanceEntity =
   | 'account'

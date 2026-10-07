@@ -25,6 +25,11 @@ export function addMonthsToDate(dateKey: string, months: number): string {
   return toDateKey(new Date(firstOfTarget.getFullYear(), firstOfTarget.getMonth(), Math.min(d, lastDay)));
 }
 
+// Whole days from `from` to `to` (local date keys; rounding absorbs DST hours).
+export function daysBetween(from: string, to: string): number {
+  return Math.round((fromDateKey(to).getTime() - fromDateKey(from).getTime()) / 86_400_000);
+}
+
 export function shiftDate(dateKey: string, days: number): string {
   const date = fromDateKey(dateKey);
   date.setDate(date.getDate() + days);

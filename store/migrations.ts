@@ -3,6 +3,7 @@ import { DEFAULT_TRACKING_START_DATE, GOLD_PRICE_21K, GOLD_PRICE_24K } from '@/c
 import { fromEGP, rateToEGP, toEGP } from '@/utils/currency';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from './defaultCategories';
 import { holdingValueEGP, liquidTotalEGP } from './selectors';
+import { missingPastSnapshots } from './snapshots';
 import type {
   Account,
   Category,
@@ -33,8 +34,10 @@ import type {
 //   v5: monthly plans become per-category lines in a plan currency (+ fund contributions)
 //   v6: recurring rules get kind (incl. transfer), interval, dayOfMonth, start/end, mode,
 //       variableAmount, skippedDates; transactions can carry occurrenceDate
+//   v7: + netWorthSnapshots (past months since trackingStartDate backfilled as estimates),
+//       actionDismissals, monthlyReviews
 
-export const CURRENT_VERSION = 6;
+export const CURRENT_VERSION = 7;
 
 interface LegacyTransactionV1 {
   id: string;
@@ -122,13 +125,16 @@ export interface LegacyRecurringRule {
 }
 
 // The v4 data shape: current entities, but plans and recurring rules in their legacy forms.
-export type FinanceStateV4 = Omit<FinanceState, 'monthlyPlans' | 'recurringRules'> & {
+export type FinanceStateV4 = Omit<FinanceStateV6, 'monthlyPlans' | 'recurringRules'> & {
   monthlyPlans: (LegacyMonthlyPlan & { updatedAt: string })[];
   recurringRules: (LegacyRecurringRule & { updatedAt: string })[];
 };
 
-// The v5 data shape: current except recurring rules.
-export type FinanceStateV5 = Omit<FinanceState, 'recurringRules'> & {
+// The v6 data shape: current without the v7 collections.
+export type FinanceStateV6 = Omit<FinanceState, 'netWorthSnapshots' | 'actionDismissals' | 'monthlyReviews'>;
+
+// The v5 data shape: v6 except recurring rules.
+export type FinanceStateV5 = Omit<FinanceStateV6, 'recurringRules'> & {
   recurringRules: (LegacyRecurringRule & { updatedAt: string })[];
 };
 
@@ -382,8 +388,8 @@ export function migrateV4toV5(persisted: unknown, ctx: MigrationContext): Financ
 // 'confirm', variableAmount: false, skippedDates: [] }; monthly/yearly rules keep their day
 // via dayOfMonth. 'confirm' means nothing is recorded automatically after the upgrade.
 // Idempotent: rules that already have `kind` pass through unchanged.
-export function migrateV5toV6(persisted: unknown, ctx: MigrationContext): FinanceState {
-  const s = (persisted ?? {}) as FinanceStateV5 | FinanceState;
+export function migrateV5toV6(persisted: unknown, ctx: MigrationContext): FinanceStateV6 {
+  const s = (persisted ?? {}) as FinanceStateV5 | FinanceStateV6;
   const rules = (Array.isArray(s.recurringRules) ? s.recurringRules : []) as (LegacyRecurringRule | RecurringRule)[];
   const recurringRules: RecurringRule[] = rules.map((rule) => {
     if ('kind' in rule) return rule as RecurringRule;
@@ -410,7 +416,26 @@ export function migrateV5toV6(persisted: unknown, ctx: MigrationContext): Financ
       updatedAt,
     };
   });
-  return { ...(s as FinanceState), recurringRules };
+  return { ...(s as FinanceStateV6), recurringRules };
+}
+
+// v6 → v7: adds the snapshot, dismissal and review collections, and backfills an estimated net
+// worth snapshot for each past month since trackingStartDate (best effort: today's rates and
+// prices; see netWorthAsOf). Idempotent: existing collections and snapshots are kept and only
+// months without a snapshot are filled in.
+export function migrateV6toV7(persisted: unknown, ctx: MigrationContext): FinanceState {
+  const s = (persisted ?? {}) as FinanceStateV6 & Partial<FinanceState>;
+  const list = <T,>(value: T[] | undefined): T[] => (Array.isArray(value) ? value : []);
+  const state: FinanceState = {
+    ...s,
+    netWorthSnapshots: list(s.netWorthSnapshots),
+    actionDismissals: list(s.actionDismissals),
+    monthlyReviews: list(s.monthlyReviews),
+  };
+  const backfilled = missingPastSnapshots(state, new Date(ctx.now));
+  if (backfilled.length === 0) return state;
+  const netWorthSnapshots = [...state.netWorthSnapshots, ...backfilled].sort((a, b) => (a.month < b.month ? -1 : 1));
+  return { ...state, netWorthSnapshots };
 }
 
 // Entry point used by zustand persist and backup restore: upgrades any older payload step by step.
@@ -427,5 +452,6 @@ export function migratePersistedState(
   if (version < 4) state = migrateV3toV4(state, ctx);
   if (version < 5) state = migrateV4toV5(state, ctx);
   if (version < 6) state = migrateV5toV6(state, ctx);
+  if (version < 7) state = migrateV6toV7(state, ctx);
   return { state: state as FinanceState, clampedBy };
 }
