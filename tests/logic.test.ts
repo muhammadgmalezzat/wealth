@@ -78,8 +78,10 @@ import {
 import type { FinanceState, Fund, RecurringRule, Transaction } from '@/store/types';
 import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
-import { formatDayLabel, formatPercent, moreThingsPhrase } from '@/utils/formatters';
+import { formatDayLabel, formatPercent, moreThingsPhrase, timeAgoPhrase } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
+import * as priceCalc from '@/utils/prices/calc';
+import * as prices from '@/utils/prices/fetchPrices';
 
 // --- Fixtures ---------------------------------------------------------------
 
@@ -1656,12 +1658,156 @@ describe('plan suggestion', () => {
 });
 
 describe('plan currency conversion', () => {
-  it('uses each transaction’s snapshot to EGP, then today’s rate into the plan currency', () => {
-    const s = planningState(); // current SAR rate 12.5
-    approx(amountInCurrency(s, { amount: 1250, rateToEGP: 1 }, 'SAR'), 100);
-    // A SAR expense recorded at 13: 100 SAR → 1,300 EGP → 104 SAR at today's 12.5.
-    approx(amountInCurrency(s, { amount: 100, rateToEGP: 13 }, 'SAR'), 104);
-    approx(amountInCurrency(s, { amount: 100, rateToEGP: 13 }, 'EGP'), 1300);
+  const GROCERIES = CATEGORY_IDS.groceries;
+  const DINING = 'cat-lifestyle-dining';
+  const withSarRate = (s: FinanceState, SAR_EGP: number): FinanceState => ({
+    ...s,
+    settings: { ...s.settings, exchangeRates: { ...s.settings.exchangeRates, SAR_EGP } },
+  });
+  // Recorded while 1 SAR = 13.5 EGP: a 40 SAR and a 270 EGP (= 20 SAR) expense, a 3,000 SAR
+  // income, 1,350 EGP (= 100 SAR) put into an EGP fund, all in October's SAR plan.
+  const recordedAt13_5 = (): FinanceState => {
+    const ctx = makeCtx();
+    let s = withSarRate(
+      {
+        ...emptyState(),
+        accounts: [account('sar', 'SAR', 10000, 'SA'), account('egp', 'EGP', 50000)],
+        funds: [fund({ id: 'F' })],
+        // One tracked month, so November's suggestion is October as it was.
+        settings: { ...emptyState().settings, trackingStartDate: '2026-10-01' },
+      },
+      13.5
+    );
+    const add = (input: ops.NewIncomeExpense) => {
+      s = apply(s, ops.addTransaction(s, input, ctx));
+    };
+    add({ type: 'expense', amount: 40, currency: 'SAR', accountId: 'sar', categoryId: GROCERIES, date: '2026-10-05' });
+    add({ type: 'expense', amount: 270, currency: 'EGP', accountId: 'egp', categoryId: DINING, date: '2026-10-06' });
+    add({ type: 'income', amount: 3000, currency: 'SAR', accountId: 'sar', categoryId: 'cat-income-salary', date: '2026-10-01' });
+    s = apply(
+      s,
+      ops.savePlan(
+        s,
+        {
+          month: '2026-10',
+          currency: 'SAR',
+          expectedIncome: 3000,
+          lines: [
+            { categoryId: GROCERIES, limit: 500, kind: 'flexible' },
+            { categoryId: DINING, limit: 100, kind: 'flexible' },
+          ],
+          fundContributions: [{ fundId: 'F', amount: 100 }],
+        },
+        ctx
+      )
+    );
+    return apply(s, ops.allocateToFund(s, 'F', 1350, undefined, ctx));
+  };
+  const spent = (s: FinanceState, categoryId: string) => planProgress(s, '2026-10')!.lines.find((l) => l.categoryId === categoryId)!.spent;
+  const withoutSnapshots = (s: FinanceState): FinanceState => ({
+    ...s,
+    transactions: s.transactions.map(({ ratesSnapshot: _r, ...tx }) => tx as Transaction),
+    fundMovements: s.fundMovements.map(({ ratesSnapshot: _r, ...m }) => m),
+  });
+
+  it('keeps a 40 SAR expense at exactly 40 in a SAR plan after SAR_EGP moves 13.5 → 14', () => {
+    const before = recordedAt13_5();
+    const after = withSarRate(before, 14);
+    assert.equal(spent(before, GROCERIES), 40);
+    assert.equal(spent(after, GROCERIES), 40);
+    assert.equal(planProgress(after, '2026-10')!.lines[0].remaining, 460);
+  });
+
+  it('converts an EGP expense into the SAR plan with its own snapshot, not today’s rate', () => {
+    const before = recordedAt13_5();
+    assert.deepEqual(before.transactions.find((t) => t.amount === 270)!.ratesSnapshot, { SAR_EGP: 13.5, USD_EGP: 50 });
+    approx(spent(before, DINING), 20);
+    approx(spent(withSarRate(before, 14), DINING), 20);
+    approx(spent(withSarRate(before, 27), DINING), 20);
+  });
+
+  it('leaves plan progress, safe to spend, spend impact and the suggestion alone when rates change', () => {
+    const before = recordedAt13_5();
+    const after = withSarRate(before, 14);
+    approx(safeToSpend(after, '2026-10'), 460 + 80);
+    assert.equal(safeToSpend(after, '2026-10'), safeToSpend(before, '2026-10'));
+    assert.deepEqual(overspentLines(after, '2026-10'), overspentLines(before, '2026-10'));
+    assert.equal(planProgress(after, '2026-10')!.totalSpent, planProgress(before, '2026-10')!.totalSpent);
+    // A new 60 SAR expense on the SAR line: 500 − 40 − 60, no rate involved.
+    assert.equal(spendImpact(after, '2026-10', GROCERIES, 60, 'SAR')!.remainingAfter, 400);
+    assert.equal(spendImpact(after, '2026-10', GROCERIES, 60)!.remainingAfter, 400);
+    // November's suggestion is built from October's history: same lines and income either way.
+    const NOV = new Date(2026, 10, 3, 12);
+    const a = planSuggestion(before, '2026-11', 'SAR', NOV);
+    const b = planSuggestion(after, '2026-11', 'SAR', NOV);
+    assert.deepEqual(b.lines, a.lines);
+    assert.equal(b.expectedIncome, a.expectedIncome);
+    assert.equal(b.expectedIncome, 3000);
+    assert.equal(b.lines.find((l) => l.categoryId === GROCERIES)!.limit, 40);
+    assert.equal(b.lines.find((l) => l.categoryId === DINING)!.limit, 20);
+  });
+
+  it('keeps fund allocations of the month at their own rates (plan progress, review, month flows)', () => {
+    const before = recordedAt13_5();
+    const after = withSarRate(before, 14);
+    assert.deepEqual(after.fundMovements[0].ratesSnapshot, { SAR_EGP: 13.5, USD_EGP: 50 });
+    approx(planProgress(after, '2026-10')!.contributions[0].allocated, 100);
+    approx(reviewLogic.monthReview(after, '2026-10', NOW).funds[0].allocated, 100);
+    assert.equal(monthFlows(after, '2026-10').savedToFundsEGP, 1350);
+    // In its own currency a fund never depends on rates.
+    assert.equal(fundAllocated(after, 'F'), 1350);
+  });
+
+  it('still works for transactions and movements recorded before ratesSnapshot existed', () => {
+    const old = withSarRate(withoutSnapshots(recordedAt13_5()), 14);
+    // Same currency: exact, whatever the rates.
+    assert.equal(spent(old, GROCERIES), 40);
+    // Other currency: own rate to EGP, today's rate out of it (the documented approximation).
+    approx(spent(old, DINING), 270 / 14);
+    approx(planProgress(old, '2026-10')!.contributions[0].allocated, 1350 / 14);
+    approx(amountInCurrency(old, { amount: 100, currency: 'SAR', rateToEGP: 13 }, 'SAR'), 100);
+    approx(amountInCurrency(old, { amount: 100, currency: 'SAR', rateToEGP: 13 }, 'EGP'), 1300);
+    approx(amountInCurrency(old, { amount: 100, currency: 'SAR', rateToEGP: 13 }, 'USD'), 26);
+    // With a snapshot both legs come from the same moment.
+    approx(
+      amountInCurrency(old, { amount: 100, currency: 'SAR', rateToEGP: 13, ratesSnapshot: { SAR_EGP: 13, USD_EGP: 52 } }, 'USD'),
+      25
+    );
+  });
+
+  it('keeps the snapshot when a transaction is edited, and retakes it when its currency changes', () => {
+    const s = withSarRate(recordedAt13_5(), 14);
+    const ctx = makeCtx();
+    const tx = s.transactions.find((t) => t.amount === 40)!;
+    const edited = apply(s, ops.updateTransaction(s, { ...tx, amount: 45 } as Transaction, ctx)).transactions.find((t) => t.id === tx.id)!;
+    assert.equal(edited.rateToEGP, 13.5);
+    assert.deepEqual(edited.ratesSnapshot, { SAR_EGP: 13.5, USD_EGP: 50 });
+    const moved = apply(
+      s,
+      ops.updateTransaction(s, { ...tx, accountId: 'egp', currency: 'EGP' } as Transaction, ctx)
+    ).transactions.find((t) => t.id === tx.id)!;
+    assert.equal(moved.rateToEGP, 1);
+    assert.deepEqual(moved.ratesSnapshot, { SAR_EGP: 14, USD_EGP: 50 });
+    // An old transaction stays without one while its currency is unchanged.
+    const old = withoutSnapshots(s);
+    const oldTx = old.transactions.find((t) => t.amount === 40)!;
+    const oldEdited = apply(old, ops.updateTransaction(old, { ...oldTx, amount: 41 } as Transaction, ctx)).transactions.find((t) => t.id === tx.id)!;
+    assert.equal('ratesSnapshot' in oldEdited, false);
+  });
+
+  it('pays a sinking fund in its own currency without a conversion', () => {
+    const ctx = makeCtx();
+    let s = withSarRate(
+      {
+        ...emptyState(),
+        accounts: [account('sar', 'SAR', 10000, 'SA')],
+        funds: [fund({ id: 'S', type: 'sinking', currency: 'SAR', targetAmount: 500, frequency: 'yearly', nextDueDate: '2026-10-20' })],
+      },
+      13.7
+    );
+    s = apply(s, ops.allocateToFund(s, 'S', 500, undefined, ctx));
+    s = apply(s, ops.paySinkingFund(s, { fundId: 'S', accountId: 'sar', categoryId: 'cat-essentials-bills', amount: 200.1, date: '2026-10-15' }, ctx));
+    assert.equal(s.fundMovements.at(-1)!.amount, -200.1);
   });
 });
 
@@ -3159,5 +3305,288 @@ describe('parseAmount in the add-asset form', () => {
     assert.equal(parseAmount('٠', { allowZero: true }), 0);
     // Negative or text input is rejected (the form then asks for a valid number).
     assert.equal(parseAmount('-500', { allowZero: true }), null);
+  });
+});
+
+// --- Live prices ---------------------------------------------------------------
+
+describe('live prices: calculations and validation', () => {
+  const ER_API = { result: 'success', base_code: 'USD', rates: { USD: 1, EGP: 50, SAR: 3.75 } };
+  const ER_FUN = { timestamp: 1, base: 'USD', rates: { EGP: 52, SAR: 3.75 } };
+  const GOLD = { symbol: 'XAU', currency: 'USD', price: 3110.34768, name: 'Gold' };
+
+  it('derives SAR_EGP and USD_EGP from USD-based rates', () => {
+    const fx = priceCalc.parseOpenErApi(ER_API)!;
+    assert.equal(fx.USD_EGP, 50);
+    approx(fx.SAR_EGP, 50 / 3.75);
+    approx(priceCalc.parseExchangerateFun(ER_FUN)!.SAR_EGP, 52 / 3.75);
+  });
+
+  it('prices a gram of gold from the ounce price, the USD rate and the local premium', () => {
+    // 3,110.34768 USD/oz = 100 USD/g → 5,000 EGP/g at 50.
+    const plain = priceCalc.goldPricesEGP(GOLD.price, 50);
+    approx(plain.goldPrice24kEGP, 5000);
+    approx(plain.goldPrice21kEGP, 4375);
+    const withPremium = priceCalc.goldPricesEGP(GOLD.price, 50, 4);
+    approx(withPremium.goldPrice24kEGP, 5200);
+    approx(withPremium.goldPrice21kEGP, 4550);
+    approx(priceCalc.goldPricesEGP(GOLD.price, 50, -10).goldPrice24kEGP, 4500);
+    assert.equal(priceCalc.parseGoldApi(GOLD), GOLD.price);
+  });
+
+  it('rejects broken or implausible responses', () => {
+    const fxBad: unknown[] = [
+      null,
+      'oops',
+      { ...ER_API, result: 'error' },
+      { ...ER_API, base_code: 'EUR' },
+      { ...ER_API, rates: undefined },
+      { ...ER_API, rates: { EGP: 0, SAR: 3.75 } },
+      { ...ER_API, rates: { EGP: -50, SAR: 3.75 } },
+      { ...ER_API, rates: { EGP: '50', SAR: 3.75 } },
+      { ...ER_API, rates: { EGP: 50 } },
+      { ...ER_API, rates: { EGP: 50, SAR: 375 } },
+      { ...ER_API, rates: { EGP: 50000, SAR: 3.75 } },
+      { ...ER_API, rates: { EGP: NaN, SAR: 3.75 } },
+    ];
+    for (const json of fxBad) assert.equal(priceCalc.parseOpenErApi(json), null, JSON.stringify(json));
+    assert.equal(priceCalc.parseExchangerateFun({ ...ER_FUN, base: 'EUR' }), null);
+    assert.equal(priceCalc.parseExchangerateFun({ base: 'USD' }), null);
+    const goldBad: unknown[] = [null, {}, { ...GOLD, symbol: 'XAG' }, { ...GOLD, currency: 'EUR' }, { ...GOLD, price: 0 }, { ...GOLD, price: -1 }, { ...GOLD, price: 1e6 }, { ...GOLD, price: '4000' }];
+    for (const json of goldBad) assert.equal(priceCalc.parseGoldApi(json), null, JSON.stringify(json));
+    assert.equal(priceCalc.isValidPremiumPct(0), true);
+    assert.equal(priceCalc.isValidPremiumPct(-51), false);
+    assert.equal(priceCalc.isValidPremiumPct(NaN), false);
+  });
+
+  it('parses the typed premium and words the status', () => {
+    assert.equal(settingsUi.parsePremiumPct('4.5'), 4.5);
+    assert.equal(settingsUi.parsePremiumPct('-3'), -3);
+    assert.equal(settingsUi.parsePremiumPct('−٢'), -2);
+    assert.equal(settingsUi.parsePremiumPct('0'), 0);
+    assert.equal(settingsUi.parsePremiumPct('abc'), null);
+    assert.equal(timeAgoPhrase(new Date(NOW.getTime() - 2 * 3_600_000).toISOString(), NOW), 'منذ ساعتين');
+    assert.equal(timeAgoPhrase(new Date(NOW.getTime() - 5 * 60_000).toISOString(), NOW), 'منذ 5 دقايق');
+    assert.equal(timeAgoPhrase(NOW.toISOString(), NOW), 'دلوقتي');
+    assert.equal(
+      settingsUi.priceStatusLine({ fxSource: 'open.er-api', lastPriceFetchAt: new Date(NOW.getTime() - 3_600_000).toISOString() }, NOW),
+      'المصدر: ExchangeRate-API · آخر تحديث منذ ساعة'
+    );
+    assert.ok(settingsUi.priceErrorMessage('network').includes('الأسعار المحفوظة زي ما هي'));
+  });
+});
+
+describe('live prices: fetching', () => {
+  const ER_API = { result: 'success', base_code: 'USD', rates: { EGP: 50, SAR: 3.75 } };
+  const ER_FUN = { base: 'USD', rates: { EGP: 52, SAR: 3.75 } };
+  const GOLD = { symbol: 'XAU', currency: 'USD', price: 3110.34768 };
+  type Reply = unknown | Error | 'hang' | { status: number };
+  // A fake fetch answering by URL; records what was asked for.
+  const fakeFetch = (replies: Record<string, Reply>) => {
+    const calls: string[] = [];
+    const fetchImpl = (url: string) => {
+      calls.push(url);
+      const reply = replies[url];
+      if (reply === 'hang') return new Promise<never>(() => {});
+      if (reply instanceof Error) return Promise.reject(reply);
+      if (reply && typeof reply === 'object' && 'status' in reply) return Promise.resolve({ ok: false, json: async () => ({}) });
+      return Promise.resolve({ ok: true, json: async () => reply });
+    };
+    return { fetchImpl, calls };
+  };
+  const { FX_PRIMARY_URL: P, FX_FALLBACK_URL: F, GOLD_URL: G } = prices;
+
+  it('uses the primary FX source and never calls the fallback when it works', async () => {
+    const { fetchImpl, calls } = fakeFetch({ [P]: ER_API, [F]: ER_FUN, [G]: GOLD });
+    const result = await prices.fetchLivePrices({ fetchImpl });
+    assert.deepEqual(result, { fx: { SAR_EGP: 50 / 3.75, USD_EGP: 50 }, fxSource: 'open.er-api', xauUsd: GOLD.price });
+    assert.ok(!calls.includes(F));
+  });
+
+  it('falls back when the primary fails, is down or sends invalid data', async () => {
+    for (const primary of [new Error('offline'), { status: 500 }, { result: 'error' }, { ...ER_API, rates: { EGP: 0, SAR: 3.75 } }] as Reply[]) {
+      const result = await prices.fetchLivePrices({ fetchImpl: fakeFetch({ [P]: primary, [F]: ER_FUN, [G]: GOLD }).fetchImpl });
+      assert.equal(result.fxSource, 'exchangerate.fun');
+      assert.equal(result.fx!.USD_EGP, 52);
+      assert.equal(result.error, undefined);
+    }
+  });
+
+  it('reports what failed without throwing', async () => {
+    const down = new Error('offline');
+    const offline = await prices.fetchLivePrices({ fetchImpl: fakeFetch({ [P]: down, [F]: down, [G]: down }).fetchImpl });
+    assert.deepEqual(offline, { fx: null, xauUsd: null, error: 'network' });
+    const fxBad = await prices.fetchLivePrices({ fetchImpl: fakeFetch({ [P]: {}, [F]: { base: 'USD', rates: {} }, [G]: GOLD }).fetchImpl });
+    assert.deepEqual(fxBad, { fx: null, xauUsd: GOLD.price, error: 'fx' });
+    const goldBad = await prices.fetchLivePrices({ fetchImpl: fakeFetch({ [P]: ER_API, [G]: { ...GOLD, price: -5 } }).fetchImpl });
+    assert.equal(goldBad.error, 'gold');
+    assert.equal(goldBad.xauUsd, null);
+    assert.equal(goldBad.fx!.USD_EGP, 50);
+  });
+
+  it('gives up on a request that hangs (timeout)', async () => {
+    const result = await prices.fetchLivePrices({ fetchImpl: fakeFetch({ [P]: 'hang', [F]: 'hang', [G]: 'hang' }).fetchImpl, timeoutMs: 20 });
+    assert.deepEqual(result, { fx: null, xauUsd: null, error: 'network' });
+  });
+});
+
+describe('live prices: applying', () => {
+  const OK: prices.PriceFetchResult = { fx: { SAR_EGP: 14, USD_EGP: 50 }, fxSource: 'open.er-api', xauUsd: 3110.34768 };
+  const withSettings = (s: FinanceState, settings: Partial<FinanceState['settings']>): FinanceState => ({ ...s, settings: { ...s.settings, ...settings } });
+  const AUTO = { priceSource: 'auto' } as const;
+  const autoState = () => withSettings(emptyState(), AUTO);
+
+  it('auto mode overwrites rates and gold prices and their dates', () => {
+    const s = withSettings(autoState(), { localPremiumPct: 4 });
+    const { settings } = apply(s, ops.applyLivePrices(s, OK, makeCtx()));
+    assert.deepEqual(settings.exchangeRates, { SAR_EGP: 14, USD_EGP: 50, lastUpdated: NOW.toISOString() });
+    approx(settings.goldPrice24kEGP, 5200);
+    approx(settings.goldPrice21kEGP, 4550);
+    assert.equal(settings.goldPriceUpdatedAt, NOW.toISOString());
+    assert.equal(settings.lastPriceFetchAt, NOW.toISOString());
+    assert.equal(settings.fxSource, 'open.er-api');
+    assert.equal(settings.lastGoldUsdPerOunce, OK.xauUsd);
+    assert.equal('lastPriceFetchError' in settings, false);
+  });
+
+  it('defaults to manual for data that already has prices: existing installs, restores, imports', () => {
+    // Saved before live prices existed: no priceSource.
+    const existing = emptyState();
+    assert.equal(prices.priceSourceOf(existing.settings), 'manual');
+    // Hydrating saved data never switches it to auto…
+    assert.deepEqual(ops.ensurePriceSource(existing, false), {});
+    // …so a fetch changes nothing and none is started on its own.
+    assert.deepEqual(ops.applyLivePrices(existing, OK, makeCtx()), {});
+    assert.equal(prices.shouldAutoFetch(existing.settings, NOW), false);
+    // Restoring an older backup onto a device in auto mode brings its typed prices as manual.
+    const restored = apply(autoState(), ops.restoreFromBackup(autoState(), existing, makeCtx()));
+    assert.equal(prices.priceSourceOf(restored.settings), 'manual');
+    assert.deepEqual(ops.applyLivePrices(restored, OK, makeCtx()), {});
+    // Importing the opening data keeps the device's prices and its (manual) choice.
+    const imported = apply(existing, ops.replaceWithSeed(existing, emptyState(), makeCtx()));
+    assert.equal(prices.priceSourceOf(imported.settings), 'manual');
+    // The migration chain doesn't turn auto on either.
+    const { netWorthSnapshots: _n, actionDismissals: _a, monthlyReviews: _r, ...v6 } = emptyState();
+    assert.equal(prices.priceSourceOf(migratePersistedState(v6, 6, MIGRATION_CTX).state.settings), 'manual');
+  });
+
+  it('defaults to auto only on a fresh install with nothing saved', () => {
+    const fresh = apply(emptyState(), ops.ensurePriceSource(emptyState(), true));
+    assert.equal(fresh.settings.priceSource, 'auto');
+    assert.equal(prices.shouldAutoFetch(fresh.settings, NOW), true);
+    approx(apply(fresh, ops.applyLivePrices(fresh, OK, makeCtx())).settings.exchangeRates.SAR_EGP, 14);
+    // An explicit choice is never changed, fresh or not.
+    const manual = withSettings(emptyState(), { priceSource: 'manual' });
+    assert.deepEqual(ops.ensurePriceSource(manual, true), {});
+    assert.deepEqual(ops.ensurePriceSource(autoState(), false), {});
+  });
+
+  it('never overwrites manual prices', () => {
+    const s = withSettings(emptyState(), { priceSource: 'manual' });
+    assert.deepEqual(ops.applyLivePrices(s, OK, makeCtx()), {});
+    assert.equal(prices.shouldAutoFetch(s.settings, NOW), false);
+  });
+
+  it('keeps the saved prices on failure and records the error until a fetch succeeds', () => {
+    const s = autoState();
+    const failed = apply(s, ops.applyLivePrices(s, { fx: null, xauUsd: null, error: 'network' }, makeCtx()));
+    assert.deepEqual(failed.settings.exchangeRates, s.settings.exchangeRates);
+    assert.equal(failed.settings.goldPrice24kEGP, s.settings.goldPrice24kEGP);
+    assert.equal(failed.settings.lastPriceFetchError, 'network');
+    assert.equal(failed.settings.lastPriceFetchAt, undefined);
+    // Gold failed: rates update, gold stays.
+    const partial = apply(s, ops.applyLivePrices(s, { fx: OK.fx, fxSource: 'exchangerate.fun', xauUsd: null, error: 'gold' }, makeCtx()));
+    assert.equal(partial.settings.exchangeRates.SAR_EGP, 14);
+    assert.equal(partial.settings.goldPrice24kEGP, s.settings.goldPrice24kEGP);
+    assert.equal(partial.settings.goldPriceUpdatedAt, s.settings.goldPriceUpdatedAt);
+    assert.equal(partial.settings.lastPriceFetchError, 'gold');
+    const recovered = apply(failed, ops.applyLivePrices(failed, OK, makeCtx()));
+    assert.equal('lastPriceFetchError' in recovered.settings, false);
+  });
+
+  it('throttles auto fetches to once every 6 hours, with a pause after a failed attempt', () => {
+    const at = (msAgo: number) => ({ lastPriceFetchAt: new Date(NOW.getTime() - msAgo).toISOString() });
+    const HOUR = 3_600_000;
+    assert.equal(prices.shouldAutoFetch(AUTO, NOW), true);
+    assert.equal(prices.shouldAutoFetch({ ...AUTO, ...at(6 * HOUR - 1) }, NOW), false);
+    assert.equal(prices.shouldAutoFetch({ ...AUTO, ...at(6 * HOUR) }, NOW), true);
+    assert.equal(prices.shouldAutoFetch({ priceSource: 'manual', ...at(48 * HOUR) }, NOW), false);
+    // Tried 5 minutes ago and failed: wait.
+    assert.equal(prices.shouldAutoFetch(AUTO, NOW, NOW.getTime() - 5 * 60_000), false);
+    assert.equal(prices.shouldAutoFetch(AUTO, NOW, NOW.getTime() - 15 * 60_000), true);
+  });
+
+  it('re-prices gold when the premium changes (auto mode only) and validates it', () => {
+    const ctx = makeCtx();
+    const fetched = apply(autoState(), ops.applyLivePrices(autoState(), OK, ctx));
+    approx(fetched.settings.goldPrice24kEGP, 5000);
+    const premium = apply(fetched, ops.setPricePreferences(fetched, { localPremiumPct: 10 }, ctx));
+    approx(premium.settings.goldPrice24kEGP, 5500);
+    approx(premium.settings.goldPrice21kEGP, 5500 * 0.875);
+    assert.throws(
+      () => ops.setPricePreferences(fetched, { localPremiumPct: 500 }, ctx),
+      (e: unknown) => e instanceof FinanceValidationError && e.code === 'NOT_A_NUMBER'
+    );
+    const manual = apply(fetched, ops.setPricePreferences(fetched, { priceSource: 'manual', localPremiumPct: 10 }, ctx));
+    assert.equal(manual.settings.priceSource, 'manual');
+    approx(manual.settings.goldPrice24kEGP, 5000);
+  });
+
+  it('changes current valuations but no historical plan amount', () => {
+    const ctx = makeCtx();
+    let s: FinanceState = withSettings(
+      {
+        ...emptyState(),
+        accounts: [account('sar', 'SAR', 1000, 'SA'), account('egp', 'EGP', 5000)],
+        holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 10, karat: 24, purchaseCostEGP: 1, updatedAt: T0 }],
+      },
+      { exchangeRates: { ...RATES, SAR_EGP: 12.5 }, priceSource: 'auto' }
+    );
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 40, currency: 'SAR', accountId: 'sar', categoryId: CATEGORY_IDS.groceries, date: '2026-10-05' }, ctx));
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 250, currency: 'EGP', accountId: 'egp', categoryId: 'cat-lifestyle-dining', date: '2026-10-06' }, ctx));
+    s = apply(
+      s,
+      ops.savePlan(
+        s,
+        {
+          month: '2026-10',
+          currency: 'SAR',
+          expectedIncome: 0,
+          lines: [
+            { categoryId: CATEGORY_IDS.groceries, limit: 500, kind: 'flexible' },
+            { categoryId: 'cat-lifestyle-dining', limit: 100, kind: 'flexible' },
+          ],
+          fundContributions: [],
+        },
+        ctx
+      )
+    );
+    const updated = apply(s, ops.applyLivePrices(s, OK, ctx));
+    assert.deepEqual(
+      planning.planProgress(updated, '2026-10')!.lines.map((l) => l.spent),
+      planning.planProgress(s, '2026-10')!.lines.map((l) => l.spent)
+    );
+    assert.deepEqual(planning.planProgress(updated, '2026-10')!.lines.map((l) => l.spent), [40, 20]);
+    assert.equal(monthSummary(updated, '2026-10').expenseEGP, monthSummary(s, '2026-10').expenseEGP);
+    assert.deepEqual(updated.transactions, s.transactions);
+    // Balances and gold follow the new prices.
+    approx(netWorthEGP(s), 960 * 12.5 + 4750 + 10 * 6000);
+    approx(netWorthEGP(updated), 960 * 14 + 4750 + 10 * 5000);
+  });
+
+  it('skips the "update prices" action after a successful auto fetch in the last 24 hours', () => {
+    const DAY = 86_400_000;
+    const stale = new Date(NOW.getTime() - 30 * DAY).toISOString();
+    const base = withSettings(
+      { ...emptyState(), holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 1, updatedAt: T0 }] },
+      { goldPriceUpdatedAt: stale, priceSource: 'auto' }
+    );
+    const has = (s: FinanceState) => nba.nextActions(s, NOW).some((a) => a.id === 'prices');
+    assert.equal(has(base), true);
+    const recent = { lastPriceFetchAt: new Date(NOW.getTime() - DAY + 1000).toISOString() };
+    assert.equal(has(withSettings(base, recent)), false);
+    assert.equal(has(withSettings(base, { ...recent, lastPriceFetchError: 'gold' })), true);
+    assert.equal(has(withSettings(base, { ...recent, priceSource: 'manual' })), true);
+    assert.equal(has(withSettings(base, { lastPriceFetchAt: new Date(NOW.getTime() - DAY).toISOString() })), true);
   });
 });

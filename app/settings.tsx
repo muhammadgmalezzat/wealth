@@ -1,10 +1,17 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Platform, StyleSheet, Switch, View } from 'react-native';
+import { Linking, Platform, Pressable, StyleSheet, Switch, View } from 'react-native';
 
 import { ExportSheet } from '@/components/settings/ExportSheet';
 import { RestoreSheet } from '@/components/settings/RestoreSheet';
-import { BACKUP_NUDGE, backupAgeLabel } from '@/components/settings/settingsUi';
+import {
+  BACKUP_NUDGE,
+  backupAgeLabel,
+  parsePremiumPct,
+  PRICE_SOURCE_OPTIONS,
+  priceErrorMessage,
+  priceStatusLine,
+} from '@/components/settings/settingsUi';
 import { AppText } from '@/components/ui/AppText';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -15,12 +22,15 @@ import { formatDateAr } from '@/components/ui/formatDateAr';
 import { formatMoney } from '@/components/ui/formatMoney';
 import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { LoadingView } from '@/components/ui/LoadingView';
+import { Money } from '@/components/ui/Money';
 import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
+import { Segment } from '@/components/ui/Segment';
 import { StatusChip } from '@/components/ui/StatusChip';
-import { colors, space } from '@/constants/theme';
+import { colors, opacity, space } from '@/constants/theme';
 import { openBackup, parseBackup, type BackupFile, type OpenedBackup } from '@/store/backup';
 import { daysSinceBackup, needsBackupReminder } from '@/store/nextActions';
+import type { PriceSource } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { appInfo } from '@/utils/appInfo';
 import { appLockAvailability, authenticate, type LockAvailability } from '@/utils/appLock';
@@ -30,6 +40,9 @@ import { errorMessage } from '@/utils/errorMessages';
 import { newId } from '@/utils/id';
 import { enableReminders, notificationsAvailable } from '@/utils/notifications';
 import { parseAmount } from '@/utils/parseAmount';
+import { isValidPremiumPct } from '@/utils/prices/calc';
+import { FX_ATTRIBUTION_URL, priceSourceOf } from '@/utils/prices/fetchPrices';
+
 import { runAction } from '@/utils/runAction';
 
 export default function SettingsScreen() {
@@ -42,6 +55,8 @@ export default function SettingsScreen() {
   const [usdText, setUsdText] = useState(String(settings.exchangeRates.USD_EGP));
   const [gold24Text, setGold24Text] = useState(String(settings.goldPrice24kEGP));
   const [gold21Text, setGold21Text] = useState(String(settings.goldPrice21kEGP));
+  const [premiumText, setPremiumText] = useState(String(settings.localPremiumPct ?? 0));
+  const [refreshing, setRefreshing] = useState(false);
   const [trackingStart, setTrackingStart] = useState<string | undefined>(settings.trackingStartDate);
   const [importing, setImporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(params.export === '1');
@@ -57,17 +72,51 @@ export default function SettingsScreen() {
   if (!state.hasHydrated) return <LoadingView />;
 
   const gold24 = parseAmount(gold24Text);
+  const priceSource = priceSourceOf(settings);
+  const auto = priceSource === 'auto';
 
   const handleSave = () => {
-    const saved = runAction('تعذّر الحفظ', () =>
-      state.updateSettings({
-        exchangeRates: { SAR_EGP: parseAmount(sarText) ?? NaN, USD_EGP: parseAmount(usdText) ?? NaN },
-        goldPrice24kEGP: gold24 ?? NaN,
-        goldPrice21kEGP: parseAmount(gold21Text) ?? NaN,
-        ...(trackingStart ? { trackingStartDate: trackingStart } : {}),
-      })
-    );
+    const tracking = trackingStart ? { trackingStartDate: trackingStart } : {};
+    const saved = runAction('تعذّر الحفظ', () => {
+      if (auto) {
+        // Prices come from the APIs; only the premium and the tracking start are the user's.
+        state.setPricePreferences({ localPremiumPct: parsePremiumPct(premiumText) ?? NaN });
+        state.updateSettings(tracking);
+      } else {
+        state.updateSettings({
+          exchangeRates: { SAR_EGP: parseAmount(sarText) ?? NaN, USD_EGP: parseAmount(usdText) ?? NaN },
+          goldPrice24kEGP: gold24 ?? NaN,
+          goldPrice21kEGP: parseAmount(gold21Text) ?? NaN,
+          ...tracking,
+        });
+      }
+    });
     if (saved) showMessage('تم', 'اتحفظت الإعدادات');
+  };
+
+  const changePriceSource = (next: PriceSource) => {
+    if (next === priceSource) return;
+    if (!runAction('تعذّر الحفظ', () => state.setPricePreferences({ priceSource: next }))) return;
+    if (next === 'auto') {
+      refreshNow();
+    } else {
+      // Manual starts from the prices currently in use.
+      const current = useFinanceStore.getState().settings;
+      setSarText(String(current.exchangeRates.SAR_EGP));
+      setUsdText(String(current.exchangeRates.USD_EGP));
+      setGold24Text(String(current.goldPrice24kEGP));
+      setGold21Text(String(current.goldPrice21kEGP));
+    }
+  };
+
+  // refreshPrices never throws; the result shows through settings (status line / error).
+  const refreshNow = async () => {
+    // A premium typed but not saved yet applies to this refresh too.
+    const premium = parsePremiumPct(premiumText);
+    if (premium !== null && isValidPremiumPct(premium)) state.setPricePreferences({ localPremiumPct: premium });
+    setRefreshing(true);
+    await useFinanceStore.getState().refreshPrices({ force: true });
+    setRefreshing(false);
   };
 
   const handlePickBackup = async () => {
@@ -138,30 +187,83 @@ export default function SettingsScreen() {
       {/* ── السوق ── */}
       <View>
         <SectionHeader title="السوق" />
-        <Card>
-          <FormField label="ريال سعودي ← جنيه">
-            <FormInput value={sarText} onChangeText={setSarText} keyboardType="decimal-pad" />
-          </FormField>
-          <FormField label="دولار ← جنيه" helper={`آخر تحديث: ${formatDateAr(settings.exchangeRates.lastUpdated)}`}>
-            <FormInput value={usdText} onChangeText={setUsdText} keyboardType="decimal-pad" />
-          </FormField>
-          <FormField label="سعر جرام الذهب عيار 24 (جنيه)">
-            <FormInput value={gold24Text} onChangeText={setGold24Text} keyboardType="decimal-pad" />
-          </FormField>
-          <FormField label="سعر جرام الذهب عيار 21 (جنيه)">
-            <FormInput value={gold21Text} onChangeText={setGold21Text} keyboardType="decimal-pad" />
-          </FormField>
-          <View style={styles.helpers}>
-            {gold24 !== null && (
+        <View style={styles.source}>
+          <Segment options={PRICE_SOURCE_OPTIONS} value={priceSource} onChange={changePriceSource} />
+        </View>
+        {auto ? (
+          <View style={styles.market}>
+            <ListGroup>
+              <ListRow title="ريال سعودي ← جنيه" trailing={<Money amount={settings.exchangeRates.SAR_EGP} currency="EGP" />} />
+              <ListRow title="دولار ← جنيه" trailing={<Money amount={settings.exchangeRates.USD_EGP} currency="EGP" />} />
+              <ListRow
+                title="جرام ذهب عيار 24"
+                trailing={<Money amount={settings.goldPrice24kEGP} currency="EGP" />}
+              />
+              <ListRow
+                title="جرام ذهب عيار 21"
+                subtitle={`عيار 18 (محسوب): ${formatMoney(settings.goldPrice24kEGP * 0.75, 'EGP')}`}
+                trailing={<Money amount={settings.goldPrice21kEGP} currency="EGP" />}
+              />
+            </ListGroup>
+            <View style={styles.status}>
               <AppText variant="caption" color="textSecondary">
-                عيار 18 (محسوب): {formatMoney(gold24 * 0.75, 'EGP')}
+                {priceStatusLine(settings)}
               </AppText>
-            )}
-            <AppText variant="caption" color="textSecondary">
-              آخر تحديث للذهب: {formatDateAr(settings.goldPriceUpdatedAt)}
-            </AppText>
+              {settings.lastPriceFetchError && (
+                <AppText variant="caption" color="warning">
+                  {priceErrorMessage(settings.lastPriceFetchError)}
+                </AppText>
+              )}
+              <AppText variant="caption" color="textSecondary">
+                السعر محسوب من السعر العالمي، مش شامل المصنعية.
+              </AppText>
+              {settings.fxSource === 'open.er-api' && (
+                <Pressable
+                  onPress={() => Linking.openURL(FX_ATTRIBUTION_URL)}
+                  accessibilityRole="link"
+                  hitSlop={8}
+                  style={({ pressed }) => pressed && { opacity: opacity.pressed }}>
+                  <AppText variant="caption" color="primary700">
+                    أسعار العملات من ExchangeRate-API
+                  </AppText>
+                </Pressable>
+              )}
+            </View>
+            <Card style={styles.market}>
+            <FormField
+              label="فرق السوق المحلي %"
+              helper="السعر العالمي بيختلف عن سعر محلات الذهب؛ زوّد أو قلّل النسبة لحد ما يقرب من السعر اللي بتشتري بيه">
+              <FormInput value={premiumText} onChangeText={setPremiumText} keyboardType="numbers-and-punctuation" />
+            </FormField>
+            <Button label="تحديث الأسعار الآن" variant="secondary" icon="refresh" block loading={refreshing} onPress={refreshNow} />
+            </Card>
           </View>
-        </Card>
+        ) : (
+          <Card>
+            <FormField label="ريال سعودي ← جنيه">
+              <FormInput value={sarText} onChangeText={setSarText} keyboardType="decimal-pad" />
+            </FormField>
+            <FormField label="دولار ← جنيه" helper={`آخر تحديث: ${formatDateAr(settings.exchangeRates.lastUpdated)}`}>
+              <FormInput value={usdText} onChangeText={setUsdText} keyboardType="decimal-pad" />
+            </FormField>
+            <FormField label="سعر جرام الذهب عيار 24 (جنيه)">
+              <FormInput value={gold24Text} onChangeText={setGold24Text} keyboardType="decimal-pad" />
+            </FormField>
+            <FormField label="سعر جرام الذهب عيار 21 (جنيه)">
+              <FormInput value={gold21Text} onChangeText={setGold21Text} keyboardType="decimal-pad" />
+            </FormField>
+            <View style={styles.helpers}>
+              {gold24 !== null && (
+                <AppText variant="caption" color="textSecondary">
+                  عيار 18 (محسوب): {formatMoney(gold24 * 0.75, 'EGP')}
+                </AppText>
+              )}
+              <AppText variant="caption" color="textSecondary">
+                آخر تحديث للذهب: {formatDateAr(settings.goldPriceUpdatedAt)}
+              </AppText>
+            </View>
+          </Card>
+        )}
       </View>
 
       {/* ── التخطيط ── */}
@@ -298,6 +400,9 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   content: { padding: space.lg, gap: space.lg },
   helpers: { marginTop: space.md, gap: space.xxs },
+  status: { gap: space.xxs },
+  source: { marginBottom: space.md },
+  market: { gap: space.md },
   save: { marginTop: space.lg },
   listGap: { marginTop: space.md },
   backup: { gap: space.md },

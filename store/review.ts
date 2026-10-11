@@ -1,8 +1,7 @@
-import { fromEGP, toEGP } from '@/utils/currency';
 import { monthOf, shiftMonth } from '@/utils/dates';
 import { isReviewed } from './nextActions';
 import { planFor, planProgress, previousPlanMonth, type LineProgress } from './planning';
-import { fundProgress, fundsByPriority, monthSummary, unassignedEGP } from './selectors';
+import { fundProgress, fundsByPriority, monthSummary, movementAmountIn, unassignedEGP } from './selectors';
 import { monthNetWorthChange, type NetWorthChange } from './snapshots';
 import type { CurrencyCode, ExpenseBucket, FinanceState, Fund, IncomeExpenseTransaction } from './types';
 
@@ -104,7 +103,6 @@ function reviewPlan(state: State, month: string): ReviewPlan | null {
 
 export function monthReview(state: State, month: string, now: Date = new Date()): MonthReview {
   const summary = monthSummary(state, month);
-  const rates = state.settings.exchangeRates;
 
   const regular = new Map<string, number>();
   const oneTime: ReviewOneTime[] = [];
@@ -126,11 +124,12 @@ export function monthReview(state: State, month: string, now: Date = new Date())
   const plan = planFor(state, month);
   const fundCurrency = plan?.currency ?? 'EGP';
   const planned = new Map(plan?.fundContributions.map((c) => [c.fundId, c.amount]) ?? []);
+  // Each movement at its own rates, so a past month reads the same whatever today's rates are.
   const allocatedIn = (fund: Fund) =>
-    fromEGP(
-      toEGP(sum(state.fundMovements.filter((m) => m.fundId === fund.id && monthOf(m.date) === month).map((m) => m.amount)), fund.currency, rates),
-      fundCurrency,
-      rates
+    sum(
+      state.fundMovements
+        .filter((m) => m.fundId === fund.id && monthOf(m.date) === month)
+        .map((m) => movementAmountIn(state, m, fundCurrency))
     );
   const funds: ReviewFund[] = state.funds
     .filter((f) => planned.has(f.id) || state.fundMovements.some((m) => m.fundId === f.id && monthOf(m.date) === month))

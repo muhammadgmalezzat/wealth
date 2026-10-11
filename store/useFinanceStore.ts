@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
 
 import { newId } from '@/utils/id';
+import { fetchLivePrices, priceSourceOf, shouldAutoFetch } from '@/utils/prices/fetchPrices';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import * as ops from './operations';
 import { stateSummary, type FundAmount } from './selectors';
@@ -38,6 +39,13 @@ function loadSeed(): FinanceState {
 const SEED_STATE = loadSeed();
 
 const ctx: ops.OpContext = { newId, now: () => new Date() };
+
+// Live price fetching: the request in flight (if any) and when the last one started (ms), so
+// a failure isn't retried on every foreground. In memory only.
+let priceFetchInFlight: Promise<void> | undefined;
+let lastPriceAttemptAt: number | undefined;
+// True when hydration read the device's storage and found no saved data (a fresh install).
+let storageWasEmpty = false;
 
 // The persisted part of the store: data only, never actions or hydration flags. Also what a
 // backup contains.
@@ -128,6 +136,11 @@ interface FinanceActions {
 
   updateRates: (rates: ExchangeRates) => void;
   updateSettings: (update: ops.SettingsUpdate) => void;
+  setPricePreferences: (prefs: ops.PricePreferences) => void;
+  // Fetches live prices and applies them (auto mode only; manual mode resolves without a
+  // request). `force` skips the 6-hour throttle ("تحديث الأسعار الآن"). Never throws; the
+  // outcome is in settings.lastPriceFetchAt / lastPriceFetchError.
+  refreshPrices: (options?: { force?: boolean }) => Promise<void>;
 
   buyGold: (purchase: ops.GoldPurchase) => void;
   updateGoldPurchase: (txId: string, purchase: ops.GoldPurchase) => void;
@@ -152,6 +165,8 @@ export type FinanceStore = FinanceState &
 const legacyAwareStorage: StateStorage = {
   getItem: async (name) => {
     const raw = await AsyncStorage.getItem(name);
+    // Only a read that succeeded and found nothing counts as a fresh install.
+    storageWasEmpty = !raw;
     if (!raw) return raw;
     try {
       const parsed = JSON.parse(raw);
@@ -253,6 +268,27 @@ export const useFinanceStore = create<FinanceStore>()(
 
       updateRates: (rates) => set(ops.updateRates(get(), rates)),
       updateSettings: (update) => set(ops.updateSettings(get(), update, ctx)),
+      setPricePreferences: (prefs) => set(ops.setPricePreferences(get(), prefs, ctx)),
+      refreshPrices: async ({ force = false } = {}) => {
+        const { settings } = get();
+        if (priceSourceOf(settings) !== 'auto') return;
+        if (!force && !shouldAutoFetch(settings, ctx.now(), lastPriceAttemptAt)) return;
+        // One request at a time: a second caller waits for the one in flight.
+        priceFetchInFlight ??= (async () => {
+          lastPriceAttemptAt = Date.now();
+          try {
+            const result = await fetchLivePrices();
+            // The user may have switched to manual meanwhile; applyLivePrices checks again.
+            const patch = ops.applyLivePrices(get(), result, ctx);
+            if (Object.keys(patch).length > 0) set(patch);
+          } catch {
+            // fetchLivePrices doesn't throw; this only guards the state update.
+          } finally {
+            priceFetchInFlight = undefined;
+          }
+        })();
+        await priceFetchInFlight;
+      },
 
       buyGold: (purchase) => set(ops.buyGold(get(), purchase, ctx)),
       updateGoldPurchase: (txId, purchase) => set(ops.updateGoldPurchase(get(), txId, purchase, ctx)),
@@ -301,9 +337,12 @@ export const useFinanceStore = create<FinanceStore>()(
         return migrated;
       },
       onRehydrateStorage: () => () => {
-        // A fresh install starts from the seed, which has no device id yet.
+        // A fresh install starts from the seed, which has no device id yet, and gets live
+        // prices; saved data from before live prices keeps its typed prices (manual).
         const state = useFinanceStore.getState();
-        useFinanceStore.setState({ ...ops.ensureDeviceId(state, ctx), hasHydrated: true });
+        const withDevice = { ...state, ...ops.ensureDeviceId(state, ctx) };
+        const settings = ops.ensurePriceSource(withDevice, storageWasEmpty).settings ?? withDevice.settings;
+        useFinanceStore.setState({ settings, hasHydrated: true });
       },
     }
   )

@@ -1,5 +1,7 @@
-import { fromEGP, rateToEGP, toEGP } from '@/utils/currency';
+import { convertCurrency, rateToEGP, snapshotRates } from '@/utils/currency';
 import { addMonthsToDate, isDateKey, isMonthKey, shiftDate, toDateKey } from '@/utils/dates';
+import { goldPricesEGP, isValidPremiumPct } from '@/utils/prices/calc';
+import { priceSourceOf, type PriceFetchResult } from '@/utils/prices/fetchPrices';
 import { planIdFor } from './migrations';
 import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
@@ -15,6 +17,7 @@ import {
   fundAllocated,
   fundAmountsEGP,
   SINKING_CYCLE_MONTHS,
+  transactionAmountIn,
   unassignedEGP,
   unassignedEGPWithFundCash,
   type FundAmount,
@@ -39,6 +42,7 @@ import type {
   MonthlyPlan,
   MonthlyReview,
   PlanLine,
+  PriceSource,
   RecurringRule,
   Settings,
   SinkingFrequency,
@@ -302,6 +306,7 @@ export function addTransaction(state: State, input: NewIncomeExpense, ctx: OpCon
       id: ctx.newId(),
       createdAt: ctx.now().toISOString(),
       rateToEGP: input.rateToEGP ?? rateToEGP(input.currency, state.settings.exchangeRates),
+      ratesSnapshot: snapshotRates(state.settings.exchangeRates),
     },
     ctx
   );
@@ -325,8 +330,9 @@ export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): P
       id: ctx.newId(),
       createdAt: ctx.now().toISOString(),
       toAmount:
-        input.toAmount ?? fromEGP(toEGP(input.amount, from.currency, rates), to.currency, rates),
+        input.toAmount ?? convertCurrency(input.amount, from.currency, to.currency, rates),
       rateToEGP: input.rateToEGP ?? rateToEGP(from.currency, rates),
+      ratesSnapshot: snapshotRates(rates),
     },
     ctx
   );
@@ -368,24 +374,25 @@ function syncPurchaseCost(holdings: Holding[], tx: AssetPurchaseTransaction, ctx
 }
 
 // Replaces a transaction. Income/expense/transfer may change into each other, but a gold
-// purchase stays a gold purchase (it owns a holding). createdAt and the snapshotted rateToEGP
-// are kept from the original; the rate is re-snapshotted only when the currency changes,
-// e.g. when the transaction moves to an account in another currency.
+// purchase stays a gold purchase (it owns a holding). createdAt and the snapshotted rates
+// (rateToEGP, ratesSnapshot) are kept from the original; they are re-snapshotted, together,
+// only when the currency changes, e.g. when the transaction moves to an account in another
+// currency.
 export function updateTransaction(state: State, tx: Editable<Transaction>, ctx: OpContext): Patch {
   const existing = requireById(state.transactions, tx.id, 'transaction');
   if ((existing.type === 'asset_purchase') !== (tx.type === 'asset_purchase')) {
     fail('ASSET_PURCHASE_TYPE_LOCKED', { id: tx.id });
   }
   const currency = transactionCurrency(state, tx);
-  const sameCurrency = currency === transactionCurrency(state, existing);
+  const keepRates = !currency || currency === transactionCurrency(state, existing);
+  const ratesSnapshot = keepRates ? existing.ratesSnapshot : snapshotRates(state.settings.exchangeRates);
+  const { ratesSnapshot: _edited, ...edited } = tx;
   const updated = stamp(
     {
-      ...tx,
+      ...edited,
       createdAt: existing.createdAt,
-      rateToEGP:
-        sameCurrency || !currency
-          ? existing.rateToEGP
-          : rateToEGP(currency, state.settings.exchangeRates),
+      rateToEGP: keepRates ? existing.rateToEGP : rateToEGP(currency, state.settings.exchangeRates),
+      ...(ratesSnapshot ? { ratesSnapshot } : {}),
     },
     ctx
   ) as Transaction;
@@ -469,6 +476,7 @@ export function buyGold(state: State, input: GoldPurchase, ctx: OpContext): Patc
     date: input.date,
     ...(input.note?.trim() ? { note: input.note.trim() } : {}),
     rateToEGP: rate,
+    ratesSnapshot: snapshotRates(state.settings.exchangeRates),
     createdAt: ctx.now().toISOString(),
   };
   const holdings = [...state.holdings, holding];
@@ -484,10 +492,8 @@ export function updateGoldPurchase(state: State, txId: string, input: GoldPurcha
   const previousHolding = requireById(state.holdings, existing.holdingId, 'holding');
   const account = requireById(state.accounts, input.accountId, 'account');
   assertPositive(input.amount, 'amount');
-  const rate =
-    account.currency === existing.currency
-      ? existing.rateToEGP
-      : rateToEGP(account.currency, state.settings.exchangeRates);
+  const keepRates = account.currency === existing.currency;
+  const rate = keepRates ? existing.rateToEGP : rateToEGP(account.currency, state.settings.exchangeRates);
   const holding: GoldHolding = {
     ...goldHoldingFor(input, previousHolding.id, input.amount * rate, ctx),
   };
@@ -502,6 +508,7 @@ export function updateGoldPurchase(state: State, txId: string, input: GoldPurcha
     date: input.date,
     ...(input.note?.trim() ? { note: input.note.trim() } : {}),
     rateToEGP: rate,
+    ...(keepRates ? {} : { ratesSnapshot: snapshotRates(state.settings.exchangeRates) }),
     updatedAt: ctx.now().toISOString(),
   };
   const holdings = replaceById(state.holdings, holding, 'holding');
@@ -592,13 +599,14 @@ export function deleteFund(state: State, id: string, ctx: OpContext): Patch {
   };
 }
 
-function newMovement(fundId: string, amount: number, note: string | undefined, ctx: OpContext): FundMovement {
+function newMovement(state: State, fundId: string, amount: number, note: string | undefined, ctx: OpContext): FundMovement {
   return {
     updatedAt: ctx.now().toISOString(),
     id: ctx.newId(),
     fundId,
     amount,
     date: toDateKey(ctx.now()),
+    ratesSnapshot: snapshotRates(state.settings.exchangeRates),
     ...(note ? { note } : {}),
   };
 }
@@ -612,7 +620,7 @@ export function allocateToFund(
 ): Patch {
   requireById(state.funds, fundId, 'fund');
   assertPositive(amount, 'amount');
-  return { fundMovements: [...state.fundMovements, newMovement(fundId, amount, note, ctx)] };
+  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, amount, note, ctx)] };
 }
 
 export function withdrawFromFund(
@@ -625,7 +633,7 @@ export function withdrawFromFund(
   requireById(state.funds, fundId, 'fund');
   assertPositive(amount, 'amount');
   if (amount > fundAllocated(state, fundId)) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
-  return { fundMovements: [...state.fundMovements, newMovement(fundId, -amount, note, ctx)] };
+  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, -amount, note, ctx)] };
 }
 
 // Allocates to several funds at once. All or nothing: the total may not exceed the
@@ -645,7 +653,7 @@ export function allocateMany(
   return {
     fundMovements: [
       ...state.fundMovements,
-      ...allocations.map(({ fundId, amount }) => newMovement(fundId, amount, note, ctx)),
+      ...allocations.map(({ fundId, amount }) => newMovement(state, fundId, amount, note, ctx)),
     ],
   };
 }
@@ -670,7 +678,7 @@ export function withdrawMany(
   return {
     fundMovements: [
       ...state.fundMovements,
-      ...withdrawals.map(({ fundId, amount }) => newMovement(fundId, -amount, note, ctx)),
+      ...withdrawals.map(({ fundId, amount }) => newMovement(state, fundId, -amount, note, ctx)),
     ],
   };
 }
@@ -704,7 +712,7 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
 
   const fundMovements =
     Math.abs(change) >= 0.005
-      ? [...state.fundMovements, newMovement(fundId, change, 'تعديل الرصيد', ctx)]
+      ? [...state.fundMovements, newMovement(state, fundId, change, 'تعديل الرصيد', ctx)]
       : state.fundMovements;
   return { funds: replaceById(state.funds, updated, 'fund'), fundMovements };
 }
@@ -750,12 +758,9 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
       ctx
     )
   );
-  const expense = draft.transactions[0];
-  const valueInFund = fromEGP(
-    payment.amount * expense.rateToEGP,
-    fund.currency,
-    state.settings.exchangeRates
-  );
+  // The payment in the fund's currency, at the expense's own rates (exact when both match).
+  const expense = draft.transactions[0] as IncomeExpenseTransaction;
+  const valueInFund = transactionAmountIn(state, expense, fund.currency);
   const take = Math.min(valueInFund, fundAllocated(draft, fund.id));
   if (take > 0.005) apply(withdrawFromFund(draft, fund.id, take, `اتدفعت: ${fund.name}`, ctx));
 
@@ -1016,13 +1021,14 @@ function occurrenceTransaction(
     date: overrides.date ?? occurrenceDate,
     note,
     rateToEGP: rateToEGP(account.currency, rates),
+    ratesSnapshot: snapshotRates(rates),
     createdAt: ctx.now().toISOString(),
     recurringRuleId: rule.id,
     occurrenceDate,
   };
   if (rule.kind === 'transfer') {
     const to = requireById(state.accounts, rule.toAccountId ?? '', 'account');
-    const converted = fromEGP(toEGP(amount, account.currency, rates), to.currency, rates);
+    const converted = convertCurrency(amount, account.currency, to.currency, rates);
     const toAmount =
       overrides.toAmount ??
       (to.currency === account.currency ? amount : overrides.amount === undefined ? (rule.toAmount ?? converted) : converted);
@@ -1286,6 +1292,64 @@ export function updateSettings(state: State, update: SettingsUpdate, ctx: OpCont
   return { settings };
 }
 
+export interface PricePreferences {
+  priceSource?: PriceSource;
+  localPremiumPct?: number;
+}
+
+// "تلقائي / يدوي" and "فرق السوق المحلي %". In auto mode a new premium re-prices gold from the
+// last fetched world price right away (no request needed); manual prices are never touched.
+export function setPricePreferences(state: State, prefs: PricePreferences, ctx: OpContext): Patch {
+  const settings = { ...state.settings };
+  if (prefs.priceSource !== undefined) {
+    if (prefs.priceSource !== 'auto' && prefs.priceSource !== 'manual') fail('INVALID_MODE');
+    settings.priceSource = prefs.priceSource;
+  }
+  if (prefs.localPremiumPct !== undefined) {
+    if (!isValidPremiumPct(prefs.localPremiumPct)) fail('NOT_A_NUMBER', { field: 'localPremiumPct' });
+    settings.localPremiumPct = prefs.localPremiumPct;
+  }
+  const premiumChanged = (settings.localPremiumPct ?? 0) !== (state.settings.localPremiumPct ?? 0);
+  if (priceSourceOf(settings) === 'auto' && premiumChanged && settings.lastGoldUsdPerOunce) {
+    Object.assign(
+      settings,
+      goldPricesEGP(settings.lastGoldUsdPerOunce, settings.exchangeRates.USD_EGP, settings.localPremiumPct),
+      { goldPriceUpdatedAt: ctx.now().toISOString() }
+    );
+  }
+  return { settings };
+}
+
+// First launch only: a fresh install (nothing was saved on the device yet) starts in auto mode.
+// Saved data without the setting — an install from before live prices — stays manual (missing
+// = manual), so prices the user typed are never replaced until they choose "تلقائي".
+export function ensurePriceSource(state: State, freshInstall: boolean): Patch {
+  if (!freshInstall || state.settings.priceSource !== undefined) return {};
+  return { settings: { ...state.settings, priceSource: 'auto' } };
+}
+
+// Applies a live price fetch. Manual mode is never overwritten ({}). Auto mode: fetched rates
+// replace exchangeRates, a fetched world gold price (with usable rates) replaces the gold
+// prices, each with a fresh "updated" date; whatever failed keeps its last saved value and the
+// error is recorded. Only settings change, so recorded amounts keep their own rate snapshots.
+export function applyLivePrices(state: State, result: PriceFetchResult, ctx: OpContext): Patch {
+  if (priceSourceOf(state.settings) !== 'auto') return {};
+  const now = ctx.now().toISOString();
+  const { lastPriceFetchError: _previousError, ...settings } = state.settings;
+  if (result.fx) {
+    settings.exchangeRates = { SAR_EGP: result.fx.SAR_EGP, USD_EGP: result.fx.USD_EGP, lastUpdated: now };
+    settings.lastPriceFetchAt = now;
+    if (result.fxSource) settings.fxSource = result.fxSource;
+    if (result.xauUsd !== null) {
+      Object.assign(settings, goldPricesEGP(result.xauUsd, result.fx.USD_EGP, settings.localPremiumPct ?? 0), {
+        goldPriceUpdatedAt: now,
+        lastGoldUsdPerOunce: result.xauUsd,
+      });
+    }
+  }
+  return { settings: { ...settings, ...(result.error ? { lastPriceFetchError: result.error } : {}) } };
+}
+
 // Settings that belong to this installation rather than to the data set.
 function deviceSettings(state: State): Pick<Settings, 'deviceId' | 'lastBackupAt' | 'appLockEnabled'> {
   const { deviceId, lastBackupAt, appLockEnabled } = state.settings;
@@ -1294,6 +1358,14 @@ function deviceSettings(state: State): Pick<Settings, 'deviceId' | 'lastBackupAt
     ...(lastBackupAt ? { lastBackupAt } : {}),
     ...(appLockEnabled !== undefined ? { appLockEnabled } : {}),
   };
+}
+
+// How prices are maintained (auto / manual, premium, last fetch): kept with the prices
+// themselves when the data set is replaced by the seed.
+function pricePreferences(state: State): Partial<Settings> {
+  const { priceSource, localPremiumPct, lastPriceFetchAt, lastPriceFetchError, fxSource, lastGoldUsdPerOunce } = state.settings;
+  const kept = { priceSource, localPremiumPct, lastPriceFetchAt, lastPriceFetchError, fxSource, lastGoldUsdPerOunce };
+  return Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined));
 }
 
 const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones'>; entity: SyncEntity }[] = [
@@ -1355,6 +1427,7 @@ export function replaceWithSeed(state: State, seed: State, ctx: OpContext): Patc
       goldPrice24kEGP: state.settings.goldPrice24kEGP,
       goldPrice21kEGP: state.settings.goldPrice21kEGP,
       goldPriceUpdatedAt: state.settings.goldPriceUpdatedAt,
+      ...pricePreferences(state),
       ...deviceSettings(state),
     },
     ctx

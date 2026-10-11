@@ -3,6 +3,7 @@ import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
 import { AppLockGate } from '@/components/AppLockGate';
+import { PriceRunner } from '@/components/PriceRunner';
 import { RecurringRunner } from '@/components/RecurringRunner';
 import { SnapshotRunner } from '@/components/SnapshotRunner';
 import { colors } from '@/constants/theme';
@@ -38,6 +39,7 @@ export default function RootLayout() {
         <Stack.Screen name="review" options={{ title: 'مراجعة الشهر', headerBackTitle: 'رجوع' }} />
       </Stack>
       <RecurringRunner />
+      <PriceRunner />
       <SnapshotRunner />
       <AppLockGate />
       {/* Light theme only: dark status-bar icons on the light background. */}

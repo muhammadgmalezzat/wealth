@@ -1,6 +1,7 @@
 import { formatMoney } from '@/components/ui/formatMoney';
 import { toEGP } from '@/utils/currency';
 import { daysBetween, monthOf, shiftMonth, toDateKey, toMonthKey } from '@/utils/dates';
+import { pricesFetchedRecently } from '@/utils/prices/fetchPrices';
 import { daysAgoPhrase, dueCountPhrase, formatMonthLabel, withinDaysPhrase } from '@/utils/formatters';
 import { overspentLines, planFor } from './planning';
 import { dueOccurrences } from './recurring';
@@ -268,7 +269,8 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
   };
   const goldAge = usesGold ? stale(state.settings.goldPriceUpdatedAt) : null;
   const fxAge = usesFx ? stale(rates.lastUpdated) : null;
-  if (goldAge !== null || fxAge !== null) {
+  // Auto mode that fetched everything in the last 24 hours has nothing to update.
+  if ((goldAge !== null || fxAge !== null) && !pricesFetchedRecently(state.settings, now)) {
     const what = goldAge !== null && fxAge !== null ? 'أسعار الذهب والصرف' : goldAge !== null ? 'سعر الذهب' : 'أسعار الصرف';
     const age = Math.max(goldAge ?? 0, fxAge ?? 0);
     add(10, {

@@ -38,6 +38,7 @@ const FIELD_LABELS: Record<FinanceField, string> = {
   planLimit: 'حد الميزانية',
   exchangeRate: 'سعر الصرف',
   goldPrice: 'سعر الذهب',
+  localPremiumPct: 'فرق السوق المحلي (من −50 إلى 100)',
   date: 'التاريخ',
   deadline: 'الموعد النهائي',
   startDate: 'تاريخ البداية',

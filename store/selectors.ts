@@ -1,4 +1,4 @@
-import { fromEGP, toEGP } from '@/utils/currency';
+import { convertCurrency, fromEGP, historicalAmountIn, toEGP } from '@/utils/currency';
 import { monthOf, monthsUntil, shiftMonth, toMonthKey } from '@/utils/dates';
 import { daysLeftInMonth } from './shared';
 import type {
@@ -8,6 +8,7 @@ import type {
   ExpenseBucket,
   FinanceState,
   Fund,
+  FundMovement,
   GoldKarat,
   Holding,
   IncomeExpenseTransaction,
@@ -220,6 +221,18 @@ export function fundProgress(state: State, fundId: string): number {
   if (!fund) return 0;
   if (fund.targetAmount <= 0) return 1;
   return Math.max(0, fundCurrent(state, fundId) / fund.targetAmount);
+}
+
+// A fund movement (stored in the fund's currency) in `currency`, at the rates of when it was
+// made. Movements made before they carried a snapshot convert at today's rates.
+export function movementAmountIn(
+  state: State,
+  movement: Pick<FundMovement, 'fundId' | 'amount' | 'ratesSnapshot'>,
+  currency: CurrencyCode
+): number {
+  const fund = findFund(state, movement.fundId);
+  if (!fund) return 0;
+  return convertCurrency(movement.amount, fund.currency, currency, movement.ratesSnapshot ?? state.settings.exchangeRates);
 }
 
 // When the target must be reached: the deadline for goals, the next due date for sinking funds.
@@ -446,6 +459,17 @@ export function transactionsForMonth(
     .sort(compareNewestFirst);
 }
 
+// A recorded transaction's amount in `currency` as it was worth when recorded: unchanged in its
+// own currency; otherwise its rateToEGP for the source leg and its ratesSnapshot for the target
+// leg (today's rates only for transactions older than ratesSnapshot — a known approximation).
+export function transactionAmountIn(
+  state: Pick<State, 'settings'>,
+  tx: Pick<IncomeExpenseTransaction, 'amount' | 'rateToEGP' | 'currency' | 'ratesSnapshot'>,
+  currency: CurrencyCode
+): number {
+  return historicalAmountIn(tx.amount, tx.currency, currency, tx.rateToEGP, tx.ratesSnapshot, state.settings.exchangeRates);
+}
+
 // Signed EGP effect on net cash flow at the snapshotted rate; transfers and asset purchases
 // (money changing form, not leaving) are neutral.
 export function transactionNetEGP(tx: Transaction): number {
@@ -522,7 +546,7 @@ export function monthSummary(state: State, month: string, options: MonthSummaryO
 export interface MonthFlows {
   incomeEGP: number;
   expenseEGP: number;
-  // Net fund movements of the month (allocations minus withdrawals), at current rates.
+  // Net fund movements of the month (allocations minus withdrawals), each at its own rates.
   savedToFundsEGP: number;
   // Asset purchases (cash turned into holdings), at their snapshot rates.
   investedEGP: number;
@@ -537,7 +561,7 @@ export function monthFlows(state: State, month: string): MonthFlows {
   return {
     incomeEGP,
     expenseEGP,
-    savedToFundsEGP: fundAmountsEGP(state, state.fundMovements.filter((m) => inMonth(m.date))),
+    savedToFundsEGP: sum(state.fundMovements.filter((m) => inMonth(m.date)).map((m) => movementAmountIn(state, m, 'EGP'))),
     investedEGP: sum(
       state.transactions.filter((tx) => tx.type === 'asset_purchase' && inMonth(tx.date)).map((tx) => tx.amount * tx.rateToEGP)
     ),

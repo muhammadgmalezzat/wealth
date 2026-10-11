@@ -6,6 +6,87 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-11) — 1.1.0 · data v7 (OTA update) · Live gold and exchange-rate prices
+
+> JS-only (ships with `eas update` to 1.1.0 builds): `fetch` only, no new native module, no
+> `app.json` change. Additive optional settings, no migration, data version stays 7.
+
+**For users**
+- Exchange rates (SAR, USD) and gold prices can now update on their own when you open the app
+  (at most every 6 hours). **If you already use the app, nothing changes until you choose
+  "تلقائي" in Settings ← السوق:** your typed prices stay, and the same goes for a restored
+  backup. Only a brand-new install starts on "تلقائي". Manual prices are never changed by the
+  app.
+- Settings ← السوق shows SAR→EGP, USD→EGP, gold 24k / 21k per gram, the source and "آخر تحديث
+  منذ …", with a "تحديث الأسعار الآن" button.
+- "فرق السوق المحلي %": gold is calculated from the world price, so add or subtract a percentage
+  until it matches what local shops charge. Workmanship is not included.
+- No internet or a service down: the last saved prices stay, a short message says why, nothing
+  blocks or crashes.
+- The "حدّث الأسعار" step on Home no longer shows when prices were fetched in the last 24 hours.
+- Past transactions, plan progress and past months do not change when prices update.
+
+**Technical**
+- New `utils/prices/calc.ts` (pure math + response validation with sanity ranges) and
+  `utils/prices/fetchPrices.ts` (`fetchLivePrices`: 10 s timeout per request, open.er-api.com →
+  exchangerate.fun fallback, gold-api.com XAU in parallel, never throws; `shouldAutoFetch`,
+  `pricesFetchedRecently`, `priceSourceOf`).
+- Settings (optional): `priceSource`, `localPremiumPct`, `lastPriceFetchAt`,
+  `lastPriceFetchError`, `fxSource`, plus `lastGoldUsdPerOunce` (not in the brief: kept so a
+  premium change re-prices gold without another request).
+- Default mode: missing `priceSource` = manual; `ensurePriceSource` sets `'auto'` at hydration
+  only when the device had no saved data (fresh install).
+- Operations `applyLivePrices` (no-op in manual mode; partial success keeps what failed) and
+  `setPricePreferences`; store action `refreshPrices({ force? })`; `components/PriceRunner.tsx`
+  (hydration + foreground).
+- Settings market section: Segment, read-only rows, status / error lines, attribution link when
+  `fxSource === 'open.er-api'`, premium input (`parsePremiumPct` accepts a minus sign).
+- `nextActions` rule 10 skips when `pricesFetchedRecently`. `timeAgoPhrase` in formatters.
+- Tests: 207 (auto only on a fresh install / manual for data that already has prices, calculations, validation, fallback, timeout, throttle, manual never overwritten,
+  historical plan amounts unchanged after an auto update).
+
+---
+
+## Unreleased (2026-10-11) — 1.1.0 · data v7 (OTA update) · Currency conversion fix
+
+> JS-only (ships with `eas update` to 1.1.0 builds). Additive optional fields, no migration, data
+> version stays 7; older backups restore unchanged.
+
+**For users**
+- An expense in the plan's own currency always counts as exactly what you paid. Before, a 40 SAR
+  expense in a SAR plan could show as 38.57 after you updated the SAR rate.
+- Changing the exchange rates in Settings no longer changes past months: plan progress, "تقدر
+  تصرف بأمان", the plan suggestion, the monthly review and "اتحوّش للصناديق" keep their numbers.
+  Balances, gold and net worth still follow today's rates, as they should.
+- Expenses and fund allocations in a *different* currency than the plan, recorded before this
+  update, are still converted with today's rate (the rate of their day wasn't saved). Everything
+  recorded from now on keeps its own rate.
+
+**Technical**
+- New optional `ratesSnapshot { SAR_EGP, USD_EGP }` on transactions (income / expense /
+  transfer / asset_purchase, incl. recurring occurrences) and fund movements, set at creation;
+  kept on edit and retaken with `rateToEGP` only when a transaction's currency changes.
+- `utils/currency.ts`: `convertCurrency` (identity for the same currency), `snapshotRates`,
+  `historicalAmountIn`. Selectors: `transactionAmountIn` (`planning.amountInCurrency` is now
+  this; it needs the transaction's `currency`), `movementAmountIn`.
+- Audit (full table in TECHNICAL "Conversion rules"):
+  - Fixed via `transactionAmountIn`: `spendByCategory` → `planProgress`, `safeToSpend`,
+    `safeToSpendToday`, `overspentLines`; `planSuggestion` history (expenses and income).
+  - Fixed via `movementAmountIn`: `planProgress` contributions, monthly review funds,
+    `monthFlows.savedToFundsEGP`.
+  - `paySinkingFund`: the withdrawal uses the expense's own rates; exact (no multiply/divide)
+    when the account and the fund share a currency.
+  - Same-currency identity only (still today's rates, these are amounts not recorded yet):
+    `spendImpact`, `recurringMonthly` (monthly equivalents and expected income),
+    `suggestedContributions`, `emptyPlan`, default transfer / occurrence `toAmount`.
+  - Unchanged on purpose: EGP cash-flow figures (`monthSummary`, review categories — already
+    `amount × rateToEGP`), fund-currency figures (`fundAllocated`, `fundStatus`), and current
+    valuations (`accountBalanceEGP`, `holdingValueEGP`, `fundLinkedValue`, `netWorthEGP`,
+    `unassignedEGP`, `suggestAllocation`, `planCover`).
+- Tests: 190 (the old test that expected 100 SAR to read 104 SAR was replaced).
+
+---
+
 ## Unreleased (2026-10-06) — 1.1.0 · data v7 (OTA update) · Next Best Action, net worth change, Monthly Review
 
 > JS-only (ships with `eas update` to 1.1.0 builds): no new or upgraded native module, no

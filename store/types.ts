@@ -40,6 +40,13 @@ export interface Category extends Synced {
   archived?: boolean;
 }
 
+// Exchange rates kept with a record, so its amount can later be shown in another currency as it
+// was worth then (never at whatever the rates are today).
+export interface RatesSnapshot {
+  SAR_EGP: number;
+  USD_EGP: number;
+}
+
 interface TransactionBase extends Synced {
   id: string;
   amount: number;
@@ -47,6 +54,10 @@ interface TransactionBase extends Synced {
   note?: string;
   // Exchange rate of the transaction's currency to EGP, snapshotted at creation.
   rateToEGP: number;
+  // All rates at creation (re-taken with rateToEGP when the currency changes). Missing on
+  // transactions made before it existed: converting those into a third currency falls back to
+  // today's rates for the target leg.
+  ratesSnapshot?: RatesSnapshot;
   createdAt: string;
   // Set when the transaction records an occurrence of a recurring rule: the rule and the
   // scheduled date it fulfils (the transaction's own `date` may differ).
@@ -115,6 +126,9 @@ export interface FundMovement extends Synced {
   amount: number;
   date: string;
   note?: string;
+  // Rates when the movement was made; used to show it in another currency (plan, EGP totals).
+  // Missing on older movements, which convert at today's rates.
+  ratesSnapshot?: RatesSnapshot;
 }
 
 export type GoldKarat = 18 | 21 | 24;
@@ -283,7 +297,28 @@ export interface Settings {
   dueNotificationsEnabled?: boolean;
   // Optional, so v2 data without it stays valid (no migration needed).
   lastUsed?: LastUsedSelection;
+  // Live prices (all optional: older data simply has none). 'auto': exchangeRates and gold
+  // prices are overwritten from the price APIs; 'manual': only the user changes them. Missing
+  // = 'manual', so data that already had prices (existing installs, older backups) is never
+  // overwritten; a fresh install is set to 'auto' on first launch.
+  priceSource?: PriceSource;
+  // "فرق السوق المحلي %": added to the world gold price (missing = 0).
+  localPremiumPct?: number;
+  // Last time auto mode applied fetched prices (ISO), and what went wrong on the last attempt
+  // (cleared by a fully successful one).
+  lastPriceFetchAt?: string;
+  lastPriceFetchError?: PriceFetchError;
+  // Where the current exchange rates came from (auto mode).
+  fxSource?: FxSource;
+  // Last fetched world gold price (USD per troy ounce), kept so changing the premium can
+  // recompute the gram prices without another request.
+  lastGoldUsdPerOunce?: number;
 }
+
+export type PriceSource = 'auto' | 'manual';
+export type FxSource = 'open.er-api' | 'exchangerate.fun';
+// 'network': nothing could be reached · 'fx' / 'gold': that source failed or sent invalid data.
+export type PriceFetchError = 'network' | 'fx' | 'gold';
 
 export type SyncEntity =
   | 'account'

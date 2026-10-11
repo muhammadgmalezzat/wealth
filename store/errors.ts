@@ -68,6 +68,7 @@ export type FinanceField =
   | 'planLimit'
   | 'exchangeRate'
   | 'goldPrice'
+  | 'localPremiumPct'
   | 'date'
   | 'deadline'
   | 'startDate'

@@ -86,7 +86,7 @@ Notes:
 ```
 app/                        expo-router routes
   _layout.tsx               Root Stack: (tabs), fund/[id], settings, recurring, due, categories,
-                            review; mounts <RecurringRunner/>, <SnapshotRunner/> and <AppLockGate/>
+                            review; mounts <RecurringRunner/>, <PriceRunner/>, <SnapshotRunner/> and <AppLockGate/>
   (tabs)/_layout.tsx        Bottom tabs (order): index, transactions, plan, assets, goals
   (tabs)/index.tsx          الرئيسية — dashboard
   (tabs)/transactions.tsx   المعاملات — month list grouped by day
@@ -104,6 +104,7 @@ components/
   AppLockGate.tsx           Biometric/PIN lock overlay (Modal)
   RecurringRunner.tsx       Invisible: processDue after hydration / on foreground; syncs reminders
   SnapshotRunner.tsx        Invisible: upserts this month's net worth snapshot (hydration, foreground, debounced changes)
+  PriceRunner.tsx           Invisible: refreshes live prices in auto mode (hydration, foreground; 6 h throttle)
   assets/EditAccountSheet   Edit account name, location, "current balance"; delete
   assets/HoldingSheet       Holding details (value, cost, value difference, linked fund) + delete
   assets/assetsUi.ts        Pure: LOCATION_LABELS, ACCOUNT_TYPE_ICONS, holdingTitle, signedDifference, groupAccounts
@@ -167,9 +168,11 @@ utils/
   appInfo(.web).ts          App version / runtime / channel / update id
   notifications(.web).ts    Local due reminders (permission, channel, schedule/cancel); web no-ops
   id.ts                     newId() = expo-crypto randomUUID
+  prices/calc.ts            Pure: FX and gold-per-gram math, API response validation
+  prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencies.ts (DEFAULT_RATES), market.ts
-tests/logic.test.ts         184 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         207 tests over store/*, utils/* and the pure UI helpers
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
 .easignore                  EAS upload filter (keeps store/seed.local.ts)
@@ -183,7 +186,7 @@ Root `Stack` (`app/_layout.tsx`): `(tabs)` (no header), `fund/[id]` (title "ال
 the fund name; back "رجوع"),
 `settings` (title "الإعدادات"), `recurring` ("المعاملات المتكررة"), `due` ("المستحقات"),
 `categories` ("البنود"), `review` ("مراجعة الشهر", replaced by "مراجعة {month}").
-`<RecurringRunner/>` and `<SnapshotRunner/>` (render nothing) and `<AppLockGate/>` sit above everything.
+`<RecurringRunner/>`, `<PriceRunner/>` and `<SnapshotRunner/>` (render nothing) and `<AppLockGate/>` sit above everything.
 `<StatusBar style="dark" />` (light theme only, dark icons on the light background).
 
 ### Layout & safe-area conventions
@@ -229,7 +232,7 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 | `/assets` | الأصول | Hero "إجمالي الأصول" (`totalAssetsEGP`) + MetricGroup سيولة / ذهب واستثمارات (gold cell) / التزامات (only when liabilities exist, text color); الحسابات ("+ حساب") grouped مصر / السعودية, archived ones in a collapsed "مؤرشفة" group (tap → EditAccountSheet); الذهب (total grams) as ListRows (value; cost · signed value difference in textSecondary; "مربوط بـ {fund}" gold chip; tap → HoldingSheet) or EmptyState → TransactionSheet on ذهب; other holdings / الالتزامات only when present; "+" FAB → add account / opening gold. Web QA: Metro serves `/assets` itself, open this tab from Home. |
 | `/goals` | الصناديق | Calm Wealth funds (see "Funds, Recurring, Due" below): title; UnassignedPanel; MetricGroup إجمالي المحجوز / مطلوب الشهر ده / صناديق; sections الطوارئ · الأهداف · مصاريف دورية (empty ones skipped) of FundCards; EmptyState "لسه معندكش صناديق." + أنشئ صندوق طوارئ (FundSheet with emergency preselected); "+" FAB → FundSheet (goal). |
 | `/fund/[id]` | (stack) | Hero (type + icon, current من target, bar with gold part, % + status chip, due + months left) · next step · actions (one primary: إضافة مبلغ, or اتدفعت for sinking) · facts ListGroup · linked gold (+ "ربط ذهب" → FundSheet when gold is linkable) · movements (newest first, last); header "تعديل" → FundSheet (edit / delete). `?allocate=1` (Home's fund actions) opens the allocate sheet. |
-| `/settings` | (stack) | Groups: السوق (rates + "آخر تحديث", gold 24k/21k + 18k computed) · التخطيط (tracking start + the single primary "حفظ الإعدادات" for rates/gold/date; إدارة البنود, المعاملات المتكررة, تنبيهات المستحقات switch) · البيانات (backup status "آخر نسخة احتياطية" + age, overdue chip + Home's sentence, secondary "تصدير نسخة"; استعادة نسخة; استيراد البيانات الافتتاحية) · الأمان (قفل التطبيق switch) · عن التطبيق (version; collapsed "تفاصيل تقنية": runtime / channel / update id). `?export=1` opens the export sheet (Home's backup action). |
+| `/settings` | (stack) | Groups: السوق (Segment تلقائي / يدوي. Auto: read-only rows ريال ← جنيه, دولار ← جنيه, gold 24k / 21k + 18k computed; source + "آخر تحديث منذ …"; the last fetch error; gold note; ExchangeRate-API attribution link; "فرق السوق المحلي %" input; secondary "تحديث الأسعار الآن". Manual: the rate and gold inputs as before) · التخطيط (tracking start + the single primary "حفظ الإعدادات" for rates/gold/date; إدارة البنود, المعاملات المتكررة, تنبيهات المستحقات switch) · البيانات (backup status "آخر نسخة احتياطية" + age, overdue chip + Home's sentence, secondary "تصدير نسخة"; استعادة نسخة; استيراد البيانات الافتتاحية) · الأمان (قفل التطبيق switch) · عن التطبيق (version; collapsed "تفاصيل تقنية": runtime / channel / update id). `?export=1` opens the export sheet (Home's backup action). |
 | `/recurring` | (stack) | "جاي خلال 30 يوم": ListGroup of up to 12 items + MetricGroup دخل / مصروف (per-currency totals from `upcoming`); groups دخل · مصروفات · تحويلات; rows: name + amount, frequency · account(s) · الجاية, chips تلقائي/بتأكيد · متوقف · انتهى (muted title when not active), pause/resume Switch beside (not inside) the tappable area; tap → RuleSheet; EmptyState; "+" FAB (stack). |
 | `/due` | (stack) | Due inbox for `confirm` rules (oldest first): "فات ومتسجلش" (earlier months, amber "فات ميعاده" chip) and "المستحق الشهر ده"; rows in a ListGroup: name, amount (تقريباً), date · account, primary "تم" (ConfirmOccurrenceSheet) + tertiary "تخطّي"; EmptyState "مفيش حاجة مستنياك." + link to /recurring. |
 | `/review` | (stack) | Monthly review, `?month=YYYY-MM` (default last month): الملخص · الخطة مقابل الفعلي · أكتر 5 بنود صرف + مصاريف مرة واحدة · الصناديق · خطوتك الجاية (suggest / copy next month's plan, وزّع الفايض); primary "خلّصت المراجعة" marks it reviewed. See "Monthly review" below. |
@@ -390,7 +393,7 @@ Content padding `space.lg`, section gap `space.xxl`. Order (`app/(tabs)/index.ts
    the allocate sheet), or sheets Home owns: `cover` (CoverSheet), `assign` (AssignSheet),
    `new-emergency` (FundSheet initialType emergency).
 5. **MonthlySnapshot** — "هذا الشهر" from `monthFlows` (EGP): دخل / مصروف, then اتحوّش للصناديق
-   (net fund movements of the month at current rates) / استثمار (asset purchases at snapshot
+   (net fund movements of the month, each at its own rates) / استثمار (asset purchases at snapshot
    rates, gold cell), two MetricGroups of two cells. Tap or "كل المعاملات" → /transactions. (The
    Transactions screen keeps the 3-cell دخل / مصروف / صافي variant.)
 6. **جاي قريب** (`RecurringCard`) — up to 3 `upcomingItems` as ListRows (name, day label or "بعد
@@ -427,7 +430,7 @@ priority order); `nextActions` drops snoozed ones. Each action:
 | 7 | `sinking-<id>` | sinking fund with `nextDueDate − today ≤ 14` days (overdue included) and `target − fundCurrent > 0` | warning | فاضل {X} على {fund} | خصص الآن → /fund/[id]?allocate=1 |
 | 8 | `behind-<id>` | `fundStatus = behind`, `fundMonthShortfall > 0`, not already listed in 7 | warning | {صندوق name} متأخر {shortfall} الشهر ده | خصص الآن → /fund/[id]?allocate=1 |
 | 9 | `assign` | `unassignedEGP > 0.005` | opportunity | عندك {X} بدون وظيفة، وزّعها | وزّع أموالك → AssignSheet |
-| 10 | `prices` | gold price (when gold holdings exist) or rates (when any non-EGP account / holding / fund / plan exists) updated ≥ 7 days ago | info | حدّث {سعر الذهب / أسعار الصرف / أسعار الذهب والصرف} | حدّث الأسعار → /settings |
+| 10 | `prices` | gold price (when gold holdings exist) or rates (when any non-EGP account / holding / fund / plan exists) updated ≥ 7 days ago — skipped when `pricesFetchedRecently` (auto mode, full success in the last 24 h) | info | حدّث {سعر الذهب / أسعار الصرف / أسعار الذهب والصرف} | حدّث الأسعار → /settings |
 | 11 | `backup` | there is data (transactions, funds or holdings) and `needsBackupReminder` (never, or ≥ 7 days) | info | اعمل نسخة احتياطية | تصدير نسخة → /settings?export=1 |
 
 Snooze: `dismissAction(actionId)` stores `{ id = actionId, actionId, until = now + 24 h }`
@@ -489,6 +492,45 @@ The primary "خلّصت المراجعة" calls `completeMonthlyReview(month)` (
 `{ id: review-YYYY-MM, month, completedAt }`; once per month; `INVALID_MONTH` for a bad or future
 month) and goes back. Entry points: action rule 4, Home's early-month card, and the Plan tab
 ("مراجعة {month}" row above the plan / empty state for past months, chip "اتراجع" once done).
+
+### Live prices (`utils/prices/`, `components/PriceRunner.tsx`)
+
+Exchange rates and gold prices come from free, key-less APIs called straight from the app with
+`fetch` (no backend, no native module).
+
+| What | Request | Used fields |
+|---|---|---|
+| FX primary (`fxSource: 'open.er-api'`) | `GET https://open.er-api.com/v6/latest/USD` | `result === 'success'`, `base_code === 'USD'`, `rates.EGP`, `rates.SAR`. Free tier requires attribution: Settings shows "أسعار العملات من ExchangeRate-API" linking to exchangerate-api.com while this source is in use. |
+| FX fallback (`'exchangerate.fun'`) | `GET https://api.exchangerate.fun/latest?base=USD` | `base === 'USD'`, `rates.EGP`, `rates.SAR`. Only called when the primary fails or is invalid. |
+| Gold | `GET https://api.gold-api.com/price/XAU` | `symbol === 'XAU'`, `currency` USD, `price` (USD per troy ounce). In parallel with FX. |
+
+- **`calc.ts`** (pure): `fxFromUsdRates` → `SAR_EGP = EGP ÷ SAR`, `USD_EGP = EGP`;
+  `goldPricesEGP(xau, usdEGP, premiumPct)` → `24k = xau ÷ 31.1034768 × USD_EGP × (1 + premium/100)`,
+  `21k = 24k × 0.875` (18k stays `24k × 0.75` in `goldPricePerGram`). Parsers return null unless
+  the shape matches and the numbers are finite and inside wide sanity ranges (EGP per USD 5–1000,
+  SAR per USD 2–6, XAU 200–50,000 USD/oz; premium −50…100 %).
+- **`fetchPrices.ts`**: `fetchLivePrices({ fetchImpl?, timeoutMs? })` — each request has a 10 s
+  timeout (AbortController + race) and nothing throws. Result `{ fx | null, fxSource?, xauUsd |
+  null, error? }` with `error`: `'network'` (nothing reachable), `'fx'` (no valid rates from
+  either source), `'gold'` (rates fine, gold failed). `priceSourceOf` (missing = manual),
+  `shouldAutoFetch` (auto, no successful fetch for 6 h, and ≥ 15 min since the last attempt),
+  `pricesFetchedRecently` (auto, no error, < 24 h).
+- **Operations**: `applyLivePrices(state, result)` — manual mode returns `{}` (never
+  overwritten). Auto: valid rates replace `exchangeRates` (+ `lastUpdated`, `fxSource`,
+  `lastPriceFetchAt`); a valid gold price (with valid rates) replaces `goldPrice24kEGP` /
+  `goldPrice21kEGP` (+ `goldPriceUpdatedAt`, `lastGoldUsdPerOunce`); anything that failed keeps
+  its saved value; `lastPriceFetchError` is set or cleared. `setPricePreferences({ priceSource?,
+  localPremiumPct? })` — in auto mode a changed premium re-prices gold from
+  `lastGoldUsdPerOunce` without a request.
+- **Default mode**: missing `priceSource` means manual, so data that already has prices (an install from before live prices, an older backup being restored, the opening-data import on such a device) is never overwritten. Only a fresh install gets auto: on hydration, when the storage read succeeded and found nothing saved, `ensurePriceSource(state, freshInstall)` sets `priceSource: 'auto'` (an explicit choice is never changed).
+- **Store**: `refreshPrices({ force? })` (async, never throws, one request in flight, last
+  attempt time kept in memory). `PriceRunner` calls it after hydration and on foreground; the
+  Settings button calls it with `force`.
+- Only `settings` change, so recorded transactions and fund movements keep their own rate
+  snapshots (see "Conversion rules"): plan progress and past months don't move; balances, gold
+  value, net worth and this month's net worth snapshot do.
+- Web: the same code runs, but a browser may block these requests (CORS); that surfaces as the
+  normal `'network'` / `'fx'` error with the saved prices kept.
 
 ### Net worth snapshots (`store/snapshots.ts`, `components/SnapshotRunner.tsx`, data v7)
 
@@ -685,18 +727,18 @@ Every synced entity has `updatedAt` (set only by operations).
 - **Account** `{ id, name, type: cash|bank|wallet, currency, openingBalance, openingDate?, location, createdAt, archived?, updatedAt }` — balance is **derived**, never stored.
 - **Category** `{ id, name, kind: income|expense, bucket, isDefault, archived?, updatedAt }` — `archived` missing = false (optional field, no migration).
 - **Transaction** (discriminated union on `type`, common: `id, amount, date, note?, rateToEGP, createdAt, updatedAt`):
-  - common optional `recurringRuleId?` + `occurrenceDate?` (the rule occurrence this transaction records; any type)
+  - common optional `ratesSnapshot? { SAR_EGP, USD_EGP }` (all rates at creation; missing on older transactions) (the rule occurrence this transaction records; any type)
   - `income | expense`: `currency` (= account currency), `accountId`, `categoryId`, `liabilityId?`, `oneTime?`
   - `transfer`: `fromAccountId`, `toAccountId`, `toAmount` (in the target account's currency)
   - `asset_purchase`: `accountId`, `currency`, `holdingId` — cash turned into a holding
 - **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), updatedAt }`
-- **FundMovement** `{ id, fundId, amount (+allocate / −withdraw, fund currency), date, note?, updatedAt }`
+- **FundMovement** `{ id, fundId, amount (+allocate / −withdraw, fund currency), date, note?, ratesSnapshot?, updatedAt }`
 - **Holding** (union): `gold { weightGrams, karat: 18|21|24 }` or `currency { currency, quantity }`; common `id, name, purchaseCostEGP, purchaseDate?, location? (default EG), note?, updatedAt`
 - **Liability** `{ id, name, principal, currency, monthlyPayment?, startDate, notes?, updatedAt }` (no interest)
 - **RecurringRule** `{ id, name, kind: income|expense|transfer, amount, currency (= account currency), accountId, categoryId? (income/expense), toAccountId?, toAmount? (transfers; required when currencies differ), frequency: weekly|monthly|yearly, interval ≥ 1, dayOfMonth? 1–31 (clamped to month end), startDate, endDate?, nextDate ('' when nothing is left), mode: auto|confirm, variableAmount, active, skippedDates[], note?, createdAt, updatedAt }`
 - **MonthlyPlan** `{ id = plan-YYYY-MM, month, currency, expectedIncome, lines: PlanLine[], fundContributions: PlannedContribution[], createdAt, updatedAt }`
   - `PlanLine { categoryId, limit, kind: fixed|flexible }`, `PlannedContribution { fundId, amount }` (plan currency)
-- **Settings** `{ exchangeRates {SAR_EGP, USD_EGP, lastUpdated}, goldPrice24kEGP, goldPrice21kEGP, goldPriceUpdatedAt, trackingStartDate, deviceId, lastBackupAt?, appLockEnabled?, dueNotificationsEnabled?, lastUsed? }`
+- **Settings** `{ exchangeRates {SAR_EGP, USD_EGP, lastUpdated}, goldPrice24kEGP, goldPrice21kEGP, goldPriceUpdatedAt, trackingStartDate, deviceId, lastBackupAt?, appLockEnabled?, dueNotificationsEnabled?, lastUsed?, priceSource? ('auto' | 'manual', missing = manual; a fresh install is set to 'auto' on first launch), localPremiumPct? (missing = 0), lastPriceFetchAt?, lastPriceFetchError? ('network' | 'fx' | 'gold'), fxSource? ('open.er-api' | 'exchangerate.fun'), lastGoldUsdPerOunce? }`
 - **NetWorthSnapshot** (v7) `{ id = nw-YYYY-MM, month, netWorthEGP, liquidEGP, holdingsEGP, takenAt, estimated?, updatedAt }` — one per month; the current month follows the live figures, `estimated` marks months filled in afterwards.
 - **ActionDismissal** (v7) `{ id = actionId, actionId, until (ISO), updatedAt }` — a snoozed Next Best Action.
 - **MonthlyReview** (v7) `{ id = review-YYYY-MM, month, completedAt, updatedAt }` — a finished review.
@@ -853,12 +895,29 @@ DEFAULT_CATEGORY_DELETE, PLAN_NOT_FOUND`. Backup errors (`store/backup.ts → Ba
 ## 10. Financial logic (every formula)
 
 Two valuation rules: **balances/holdings use current rates & prices**; **transaction flows use
-each transaction's `rateToEGP` snapshot**.
+each transaction's `rateToEGP` snapshot** (and its `ratesSnapshot` when shown in a third
+currency; same-currency amounts are never converted). The full table is under "Currency" below.
 
 ### Currency (`utils/currency.ts`)
 - `rateToEGP(cur, rates)`: EGP → 1, SAR → `SAR_EGP`, USD → `USD_EGP`
 - `toEGP(x, cur) = x × rateToEGP(cur)`; `fromEGP(x, cur) = x ÷ rateToEGP(cur)`
-- Rate snapshot: `addTransaction/addTransfer/buyGold` store `rateToEGP` of the (source) currency at creation.
+- Rate snapshot: every new transaction (`addTransaction` / `addTransfer` / `buyGold` / recurring occurrences) stores `rateToEGP` of its (source) currency **and** `ratesSnapshot { SAR_EGP, USD_EGP }`; every new fund movement stores `ratesSnapshot`. Edits keep both; they are retaken together only when the transaction's currency changes.
+- `convertCurrency(x, from, to, rates)`: both legs at the same `rates`; `from === to` returns `x` untouched.
+- `historicalAmountIn(x, from, to, sourceRateToEGP, snapshot, currentRates)`: `from === to` → `x`; otherwise `x × sourceRateToEGP ÷ rateToEGP(to, snapshot ?? currentRates)`.
+
+**Conversion rules** (one rule everywhere): amounts that already happened never change when settings rates change; only current valuations and amounts not recorded yet use today's rates.
+
+| Where | Kind | Rates used |
+|---|---|---|
+| `transactionAmountIn` (= `planning.amountInCurrency`) → `spendByCategory`, `planProgress`, `safeToSpend(Today)`, `overspentLines`, `planSuggestion` (history part) | historical | same currency: none; else `tx.rateToEGP` → `tx.ratesSnapshot` |
+| `movementAmountIn` → `planProgress` contributions, monthly review funds, `monthFlows.savedToFundsEGP` | historical | fund currency = target: none; else `movement.ratesSnapshot` |
+| `monthSummary`, `transactionNetEGP`, review categories / one-time, `monthFlows.investedEGP`, TransactionRow "≈ EGP" | historical | `tx.amount × tx.rateToEGP` |
+| `paySinkingFund` withdrawal (payment → fund currency) | historical (the expense just made) | `transactionAmountIn` on that expense; exact when account and fund share a currency |
+| `fundAllocated`, `fundStatus`, `fundMonthShortfall` | fund currency only | none |
+| `spendImpact` (expense being typed), `recurringMonthly`, `suggestedContributions`, `emptyPlan`, transfer / occurrence default `toAmount`, plan editor currency switch, AddLineSheet, PaySinkingSheet / MoveMoneySheet suggestions | not recorded yet | today's (`convertCurrency`, identity for the same currency) |
+| `accountBalanceEGP`, `liquidTotalEGP`, `holdingValueEGP`, `fundLinkedValue` / `fundCurrent` (linked gold part), `liabilitiesTotalEGP`, `netWorthEGP`, `unassignedEGP`, `suggestAllocation`, `planCover`, `fundsSummary`, emergency-fund action | current valuation | today's |
+
+Known approximation: transactions and fund movements recorded before `ratesSnapshot` existed have no snapshot, so converting them into a **different** currency uses their own `rateToEGP` for the source leg (movements: today's) and today's rates for the target leg — those figures still move with settings rates. Same-currency amounts are exact for all data, old and new. Net worth snapshots of past months are estimates at the rates of when they were taken (see "Net worth snapshots").
 
 ### Balances & net worth (`store/selectors.ts`)
 - `accountNetFlow`: +income, −expense, −asset_purchase, −transfer.amount (from), +transfer.toAmount (to)
@@ -895,10 +954,10 @@ each transaction's `rateToEGP` snapshot**.
 - `suggestedEmergencyTarget(3|6)`: essentials (oneTime excluded) of the 3 full months before now; average over months with essentials `> 0`; × months; null if none
 
 ### Monthly plan (`store/planning.ts`)
-- `amountInCurrency(tx, cur) = fromEGP(tx.amount × tx.rateToEGP, cur)` (snapshot → EGP → current rate)
+- `amountInCurrency(tx, cur)` = `transactionAmountIn`: `tx.amount` when `tx.currency === cur`, otherwise `tx.amount × tx.rateToEGP ÷ rateToEGP(cur, tx.ratesSnapshot ?? current rates)` (see "Conversion rules")
 - `spendByCategory(month, cur)`: all expenses of the month (oneTime included), `date ≥ trackingStartDate`
 - `planSuggestion(month, cur='SAR')`: archived categories are never suggested; window = up to 3 completed months before `month`, not before the tracking-start month; first month weight = tracked days / days in month. Expenses exclude oneTime (purchases aren't expenses). Fixed categories (`FIXED_CATEGORY_IDS`: rent, telecom, bills) → `Σ / window months`; flexible → `Σ / Σ weights`; rounded; income = `Σ income / window months`; contributions = `suggestedContributions` (fund suggested monthly converted, rounded)
-- `planProgress`: per line `spent`, `remaining = limit − spent`, `pct = spent/limit` (1 if limit 0 and spent > 0); bucket totals from lines; `totalPlanned = Σ limits`; `totalSpent` = all expenses of the month; `unplannedSpent` = spend in categories without a line; contributions `allocated` = this month's net movements converted to plan currency
+- `planProgress`: per line `spent`, `remaining = limit − spent`, `pct = spent/limit` (1 if limit 0 and spent > 0); bucket totals from lines; `totalPlanned = Σ limits`; `totalSpent` = all expenses of the month; `unplannedSpent` = spend in categories without a line; contributions `allocated` = this month's net movements, each converted to the plan currency at its own `ratesSnapshot` (`movementAmountIn`)
 - `unplannedAmount = expectedIncome − Σ limits − Σ contributions` (goal: 0)
 - `safeToSpend = Σ max(0, remaining)` over **flexible** lines (null without plan)
 - `daysInMonth` / `daysLeftInMonth` live in `store/shared.ts` (re-exported by planning.ts) so
@@ -1003,7 +1062,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts` (184 tests, ~20 s; the encrypted round
+`npm run test:logic` → `tsx --test tests/logic.test.ts` (207 tests, ~20 s; the encrypted round
 trip uses the real 200k-iteration KDF). Suites: migrations (v0–v7), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,
@@ -1015,6 +1074,15 @@ paused/ended rules, confirm/skip and missed months, resume, link from a transact
 history), recurring in the plan (monthly equivalent, SAR/EGP conversion, upcoming totals),
 category management (unique names, kind lock, archive vs delete, use by rules/plans, pickers vs
 reports, bucket move → plan totals, atomic addCategoryWithPlanLine), next best actions (every rule
+on/off, priority order, CTA routes, 24 h snooze, non-dismissible due/cover), net worth snapshots
+(backfill, upsert without loops, as-of-date figures, change vs last month), migration v6 → v7
+(backfill, idempotent, chain), monthly review (savings rate, plan vs actual, top categories,
+one-time, funds, next step, finishing), monthFlows, formatPercent, currency conversion (same
+currency exact after a rate change, other currencies at their own snapshot, suggestion / spend
+impact / fund allocations unaffected by rate changes, records without a snapshot, snapshot kept
+or retaken on edit, same-currency sinking payment), live prices (FX and gold math with a premium,
+response validation, fallback, error codes, timeout, apply in auto / never in manual, 6-hour
+throttle, premium re-pricing, historical amounts unchanged, action rule skip).
 
 Adding tests: import pure modules (`@/store/*`, `@/utils/*` — never React Native ones), build
 state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
@@ -1025,7 +1093,10 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 
 ## 15. Known limitations & tech debt
 
-- Gold prices and exchange rates are manual (`constants/market.ts` placeholders until set).
+- Gold is priced from the world spot price plus a manual local premium, not from an Egyptian
+  market feed, and excludes workmanship. Prices refresh only while the app is open. The free
+  APIs have no SLA; when they fail the last saved prices stay (`constants/market.ts` values on a
+  fresh install that has never been online).
 - No UI yet for: liabilities, currency holdings (only shown if present), editing an
   opening gold holding. Corresponding operations exist (`addLiability`, `updateHolding`, `updateFundMovement`, …).
 - `DEFAULT_RATES.lastUpdated` is computed at module load, so a fresh install shows "last updated"
@@ -1033,7 +1104,15 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 - `DEFAULT_TRACKING_START_DATE` is the owner's date ('2026-08-05') for every install.
 - `fundStatus` counts any movement dated this month — e.g. a migrated opening allocation — as
   this month's contribution.
-- Net worth snapshots of past months that were never recorded live (everything before v7, or is missing into أساسيات (default bucket).
+- Net worth snapshots of past months that were never recorded live (everything before v7, or
+  months the app wasn't opened) are estimates at the rates and gold price of when they were
+  filled in, so "change vs last month" right after the upgrade mostly shows that month's cash
+  flow. Live snapshots are only as fresh as the last time the app ran in that month.
+- `DEFAULT_PLAN_CURRENCY` is SAR for every install.
+- Transactions and fund movements recorded before `ratesSnapshot` existed convert into a
+  different currency partly at today's rates (see "Conversion rules"); there is no backfill
+  because the rates of that time are unknown.
+- `planProgress` puts a line whose category is missing into أساسيات (default bucket).
 - A plan line with a 0 limit and any spending is "over" (pct = 1); the UI says "مفيش ميزانية
   للبند ده: اتصرف X" instead of an over-by amount.
 - Plan "fixed" suggestion averages over all window months (a bill paid for 3 months shows ⅓/month).
@@ -1083,7 +1162,7 @@ transfers (auto or confirm, due inbox, plan integration, local reminders), categ
 **Done (data v7):** Next Best Action engine on Home, net worth change vs last month, monthly
 review. **Next:** carry-over of unspent plan money, liabilities UI.
 
-**V2:** live gold & FX prices, allocation engine (where should new money go), priority engine
+**V2:** allocation engine (where should new money go), priority engine
 across funds/plan, server sync (using `updatedAt` + tombstones + `deviceId`).
 
 ---

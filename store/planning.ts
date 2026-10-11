@@ -1,9 +1,9 @@
-import { fromEGP, toEGP } from '@/utils/currency';
+import { convertCurrency } from '@/utils/currency';
 import { fromDateKey, monthOf, shiftMonth, toDateKey } from '@/utils/dates';
 import { FIXED_CATEGORY_IDS } from './defaultCategories';
 import type { PlanInput } from './operations';
 import { isLive, monthlyEquivalent } from './recurring';
-import { fundsByPriority, fundSuggestedMonthly } from './selectors';
+import { fundsByPriority, fundSuggestedMonthly, movementAmountIn, transactionAmountIn } from './selectors';
 import { daysInMonth, daysLeftInMonth } from './shared';
 import type {
   CurrencyCode,
@@ -18,9 +18,11 @@ import type {
 
 // Monthly plan math. Pure functions only.
 //
-// Plans live in one currency (default SAR). A transaction is converted into it in two steps:
-// its amount → EGP with the transaction's own rateToEGP snapshot (what it cost then), then
-// EGP → plan currency at the current rates.
+// Plans live in one currency (default SAR). What already happened never moves with settings
+// rates: a transaction in the plan currency counts as is, one in another currency is converted
+// with its own rates (rateToEGP, then its ratesSnapshot), and fund movements with theirs. Only
+// amounts that are still plans (recurring rules, fund suggestions, an expense being typed) use
+// today's rates.
 
 type State = FinanceState;
 
@@ -35,18 +37,12 @@ export function planFor(state: Pick<State, 'monthlyPlans'>, month: string): Mont
   return state.monthlyPlans.find((p) => p.month === month);
 }
 
-// Transaction amount in `currency`: snapshot rate to EGP, then current rate out of EGP.
-export function amountInCurrency(
-  state: Pick<State, 'settings'>,
-  tx: Pick<IncomeExpenseTransaction, 'amount' | 'rateToEGP'>,
-  currency: CurrencyCode
-): number {
-  return fromEGP(tx.amount * tx.rateToEGP, currency, state.settings.exchangeRates);
-}
+// Transaction amount in `currency` as it was worth when recorded (see transactionAmountIn).
+export const amountInCurrency = transactionAmountIn;
 
+// For amounts that haven't happened yet: today's rates (the same currency stays untouched).
 function convert(state: Pick<State, 'settings'>, amount: number, from: CurrencyCode, to: CurrencyCode): number {
-  const rates = state.settings.exchangeRates;
-  return fromEGP(toEGP(amount, from, rates), to, rates);
+  return convertCurrency(amount, from, to, state.settings.exchangeRates);
 }
 
 function monthExpenses(state: State, month: string, { excludeOneTime = false } = {}): IncomeExpenseTransaction[] {
@@ -292,14 +288,14 @@ export function planProgress(state: State, month: string): PlanProgress | null {
   const unplannedSpent = sum([...spent.entries()].filter(([id]) => !planned.has(id)).map(([, v]) => v));
 
   const contributions = plan.fundContributions.map((c) => {
-    const fund = state.funds.find((f) => f.id === c.fundId);
-    const allocatedInFund = sum(
-      state.fundMovements.filter((m) => m.fundId === c.fundId && monthOf(m.date) === month).map((m) => m.amount)
-    );
     return {
       fundId: c.fundId,
       planned: c.amount,
-      allocated: fund ? convert(state, allocatedInFund, fund.currency, plan.currency) : 0,
+      allocated: sum(
+        state.fundMovements
+          .filter((m) => m.fundId === c.fundId && monthOf(m.date) === month)
+          .map((m) => movementAmountIn(state, m, plan.currency))
+      ),
     };
   });
 

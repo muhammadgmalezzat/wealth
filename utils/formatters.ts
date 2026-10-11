@@ -81,6 +81,24 @@ export function daysAgoPhrase(days: number): string {
   return `منذ ${days} يوم`;
 }
 
+// How long ago an ISO timestamp was: "دلوقتي" · "منذ 5 دقايق" · "منذ ساعتين" · "منذ 3 أيام".
+export function timeAgoPhrase(iso: string, now: Date = new Date()): string {
+  const minutes = Math.floor((now.getTime() - Date.parse(iso)) / 60_000);
+  if (!Number.isFinite(minutes) || minutes < 1) return 'دلوقتي';
+  if (minutes < 60) {
+    if (minutes === 1) return 'منذ دقيقة';
+    if (minutes === 2) return 'منذ دقيقتين';
+    return minutes <= 10 ? `منذ ${minutes} دقايق` : `منذ ${minutes} دقيقة`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    if (hours === 1) return 'منذ ساعة';
+    if (hours === 2) return 'منذ ساعتين';
+    return hours <= 10 ? `منذ ${hours} ساعات` : `منذ ${hours} ساعة`;
+  }
+  return daysAgoPhrase(Math.floor(hours / 24));
+}
+
 // "كمان حاجة واحدة" · "كمان حاجتين" · "كمان 3 حاجات" · "كمان 11 حاجة".
 export function moreThingsPhrase(n: number): string {
   if (n === 1) return 'كمان حاجة واحدة';
