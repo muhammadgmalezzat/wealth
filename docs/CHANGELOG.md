@@ -6,6 +6,55 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-27) — 1.2.0 · data v7 · **needs a new build** · Analytics tab ("التحليلات")
+
+> **A new build is required** (`eas build`), then `eas update` as usual: it adds two native modules,
+> `react-native-svg` and `expo-linear-gradient` (the peers of the charts library), and bumps `app.json`
+> `version` to 1.2.0 (runtime = app version, so 1.1.0 builds won't receive it). Runs in Expo Go
+> SDK 57. Data version stays 7: the snapshot additions are optional fields, no migration.
+
+**For users**
+- New tab **التحليلات** between الخطة and الأصول (six tabs now: الرئيسية · المعاملات · الخطة · التحليلات ·
+  الأصول · الصناديق). Sticky controls: period (الشهر ده / 3 شهور / 6 شهور / السنة / من بداية التتبع / مخصص),
+  display currency (ج.م / ر.س) and "اشمل المصاريف اللي لمرة واحدة".
+- **فلوسك راحت فين:** a Sankey from income (راتب / فري لانس / دخل تاني, "من رصيدك" when you spent more
+  than you earned) to أساسيات / رفاهيات / عطاء / صناديق / ذهب / فايض and then each bucket's top 5
+  categories. Tap a node to see its transactions (a new list screen; rows open for editing). On narrow
+  screens it becomes a stacked bar and a list.
+- **الاتجاه الشهري** (income vs spending bars, net line, savings rate per month), **المصروف على إيه** (donut
+  and ranked categories with ↑ / ↓ against the previous equal period), **صافي الثروة عبر الوقت** (cash / gold /
+  currencies by month, الكل / مصر / السعودية, estimated months marked or hidden), **خريطة فلوسك** (liquid by
+  currency, by country, gold by karat with P&L), **فلوسك تكفي لحد إمتى** (months of runway, per currency too),
+  **الصناديق** (progress, cash by currency, projected finish date at the last 3 months' pace) and up to 5
+  **ملاحظات** with a tap-through each.
+- History is shown as it was recorded: a SAR expense stays exact, and changing exchange rates doesn't change
+  past months. Gold purchases appear as "ذهب", never as spending. Presets never reach before the tracking
+  start; a custom period that starts earlier does.
+- "محتاج شهر بيانات على الأقل" where there isn't enough history yet.
+
+**Technical**
+- Dependencies (`npx expo install`): `react-native-svg` 15.15.4, `react-native-gifted-charts` 1.4.81,
+  `expo-linear-gradient` ~57.0.2; `d3-sankey` 0.12.3 (+ `@types/d3-sankey`) for layout math only.
+- `store/analytics.ts` (pure, no React Native): `resolvePeriod` / `previousPeriod` / `monthsInPeriod`,
+  `periodTotals`, `spendingFlow` (balanced by construction), `monthlyTrend`, `spendingBreakdown`,
+  `netWorthSeries`, `moneyMap`, `runway`, `fundsProjection`, `insights`, `drillTransactions` +
+  `drillParams` / `parseDrillParams` / `describeFilter`, `hasAnalyticsData`. Amounts use
+  `transactionAmountIn` / `movementAmountIn` (history as recorded); current valuations use today's rates.
+- Net worth snapshots now also keep `breakdown` (cash / gold / currencies per location, liabilities) and
+  `ratesSnapshot`; `syncedSnapshots` rewrites the current month once and works older **estimated** snapshots
+  out again with them; `netWorthBreakdown` added, `NetWorthFigures.breakdown`.
+- UI: `app/(tabs)/analytics.tsx`, `app/period-transactions.tsx` (+ root Stack screen), `components/analytics/*`
+  (`analyticsUi.ts` pure helpers, `sankeyLayout.ts`, `SankeyChart` with overlay `Pressable`s because SVG
+  press handlers don't work on web, gifted-charts sections with plain-view line points to avoid a web dev
+  warning), `Screen` gained `scrollRef`, tab icon `chart.bar` → `bar-chart`, `CATEGORY_IDS.salary / freelance`.
+- Tests: 270 (51 new: selectors for every section — periods, previous period, filters, both toggles,
+  Sankey balance and drill totals, trend, breakdown, net worth series, money map, runway, fund projections,
+  every insight trigger and the limit of 5 — snapshot breakdowns, and the UI helpers / Sankey layout).
+- Checked on web at 390 px and 320 px (fallback) with real data: no console warnings; Android bundle exports.
+  `expo-doctor` still flags only the existing patch-version mismatches of other Expo packages.
+
+---
+
 ## Unreleased (2026-10-27) — 1.1.0 · data v7 (OTA update) · Amounts keep their own currency
 
 > JS-only (ships with `eas update` to 1.1.0 builds). One additive optional field

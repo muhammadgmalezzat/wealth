@@ -14,6 +14,8 @@ import type {
   IncomeExpenseTransaction,
   Liability,
   Location,
+  LocationBreakdown,
+  NetWorthBreakdown,
   SinkingFrequency,
   Transaction,
 } from './types';
@@ -128,14 +130,33 @@ export function netWorthEGP(state: State): number {
   return liquidTotalEGP(state) + holdingsTotalEGP(state) - liabilitiesTotalEGP(state);
 }
 
+// Cash, gold and currency holdings per location (EGP at current rates), plus liabilities.
+export function netWorthBreakdown(state: State): NetWorthBreakdown {
+  const empty = (): LocationBreakdown => ({ cashEGP: 0, goldEGP: 0, currenciesEGP: 0 });
+  const result: NetWorthBreakdown = { EG: empty(), SA: empty(), liabilitiesEGP: liabilitiesTotalEGP(state) };
+  for (const account of state.accounts) result[account.location].cashEGP += accountBalanceEGP(state, account);
+  for (const holding of state.holdings) {
+    const where = result[holding.location ?? 'EG'];
+    if (holding.type === 'gold') where.goldEGP += holdingValueEGP(state, holding);
+    else where.currenciesEGP += holdingValueEGP(state, holding);
+  }
+  return result;
+}
+
 export interface NetWorthFigures {
   netWorthEGP: number;
   liquidEGP: number;
   holdingsEGP: number;
+  breakdown: NetWorthBreakdown;
 }
 
 export function netWorthFigures(state: State): NetWorthFigures {
-  return { netWorthEGP: netWorthEGP(state), liquidEGP: liquidTotalEGP(state), holdingsEGP: holdingsTotalEGP(state) };
+  return {
+    netWorthEGP: netWorthEGP(state),
+    liquidEGP: liquidTotalEGP(state),
+    holdingsEGP: holdingsTotalEGP(state),
+    breakdown: netWorthBreakdown(state),
+  };
 }
 
 // Best-effort net worth at the end of `date` ('YYYY-MM-DD'), at CURRENT rates and prices (there

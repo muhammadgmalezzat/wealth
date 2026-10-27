@@ -42,6 +42,9 @@ import {
 import * as nba from '@/store/nextActions';
 import * as planning from '@/store/planning';
 import * as reviewLogic from '@/store/review';
+import * as analyticsUi from '@/components/analytics/analyticsUi';
+import * as sankeyLayout from '@/components/analytics/sankeyLayout';
+import * as analytics from '@/store/analytics';
 import * as snapshots from '@/store/snapshots';
 import * as sel from '@/store/selectors';
 import * as recurring from '@/store/recurring';
@@ -3847,5 +3850,939 @@ describe('native amounts never drift with the rates', () => {
     // In an EGP plan it is what 400 SAR was worth when allocated (13), not today's 15.
     approx(planning.planProgress(prepare('EGP'), '2026-10')!.contributions[0].allocated, 400 * 13);
     approx(reviewLogic.monthReview(prepare('SAR'), '2026-10', NOW).funds[0].allocated, 400);
+  });
+});
+
+// --- Analytics ------------------------------------------------------------------------
+
+describe('analytics', () => {
+  const OCT_26 = new Date(2026, 9, 26, 12);
+  const SNAP = { SAR_EGP: 12.5, USD_EGP: 50 };
+  const tx = (
+    id: string,
+    type: 'income' | 'expense',
+    categoryId: string,
+    amount: number,
+    date: string,
+    extra: Record<string, unknown> = {}
+  ): Transaction =>
+    ({
+      id,
+      type,
+      amount,
+      currency: 'EGP',
+      accountId: 'egp',
+      categoryId,
+      date,
+      rateToEGP: 1,
+      ratesSnapshot: SNAP,
+      createdAt: `${date}T10:00:00.000Z`,
+      updatedAt: T0,
+      ...extra,
+    }) as Transaction;
+  const sarTx = (id: string, type: 'income' | 'expense', categoryId: string, amount: number, date: string): Transaction =>
+    tx(id, type, categoryId, amount, date, { currency: 'SAR', accountId: 'sar', rateToEGP: 12.5 });
+  const gold = (id: string, amount: number, date: string): Transaction =>
+    ({
+      id,
+      type: 'asset_purchase',
+      amount,
+      currency: 'EGP',
+      accountId: 'egp',
+      holdingId: 'g1',
+      date,
+      rateToEGP: 1,
+      ratesSnapshot: SNAP,
+      createdAt: `${date}T10:00:00.000Z`,
+      updatedAt: T0,
+    }) as Transaction;
+  const transfer = (id: string, amount: number, date: string): Transaction =>
+    ({
+      id,
+      type: 'transfer',
+      amount,
+      toAmount: amount / 12.5,
+      fromAccountId: 'egp',
+      toAccountId: 'sar',
+      date,
+      rateToEGP: 1,
+      ratesSnapshot: SNAP,
+      createdAt: `${date}T10:00:00.000Z`,
+      updatedAt: T0,
+    }) as Transaction;
+  const movement = (id: string, fundId: string, amount: number, date: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    fundId,
+    amount,
+    date,
+    ratesSnapshot: SNAP,
+    updatedAt: T0,
+    ...extra,
+  });
+  const at = (s: FinanceState, SAR_EGP: number): FinanceState => ({
+    ...s,
+    settings: { ...s.settings, exchangeRates: { ...s.settings.exchangeRates, SAR_EGP } },
+  });
+  const withTx = (s: FinanceState, ...more: Transaction[]): FinanceState => ({ ...s, transactions: [...s.transactions, ...more] });
+
+  // Tracking starts 1 Aug. Aug: salary 10,000 · rent 3,000 · groceries 1,000 · dining 500.
+  // Sep: salary 10,000 + freelance 2,000 · rent 3,000 · groceries 1,500 · dining 1,000 · sofa 4,000
+  // (one-time) · gold 3,000 · a transfer. Oct: salary 10,000 · rent 3,000 · groceries 2,400 ·
+  // dining 300 EGP + 100 SAR (= 1,250) · gift 200. In July (before tracking): a 777 expense.
+  const ledger = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [account('egp', 'EGP', 20000), account('sar', 'SAR', 2000, 'SA')],
+    settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' },
+    holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 0.5, karat: 21, purchaseCostEGP: 3000, updatedAt: T0 }],
+    funds: [fund({ id: 'F', targetAmount: 20000, priority: 1 })],
+    fundMovements: [
+      movement('m1', 'F', 1000, '2026-08-10'),
+      movement('m2', 'F', 1000, '2026-09-10'),
+      movement('m3', 'F', 1000, '2026-10-10'),
+    ],
+    transactions: [
+      tx('x0', 'expense', 'cat-lifestyle-misc', 777, '2026-07-20'),
+      tx('a1', 'income', 'cat-income-salary', 10000, '2026-08-05'),
+      tx('a2', 'expense', 'cat-essentials-rent', 3000, '2026-08-06'),
+      tx('a3', 'expense', CATEGORY_IDS.groceries, 1000, '2026-08-10'),
+      tx('a4', 'expense', 'cat-lifestyle-dining', 500, '2026-08-12'),
+      tx('b1', 'income', 'cat-income-salary', 10000, '2026-09-05'),
+      tx('b2', 'income', 'cat-income-freelance', 2000, '2026-09-10'),
+      tx('b3', 'expense', 'cat-essentials-rent', 3000, '2026-09-06'),
+      tx('b4', 'expense', CATEGORY_IDS.groceries, 1500, '2026-09-12'),
+      tx('b5', 'expense', 'cat-lifestyle-dining', 1000, '2026-09-18'),
+      tx('b6', 'expense', 'cat-essentials-home-setup', 4000, '2026-09-15', { oneTime: true }),
+      gold('b7', 3000, '2026-09-20'),
+      transfer('b8', 2500, '2026-09-22'),
+      tx('c1', 'income', 'cat-income-salary', 10000, '2026-10-05'),
+      tx('c2', 'expense', 'cat-essentials-rent', 3000, '2026-10-06'),
+      tx('c3', 'expense', CATEGORY_IDS.groceries, 2400, '2026-10-09'),
+      tx('c4', 'expense', 'cat-lifestyle-dining', 300, '2026-10-11'),
+      sarTx('c5', 'expense', 'cat-lifestyle-dining', 100, '2026-10-08'),
+      tx('c6', 'expense', 'cat-giving-gifts', 200, '2026-10-13'),
+    ],
+  });
+  const query = (
+    state: FinanceState,
+    kind: analytics.PeriodKind,
+    over: Partial<analytics.AnalyticsQuery> = {}
+  ): analytics.AnalyticsQuery => ({
+    period: analytics.resolvePeriod(state, kind, NOW),
+    currency: 'EGP',
+    includeOneTime: true,
+    ...over,
+  });
+
+  describe('periods', () => {
+    it('resolves the presets, clamped to the tracking start', () => {
+      const s = ledger();
+      assert.deepEqual(analytics.resolvePeriod(s, 'month', NOW), { kind: 'month', months: 1, from: '2026-10-01', to: '2026-10-31' });
+      assert.deepEqual(analytics.resolvePeriod(s, '3m', NOW), { kind: '3m', months: 3, from: '2026-08-01', to: '2026-10-31' });
+      // 6 months and a year reach back before tracking: they start at the tracking start.
+      assert.equal(analytics.resolvePeriod(s, '6m', NOW).from, '2026-08-01');
+      assert.equal(analytics.resolvePeriod(s, 'year', NOW).from, '2026-08-01');
+      assert.deepEqual(analytics.resolvePeriod(s, 'sinceStart', NOW), { kind: 'sinceStart', from: '2026-08-01', to: '2026-10-31' });
+      const early = { ...s, settings: { ...s.settings, trackingStartDate: '2025-01-01' } };
+      assert.equal(analytics.resolvePeriod(early, '6m', NOW).from, '2026-05-01');
+      assert.equal(analytics.resolvePeriod(early, 'year', NOW).from, '2025-11-01');
+    });
+
+    it('a custom period is as given (swapped if reversed) and may cover days before tracking', () => {
+      const s = ledger();
+      assert.deepEqual(analytics.resolvePeriod(s, 'custom', NOW, { from: '2026-07-01', to: '2026-07-31' }), {
+        kind: 'custom',
+        from: '2026-07-01',
+        to: '2026-07-31',
+      });
+      assert.deepEqual(analytics.resolvePeriod(s, 'custom', NOW, { from: '2026-09-30', to: '2026-09-01' }), {
+        kind: 'custom',
+        from: '2026-09-01',
+        to: '2026-09-30',
+      });
+      assert.deepEqual(analytics.monthsInPeriod({ from: '2026-08-15', to: '2026-10-02' }), ['2026-08', '2026-09', '2026-10']);
+    });
+
+    it('filters rows by period: presets leave out rows before tracking, a custom period can include them', () => {
+      const s = ledger();
+      const total = (kind: analytics.PeriodKind, custom?: { from: string; to: string }) =>
+        analytics.periodTotals(s, { ...query(s, 'month'), period: analytics.resolvePeriod(s, kind, NOW, custom) });
+      // Oct only.
+      assert.equal(total('month').income, 10000);
+      assert.equal(total('month').expense, 3000 + 2400 + 300 + 1250 + 200);
+      // Aug–Oct, and since the start, are the same here; the July expense is never in them.
+      assert.equal(total('3m').expense, 4500 + 9500 + 7150);
+      assert.equal(total('sinceStart').expense, 21150);
+      assert.equal(total('year').income, 32000);
+      // Explicitly asking for July covers it.
+      const july = total('custom', { from: '2026-07-01', to: '2026-07-31' });
+      assert.equal(july.expense, 777);
+      assert.equal(total('custom', { from: '2026-07-15', to: '2026-08-10' }).expense, 777 + 3000 + 1000);
+    });
+
+    it('previous period: the equal span right before, or nothing to compare with', () => {
+      const s = ledger();
+      assert.deepEqual(analytics.previousPeriod(s, analytics.resolvePeriod(s, 'month', NOW)), {
+        kind: 'month',
+        months: 1,
+        from: '2026-09-01',
+        to: '2026-09-30',
+      });
+      // Aug–Oct would be compared with May–Jul, which is before tracking.
+      assert.equal(analytics.previousPeriod(s, analytics.resolvePeriod(s, '3m', NOW)), null);
+      assert.equal(analytics.previousPeriod(s, analytics.resolvePeriod(s, 'sinceStart', NOW)), null);
+      const early = { ...s, settings: { ...s.settings, trackingStartDate: '2025-01-01' } };
+      assert.deepEqual(analytics.previousPeriod(early, analytics.resolvePeriod(early, '3m', NOW)), {
+        kind: '3m',
+        months: 3,
+        from: '2026-05-01',
+        to: '2026-07-31',
+      });
+      // Custom: the same number of days ending the day before.
+      const custom = analytics.resolvePeriod(s, 'custom', NOW, { from: '2026-09-11', to: '2026-09-20' });
+      assert.deepEqual(analytics.previousPeriod(s, custom), { kind: 'custom', from: '2026-09-01', to: '2026-09-10' });
+      assert.equal(analytics.previousPeriod(s, analytics.resolvePeriod(s, 'custom', NOW, { from: '2026-08-05', to: '2026-08-14' })), null);
+    });
+  });
+
+  describe('totals', () => {
+    it('asset purchases and transfers are not spending; gold is its own figure', () => {
+      const s = ledger();
+      const sep = analytics.periodTotals(s, { ...query(s, 'month'), period: { kind: 'custom', from: '2026-09-01', to: '2026-09-30' } });
+      assert.equal(sep.expense, 9500);
+      assert.equal(sep.income, 12000);
+      assert.equal(sep.gold, 3000);
+      assert.deepEqual(sep.byBucket, { essentials: 8500, lifestyle: 1000, giving: 0 });
+      assert.equal(sep.fundsNet, 1000);
+    });
+
+    it('the one-time toggle', () => {
+      const s = ledger();
+      const sep = { kind: 'custom' as const, from: '2026-09-01', to: '2026-09-30' };
+      const on = analytics.periodTotals(s, { period: sep, currency: 'EGP', includeOneTime: true });
+      const off = analytics.periodTotals(s, { period: sep, currency: 'EGP', includeOneTime: false });
+      assert.equal(on.expense, 9500);
+      assert.equal(off.expense, 5500);
+      assert.equal(off.byBucket.essentials, 4500);
+      assert.equal(off.byCategory.has('cat-essentials-home-setup'), false);
+      approx(off.savingsRate, (12000 - 5500) / 12000);
+      assert.equal(analytics.oneTimeSpend(s, { period: sep, currency: 'EGP', includeOneTime: false }), 4000);
+    });
+
+    it('the currency toggle: native SAR stays exact, EGP rows convert with their own snapshot, history ignores today’s rate', () => {
+      const s = ledger();
+      const sar = analytics.periodTotals(s, query(s, 'month', { currency: 'SAR' }));
+      approx(sar.income, 10000 / 12.5);
+      // 300 EGP at the snapshot (24 SAR) + the 100 SAR expense exactly.
+      assert.equal(sar.byCategory.get('cat-lifestyle-dining')!.amount, 24 + 100);
+      approx(sar.expense, 7150 / 12.5);
+      // The SAR rate moving 12.5 → 20 changes nothing about what already happened.
+      const later = analytics.periodTotals(at(s, 20), query(at(s, 20), 'month', { currency: 'SAR' }));
+      assert.deepEqual(later.income, sar.income);
+      assert.deepEqual(later.expense, sar.expense);
+      assert.equal(later.byCategory.get('cat-lifestyle-dining')!.amount, 124);
+      // …and in EGP the SAR expense is what it was worth then (100 × 12.5).
+      assert.equal(analytics.periodTotals(at(s, 20), query(at(s, 20), 'month')).byCategory.get('cat-lifestyle-dining')!.amount, 300 + 1250);
+    });
+
+    it('a transaction without a snapshot converts its other leg at today’s rate (documented approximation)', () => {
+      const old = tx('o1', 'expense', 'cat-lifestyle-dining', 1250, '2026-10-02', { ratesSnapshot: undefined });
+      const s = withTx({ ...emptyState(), settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' } }, old);
+      const q = query(s, 'month', { currency: 'SAR' });
+      approx(analytics.periodTotals(s, q).expense, 100);
+      approx(analytics.periodTotals(at(s, 25), q).expense, 50);
+      assert.equal(analytics.periodTotals(at(s, 25), query(s, 'month')).expense, 1250);
+    });
+
+    it('hasAnalyticsData needs income or spending since tracking started', () => {
+      assert.equal(analytics.hasAnalyticsData(ledger()), true);
+      assert.equal(analytics.hasAnalyticsData(emptyState()), false);
+      const onlyOld = { ...emptyState(), transactions: [tx('o', 'expense', 'cat-lifestyle-misc', 5, '2025-01-01')] };
+      assert.equal(analytics.hasAnalyticsData(onlyOld), false);
+    });
+  });
+
+  describe('where did the money go (Sankey)', () => {
+    const SEP = { kind: 'custom' as const, from: '2026-09-01', to: '2026-09-30' };
+    const byId = (flow: analytics.SpendingFlow, id: string) => flow.nodes.find((n) => n.id === id);
+    // Every node's inflow and outflow match its value; sources have no inflow, leaves no outflow.
+    const assertBalanced = (flow: analytics.SpendingFlow) => {
+      approx(flow.totalIn, flow.totalOut);
+      for (const node of flow.nodes) {
+        const incoming = flow.links.filter((l) => l.target === node.id).reduce((t, l) => t + l.value, 0);
+        const outgoing = flow.links.filter((l) => l.source === node.id).reduce((t, l) => t + l.value, 0);
+        if (node.kind !== 'source') approx(incoming, node.value);
+        if (node.kind === 'source' || node.kind === 'bucket') approx(outgoing, node.value);
+      }
+    };
+
+    it('income spreads over buckets, funds and a surplus, and it balances', () => {
+      const s = ledger();
+      const flow = analytics.spendingFlow(s, query(s, 'month'));
+      assert.deepEqual(
+        flow.nodes.filter((n) => n.kind !== 'category').map((n) => [n.id, n.value]),
+        [
+          ['src:salary', 10000],
+          ['bucket:essentials', 5400],
+          ['bucket:lifestyle', 1550],
+          ['bucket:giving', 200],
+          ['dest:funds', 1000],
+          ['dest:surplus', 1850],
+        ]
+      );
+      assert.equal(flow.totalIn, 10000);
+      assertBalanced(flow);
+      assert.equal(byId(flow, 'src:balance'), undefined);
+    });
+
+    it('gold is a destination, never spending; spending beyond income comes "من رصيدك"', () => {
+      const s = ledger();
+      const flow = analytics.spendingFlow(s, { period: SEP, currency: 'EGP', includeOneTime: true });
+      assert.equal(byId(flow, 'dest:gold')!.value, 3000);
+      assert.equal(byId(flow, 'bucket:essentials')!.value, 8500); // the gold isn't in any bucket
+      assert.equal(byId(flow, 'src:balance')!.label, 'من رصيدك');
+      approx(byId(flow, 'src:balance')!.value, 1500);
+      assert.equal(byId(flow, 'dest:surplus'), undefined);
+      assert.equal(flow.totalIn, 13500);
+      assertBalanced(flow);
+      // Leaving the one-time sofa out turns it into a surplus again.
+      const lean = analytics.spendingFlow(s, { period: SEP, currency: 'EGP', includeOneTime: false });
+      assert.equal(byId(lean, 'src:balance'), undefined);
+      assert.equal(byId(lean, 'dest:surplus')!.value, 2500);
+      assertBalanced(lean);
+    });
+
+    it('income sources: راتب · فري لانس · دخل تاني; money released from funds is a source', () => {
+      let s = withTx(ledger(), tx('i1', 'income', CATEGORY_IDS.otherIncome, 700, '2026-09-25'));
+      // September put 1,000 into the fund; taking 1,500 out leaves 500 released.
+      s = { ...s, fundMovements: [...s.fundMovements, movement('w1', 'F', -1500, '2026-09-26')] };
+      const flow = analytics.spendingFlow(s, { period: SEP, currency: 'EGP', includeOneTime: true });
+      assert.deepEqual(
+        flow.nodes.filter((n) => n.kind === 'source').map((n) => [n.label, n.value]),
+        [['راتب', 10000], ['فري لانس', 2000], ['دخل تاني', 700], ['من الصناديق', 500]]
+      );
+      // 13,200 in, 12,500 out (9,500 spent + 3,000 gold): 700 is left over.
+      assert.equal(flow.nodes.find((n) => n.id === 'dest:surplus')!.value, 700);
+      assert.equal(flow.nodes.some((n) => n.id === 'dest:funds'), false);
+      assertBalanced(flow);
+    });
+
+    it('shows the top 5 categories of a bucket and groups the rest as "تاني"', () => {
+      const ids = ['cat-lifestyle-dining', 'cat-lifestyle-clothing', 'cat-lifestyle-entertainment', 'cat-lifestyle-personal-care', 'cat-lifestyle-gadgets', 'cat-lifestyle-misc'];
+      const amounts = [600, 500, 400, 300, 200, 100];
+      let s: FinanceState = { ...emptyState(), settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' } };
+      s = withTx(s, tx('inc', 'income', 'cat-income-salary', 5000, '2026-10-01'), ...ids.map((id, i) => tx(`e${i}`, 'expense', id, amounts[i], '2026-10-02')));
+      const q = query(s, 'month');
+      const flow = analytics.spendingFlow(s, q);
+      const cats = flow.nodes.filter((n) => n.kind === 'category');
+      assert.deepEqual(cats.map((n) => [n.label, n.value]), [
+        ['مطاعم وقهوة', 600],
+        ['ملابس', 500],
+        ['ترفيه', 400],
+        ['عناية شخصية', 300],
+        ['أجهزة وأدوات', 200],
+        ['تاني', 100],
+      ]);
+      assertBalanced(flow);
+      // Tapping a node shows exactly the transactions behind it, adding up to its value.
+      for (const node of flow.nodes.filter((n) => n.drill)) {
+        approx(analytics.drillTransactions(s, q, node.drill!).total, node.value);
+      }
+      const rest = byId(flow, 'cat:lifestyle:rest')!;
+      assert.deepEqual(analytics.drillTransactions(s, q, rest.drill!).transactions.map((t) => t.id), ['e5']);
+    });
+
+    it('every tappable node drills into transactions that add up to it', () => {
+      const s = ledger();
+      for (const q of [query(s, 'month'), query(s, 'sinceStart'), query(s, 'sinceStart', { includeOneTime: false }), query(s, 'month', { currency: 'SAR' })]) {
+        const flow = analytics.spendingFlow(s, q);
+        assertBalanced(flow);
+        for (const node of flow.nodes.filter((n) => n.drill)) {
+          approx(analytics.drillTransactions(s, q, node.drill!).total, node.value);
+        }
+      }
+    });
+
+    it('is empty without income or spending, and the currency toggle rescales it', () => {
+      assert.equal(analytics.spendingFlow(emptyState(), query(emptyState(), 'month')).empty, true);
+      const s = ledger();
+      const egp = analytics.spendingFlow(s, query(s, 'month'));
+      const sar = analytics.spendingFlow(s, query(s, 'month', { currency: 'SAR' }));
+      approx(sar.totalIn, egp.totalIn / 12.5);
+      assertBalanced(sar);
+    });
+  });
+
+  describe('monthly trend', () => {
+    it('lists each month with income, spending, net and savings rate', () => {
+      const s = ledger();
+      const trend = analytics.monthlyTrend(s, query(s, '3m'));
+      assert.deepEqual(
+        trend.months.map((m) => [m.month, m.income, m.expense, m.net]),
+        [
+          ['2026-08', 10000, 4500, 5500],
+          ['2026-09', 12000, 9500, 2500],
+          ['2026-10', 10000, 7150, 2850],
+        ]
+      );
+      approx(trend.months[1].savingsRate, 2500 / 12000);
+      approx(trend.averageSavingsRate, (0.55 + 2500 / 12000 + 0.285) / 3);
+      assert.equal(trend.monthsWithIncome, 3);
+      assert.deepEqual(trend.months.map((m) => m.overspent), [false, false, false]);
+    });
+
+    it('follows the one-time toggle and the currency toggle', () => {
+      const s = ledger();
+      const lean = analytics.monthlyTrend(s, query(s, '3m', { includeOneTime: false }));
+      assert.equal(lean.months[1].expense, 5500);
+      const sar = analytics.monthlyTrend(s, query(s, '3m', { currency: 'SAR' }));
+      approx(sar.months[0].income, 800);
+      approx(sar.months[2].expense, 572);
+    });
+
+    it('flags months where spending beat income, and has no rate without income', () => {
+      const s = withTx(ledger(), tx('big', 'expense', 'cat-lifestyle-gadgets', 9000, '2026-08-20'));
+      const trend = analytics.monthlyTrend(s, query(s, '3m'));
+      assert.deepEqual(trend.months.map((m) => m.overspent), [true, false, false]);
+      const none = analytics.monthlyTrend({ ...emptyState(), settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' } }, query(ledger(), 'month'));
+      assert.equal(none.months[0].savingsRate, null);
+      assert.equal(none.averageSavingsRate, null);
+    });
+  });
+
+  describe('spending breakdown', () => {
+    it('ranks categories with their share and the change against the previous equal period', () => {
+      const s = ledger();
+      const b = analytics.spendingBreakdown(s, query(s, 'month'));
+      assert.equal(b.total, 7150);
+      assert.equal(b.comparable, true);
+      assert.equal(b.previousTotal, 9500);
+      assert.deepEqual(b.categories.map((c) => c.categoryId), [
+        'cat-essentials-rent',
+        CATEGORY_IDS.groceries,
+        'cat-lifestyle-dining',
+        'cat-giving-gifts',
+      ]);
+      approx(
+        b.categories.reduce((t, c) => t + c.pct, 0),
+        1
+      );
+      const row = (id: string) => b.categories.find((c) => c.categoryId === id)!;
+      assert.equal(row(CATEGORY_IDS.groceries).previous, 1500);
+      approx(row(CATEGORY_IDS.groceries).changePct, 0.6);
+      assert.equal(row(CATEGORY_IDS.groceries).direction, 'up');
+      approx(row('cat-lifestyle-dining').changePct, 550 / 1000);
+      assert.equal(row('cat-essentials-rent').direction, 'flat');
+      assert.equal(row('cat-giving-gifts').isNew, true);
+      assert.equal(row('cat-giving-gifts').changePct, null);
+      // Spending that fell is a "down".
+      const cut = analytics.spendingBreakdown(
+        { ...s, transactions: s.transactions.map((t) => (t.id === 'c3' ? { ...t, amount: 750 } : t)) },
+        query(s, 'month')
+      );
+      assert.equal(cut.categories.find((c) => c.categoryId === CATEGORY_IDS.groceries)!.direction, 'down');
+    });
+
+    it('splits by bucket, and has nothing to compare with when the previous period was before tracking', () => {
+      const s = ledger();
+      const b = analytics.spendingBreakdown(s, query(s, '3m'));
+      assert.equal(b.comparable, false);
+      assert.equal(b.previousTotal, null);
+      assert.equal(b.categories.every((c) => c.previous === null && c.direction === null), true);
+      assert.deepEqual(
+        analytics.spendingBreakdown(s, query(s, 'month')).buckets.map((x) => [x.bucket, x.amount]),
+        [['essentials', 5400], ['lifestyle', 1550], ['giving', 200]]
+      );
+    });
+
+    it('comparison follows the one-time toggle on both periods', () => {
+      const s = ledger();
+      const lean = analytics.spendingBreakdown(s, query(s, 'month', { includeOneTime: false }));
+      assert.equal(lean.previousTotal, 5500);
+    });
+  });
+
+  describe('net worth over time', () => {
+    const zero = { cashEGP: 0, goldEGP: 0, currenciesEGP: 0 };
+    const snap = (month: string, extra: Partial<import('@/store/types').NetWorthSnapshot>): import('@/store/types').NetWorthSnapshot => ({
+      id: `nw-${month}`,
+      month,
+      netWorthEGP: 0,
+      liquidEGP: 0,
+      holdingsEGP: 0,
+      takenAt: T0,
+      updatedAt: T0,
+      ...extra,
+    });
+    const state = (): FinanceState => ({
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 50000)],
+      netWorthSnapshots: [
+        snap('2026-07', { netWorthEGP: 120000 }), // recorded before breakdowns existed
+        snap('2026-08', {
+          estimated: true,
+          netWorthEGP: 125000,
+          ratesSnapshot: { SAR_EGP: 12.5, USD_EGP: 50 },
+          breakdown: { EG: { ...zero, cashEGP: 100000 }, SA: { ...zero, cashEGP: 25000 }, liabilitiesEGP: 0 },
+        }),
+        snap('2026-09', {
+          netWorthEGP: 131000,
+          ratesSnapshot: { SAR_EGP: 13, USD_EGP: 50 },
+          breakdown: { EG: { cashEGP: 110000, goldEGP: 5000, currenciesEGP: 0 }, SA: { ...zero, cashEGP: 26000 }, liabilitiesEGP: 10000 },
+        }),
+      ],
+    });
+    const series = (s: FinanceState, location: analytics.NetWorthLocation, currency: analytics.DisplayCurrency = 'EGP', includeEstimated = true) =>
+      analytics.netWorthSeries(s, { location, currency, includeEstimated, now: NOW });
+
+    it('all: one point per snapshot plus today, with cash / gold / currencies and the total after liabilities', () => {
+      const result = series(state(), 'all');
+      assert.deepEqual(result.points.map((p) => [p.month, p.estimated, p.live]), [
+        ['2026-07', false, false],
+        ['2026-08', true, false],
+        ['2026-09', false, false],
+        ['2026-10', false, true],
+      ]);
+      const [jul, aug, sep, oct] = result.points;
+      assert.equal(jul.total, 120000); // total only
+      assert.deepEqual([aug.cash, aug.gold, aug.currencies, aug.total], [125000, 0, 0, 125000]);
+      assert.deepEqual([sep.cash, sep.gold, sep.currencies, sep.total], [136000, 5000, 0, 131000]);
+      assert.equal(oct.total, netWorthEGP(state()));
+      assert.equal(result.estimatedCount, 1);
+    });
+
+    it('by location: Egypt carries the liabilities, Saudi doesn’t, and snapshots without a breakdown are skipped', () => {
+      const eg = series(state(), 'EG');
+      assert.equal(eg.skipped, 1);
+      assert.deepEqual(eg.points.slice(0, 2).map((p) => p.total), [100000, 105000]);
+      const sa = series(state(), 'SA');
+      assert.deepEqual(sa.points.slice(0, 2).map((p) => p.total), [25000, 26000]);
+      // Egypt + Saudi is everything.
+      assert.equal(eg.points[1].total + sa.points[1].total, 131000);
+    });
+
+    it('estimated points can be hidden', () => {
+      const result = series(state(), 'all', 'EGP', false);
+      assert.deepEqual(result.points.map((p) => p.month), ['2026-07', '2026-09', '2026-10']);
+      assert.equal(result.estimatedCount, 0);
+    });
+
+    it('in SAR each point uses the rates it was valued at; today’s for the current month', () => {
+      const result = series(state(), 'all', 'SAR');
+      approx(result.points[1].total, 125000 / 12.5);
+      approx(result.points[2].total, 131000 / 13);
+      approx(result.points[3].total, netWorthEGP(state()) / 12.5);
+      // A snapshot that kept no rates falls back to today's.
+      approx(result.points[0].total, 120000 / 12.5);
+      // Changing today's rate leaves the recorded points alone.
+      const moved = series(at(state(), 20), 'all', 'SAR');
+      approx(moved.points[1].total, 125000 / 12.5);
+      approx(moved.points[2].total, 131000 / 13);
+    });
+  });
+
+  describe('money map', () => {
+    const mapState = (): FinanceState => ({
+      ...emptyState(),
+      accounts: [account('egp', 'EGP', 5000), account('sar', 'SAR', 1000, 'SA')],
+      holdings: [
+        { id: 'g21', type: 'gold', name: 'a', weightGrams: 10, karat: 21, purchaseCostEGP: 50000, location: 'EG', updatedAt: T0 },
+        { id: 'g24', type: 'gold', name: 'b', weightGrams: 5, karat: 24, purchaseCostEGP: 28000, location: 'EG', updatedAt: T0 },
+        { id: 'fx', type: 'currency', name: 'ريال', currency: 'SAR', quantity: 200, purchaseCostEGP: 2400, location: 'SA', updatedAt: T0 },
+      ],
+    });
+
+    it('liquid money by currency (native + value), by location, and gold by karat', () => {
+      const m = analytics.moneyMap(mapState(), 'EGP');
+      assert.deepEqual(m.liquid.map((l) => [l.currency, l.native, l.valueEGP, l.value]), [
+        ['EGP', 5000, 5000, 5000],
+        ['SAR', 1000, 12500, 12500],
+      ]);
+      assert.equal(m.liquidTotal, 17500);
+      assert.deepEqual(m.byLocation.map((l) => [l.location, l.cash, l.gold, l.currencies, l.total]), [
+        ['EG', 5000, 82500, 0, 87500],
+        ['SA', 12500, 0, 2500, 15000],
+      ]);
+      // 24k first: 5 g × 6,000 and 10 g × 5,250.
+      assert.deepEqual(m.gold.rows.map((r) => [r.karat, r.grams, r.value, r.cost, r.pnl]), [
+        [24, 5, 30000, 28000, 2000],
+        [21, 10, 52500, 50000, 2500],
+      ]);
+      assert.deepEqual([m.gold.grams, m.gold.value, m.gold.cost, m.gold.pnl], [15, 82500, 78000, 4500]);
+      approx(m.goldShare, 82500 / 102500);
+    });
+
+    it('SAR display: native amounts stay, values follow today’s rate', () => {
+      const m = analytics.moneyMap(mapState(), 'SAR');
+      assert.equal(m.liquid[1].native, 1000);
+      assert.equal(m.liquid[1].value, 1000);
+      assert.equal(m.liquid[0].value, 400);
+      assert.equal(m.gold.value, 82500 / 12.5);
+      const later = analytics.moneyMap(at(mapState(), 15), 'EGP');
+      assert.equal(later.liquid[1].native, 1000);
+      assert.equal(later.liquid[1].valueEGP, 15000);
+    });
+  });
+
+  describe('runway', () => {
+    it('months the money lasts at the average essentials of the last completed months, one-time excluded', () => {
+      const s = ledger();
+      const r = analytics.runway(s, 'EGP', NOW);
+      // Aug 4,000 and Sep 4,500 (the 4,000 sofa is one-time); July is before tracking.
+      assert.equal(r.monthsObserved, 2);
+      assert.equal(r.avgEssentials, 4250);
+      approx(r.liquid.months, liquidTotalEGP(s) / 4250);
+      approx(r.unassigned.months, Math.max(0, unassignedEGP(s)) / 4250);
+      approx(r.liquid.amount, liquidTotalEGP(s));
+    });
+
+    it('per currency: native money against the essentials spent in that currency', () => {
+      const s = ledger();
+      const r = analytics.runway(s, 'EGP', NOW);
+      const egp = r.perCurrency.find((c) => c.currency === 'EGP')!;
+      const sar = r.perCurrency.find((c) => c.currency === 'SAR')!;
+      assert.equal(egp.avgEssentials, 4250);
+      approx(egp.liquidMonths, egp.liquid / 4250);
+      // No SAR essentials were recorded, so there is nothing to divide by.
+      assert.equal(sar.avgEssentials, 0);
+      assert.equal(sar.liquidMonths, null);
+      assert.equal(sar.liquid, accountBalance(s, 'sar'));
+    });
+
+    it('SAR display converts the average as recorded and the money at today’s rate', () => {
+      const s = ledger();
+      const r = analytics.runway(s, 'SAR', NOW);
+      approx(r.avgEssentials, 4250 / 12.5);
+      approx(r.liquid.amount, liquidTotalEGP(s) / 12.5);
+      const moved = analytics.runway(at(s, 25), 'SAR', NOW);
+      approx(moved.avgEssentials, 4250 / 12.5); // history unchanged
+    });
+
+    it('needs a completed month of essentials', () => {
+      const s = withTx({ ...emptyState(), accounts: [account('egp', 'EGP', 9000)], settings: { ...emptyState().settings, trackingStartDate: '2026-10-01' } }, tx('only', 'expense', 'cat-essentials-rent', 3000, '2026-10-03'));
+      const r = analytics.runway(s, 'EGP', NOW);
+      assert.equal(r.monthsObserved, 0);
+      assert.equal(r.liquid.months, null);
+      assert.equal(r.unassigned.months, null);
+    });
+  });
+
+  describe('funds', () => {
+    it('projects completion at the average pace of the last completed months', () => {
+      const f = analytics.fundsProjection(ledger(), NOW).find((p) => p.fundId === 'F')!;
+      assert.equal(f.current, 3000);
+      assert.equal(f.pace, 1000); // Aug and Sep, 1,000 each
+      assert.equal(f.status, 'projected');
+      assert.equal(f.projectedDate, '2028-03-15'); // 17 more months from 15 Oct 2026
+      approx(f.pct, 0.15);
+      assert.deepEqual(f.cashByCurrency, { EGP: 3000, SAR: 0, USD: 0 });
+    });
+
+    it('a fund with no pace never finishes; a finished one says so; a new one is judged on this month', () => {
+      const s: FinanceState = {
+        ...ledger(),
+        funds: [
+          fund({ id: 'F', targetAmount: 20000, priority: 1 }),
+          fund({ id: 'stuck', targetAmount: 5000, priority: 2 }),
+          fund({ id: 'done', targetAmount: 1000, priority: 3 }),
+          fund({ id: 'fresh', targetAmount: 3000, priority: 4 }),
+        ],
+        fundMovements: [
+          ...ledger().fundMovements,
+          movement('d1', 'done', 1000, '2026-09-01'),
+          movement('n1', 'fresh', 500, '2026-10-02'),
+          // Stuck once had money, then gave it back.
+          movement('s1', 'stuck', 800, '2026-08-02'),
+          movement('s2', 'stuck', -800, '2026-09-02'),
+        ],
+      };
+      const by = (id: string) => analytics.fundsProjection(s, NOW).find((p) => p.fundId === id)!;
+      assert.equal(by('stuck').status, 'stalled');
+      assert.equal(by('stuck').projectedDate, null);
+      assert.equal(by('done').status, 'completed');
+      assert.equal(by('done').projectedDate, null);
+      assert.equal(by('fresh').pace, 500);
+      assert.equal(by('fresh').projectedDate, '2027-03-15'); // 2,500 left ÷ 500 = 5 months
+    });
+
+    it('shows cash by currency, linked gold, and whether it will miss its deadline', () => {
+      let s: FinanceState = {
+        ...emptyState(),
+        accounts: [account('egp', 'EGP', 10000), account('sar', 'SAR', 1000, 'SA')],
+        holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 5000, updatedAt: T0 }],
+        funds: [fund({ id: 'G', targetAmount: 100000, deadline: '2027-01-31', linkedHoldingIds: ['g1'] })],
+        fundMovements: [
+          movement('a', 'G', 1000, '2026-08-05'),
+          movement('b', 'G', 100, '2026-09-05', { currency: 'SAR' }),
+        ],
+      };
+      s = at(s, 12.5);
+      const p = analytics.fundsProjection(s, NOW)[0];
+      assert.deepEqual(p.cashByCurrency, { EGP: 1000, SAR: 100, USD: 0 });
+      assert.equal(p.linkedValue, 6000);
+      // 1,000 + 100 SAR (1,250) + the gold's 6,000 now; the pace comes from the cash movements.
+      assert.equal(p.current, 8250);
+      assert.equal(p.status, 'projected');
+      assert.equal(p.lateVsDue, true);
+      assert.equal(p.dueDate, '2027-01-31');
+    });
+  });
+
+  describe('insights', () => {
+    const ids = (list: analytics.Insight[]) => list.map((i) => i.id);
+
+    it('biggest category increase and a savings rate below your average', () => {
+      const s = ledger();
+      const list = analytics.insights(s, query(s, 'month'), NOW);
+      assert.deepEqual(ids(list), ['category-increase', 'savings-rate']);
+      const increase = list[0];
+      assert.ok(increase.text.includes('أكل وبقالة'));
+      assert.equal(increase.tone, 'attention');
+      assert.deepEqual(increase.target, { type: 'drill', filter: { type: 'expense', categoryIds: [CATEGORY_IDS.groceries] } });
+      assert.ok(list[1].text.includes('أقل من متوسطك'));
+      assert.deepEqual(list[1].target, { type: 'trend' });
+    });
+
+    it('a savings rate above your average is good news', () => {
+      const s = ledger();
+      const better = withTx(s, tx('bonus', 'income', CATEGORY_IDS.otherIncome, 6000, '2026-10-14'));
+      const list = analytics.insights(better, query(better, 'month'), NOW);
+      const rate = list.find((i) => i.id === 'savings-rate')!;
+      assert.equal(rate.tone, 'ok');
+      assert.ok(rate.text.includes('أعلى من متوسطك'));
+    });
+
+    it('one-time spending in the period, even when the toggle leaves it out of the totals', () => {
+      const s = ledger();
+      const q = { period: { kind: 'custom' as const, from: '2026-09-01', to: '2026-09-30' }, currency: 'EGP' as const, includeOneTime: false };
+      const list = analytics.insights(s, q, NOW);
+      const oneTime = list.find((i) => i.id === 'one-time')!;
+      assert.ok(oneTime);
+      assert.deepEqual(oneTime.target, { type: 'drill', filter: { type: 'expense', oneTimeOnly: true } });
+      // 4,000 of 9,500 in all.
+      assert.ok(oneTime.text.includes('4,000'));
+      assert.equal(analytics.insights(s, query(s, 'month'), NOW).some((i) => i.id === 'one-time'), false);
+    });
+
+    it('months where spending beat income', () => {
+      const s = withTx(ledger(), tx('big', 'expense', 'cat-lifestyle-gadgets', 9000, '2026-08-20'));
+      const over = analytics.insights(s, query(s, '3m'), NOW).find((i) => i.id === 'overspent-months')!;
+      assert.ok(over);
+      assert.ok(over.text.includes('أغسطس'));
+      assert.deepEqual(over.target, { type: 'trend' });
+      assert.equal(analytics.insights(ledger(), query(ledger(), '3m'), NOW).some((i) => i.id === 'overspent-months'), false);
+    });
+
+    it('a fund that is behind schedule, and gold as a large share of net worth', () => {
+      const s: FinanceState = {
+        ...ledger(),
+        funds: [...ledger().funds, fund({ id: 'late', name: 'جواز', targetAmount: 60000, deadline: '2027-03-31', priority: 2 })],
+        holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 100, karat: 24, purchaseCostEGP: 500000, updatedAt: T0 }],
+      };
+      const list = analytics.insights(s, query(s, 'month'), OCT_26);
+      const behind = list.find((i) => i.id === 'fund-behind')!;
+      assert.ok(behind.text.includes('جواز'));
+      assert.deepEqual(behind.target, { type: 'fund', fundId: 'late' });
+      const share = list.find((i) => i.id === 'gold-share')!;
+      assert.ok(share);
+      assert.deepEqual(share.target, { type: 'assets' });
+      // Mid-month the fund is only "pending".
+      assert.equal(analytics.insights(s, query(s, 'month'), NOW).some((i) => i.id === 'fund-behind'), false);
+    });
+
+    it('shows at most 5, most important first', () => {
+      const base = ledger();
+      const s: FinanceState = {
+        ...base,
+        funds: [...base.funds, fund({ id: 'late', name: 'جواز', targetAmount: 60000, deadline: '2027-03-31', priority: 2 })],
+        holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 100, karat: 24, purchaseCostEGP: 500000, updatedAt: T0 }],
+        // A big one-time purchase in October: spending beats income and it dominates.
+        transactions: [...base.transactions, tx('huge', 'expense', 'cat-essentials-home-setup', 5000, '2026-10-14', { oneTime: true })],
+      };
+      const list = analytics.insights(s, query(s, 'month'), OCT_26);
+      assert.equal(list.length, analytics.MAX_INSIGHTS);
+      assert.deepEqual(ids(list), ['category-increase', 'savings-rate', 'one-time', 'fund-behind', 'overspent-months']);
+    });
+
+    it('has nothing to say about a quiet period', () => {
+      const s = withTx({ ...emptyState(), settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' } }, tx('i', 'income', 'cat-income-salary', 1000, '2026-10-01'));
+      assert.deepEqual(analytics.insights(s, query(s, 'month'), NOW), []);
+    });
+  });
+
+  describe('drill-down', () => {
+    it('lists the transactions behind a filter, newest first, with their total', () => {
+      const s = ledger();
+      const q = query(s, 'sinceStart');
+      const dining = analytics.drillTransactions(s, q, { type: 'expense', categoryIds: ['cat-lifestyle-dining'] });
+      assert.deepEqual(dining.transactions.map((t) => t.id), ['c4', 'c5', 'b5', 'a4']);
+      assert.equal(dining.total, 300 + 1250 + 1000 + 500);
+      assert.deepEqual(analytics.drillTransactions(s, q, { type: 'asset_purchase' }).transactions.map((t) => t.id), ['b7']);
+      assert.deepEqual(analytics.drillTransactions(s, q, { type: 'expense', oneTimeOnly: true }).transactions.map((t) => t.id), ['b6']);
+      // The toggle hides one-time expenses from a plain bucket list.
+      const lean = analytics.drillTransactions(s, { ...q, includeOneTime: false }, { type: 'expense', bucket: 'essentials' });
+      assert.equal(lean.transactions.some((t) => t.id === 'b6'), false);
+      // Transfers never show up.
+      assert.equal(analytics.drillTransactions(s, q, { type: 'expense' }).transactions.some((t) => t.id === 'b8'), false);
+    });
+
+    it('round-trips through route params and rejects bad ones', () => {
+      const s = ledger();
+      const q = query(s, 'month', { currency: 'SAR', includeOneTime: false });
+      const filter: analytics.DrillFilter = { type: 'expense', bucket: 'lifestyle', excludeCategoryIds: ['a', 'b'], oneTimeOnly: true };
+      const parsed = analytics.parseDrillParams(analytics.drillParams(q, filter))!;
+      assert.deepEqual(parsed.filter, filter);
+      assert.equal(parsed.query.currency, 'SAR');
+      assert.equal(parsed.query.includeOneTime, false);
+      assert.deepEqual([parsed.query.period.from, parsed.query.period.to], ['2026-10-01', '2026-10-31']);
+      assert.equal(analytics.parseDrillParams({}), null);
+      assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), type: 'transfer' }), null);
+      assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), currency: 'USD' }), null);
+      assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), from: '2026-12-01' }), null);
+      assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), from: 'x' }), null);
+    });
+
+    it('describes what is being listed', () => {
+      const s = ledger();
+      assert.equal(analytics.describeFilter(s, { type: 'expense', categoryIds: [CATEGORY_IDS.groceries] }), 'أكل وبقالة');
+      assert.equal(analytics.describeFilter(s, { type: 'expense', bucket: 'giving' }), 'عطاء');
+      assert.equal(analytics.describeFilter(s, { type: 'asset_purchase' }), 'شراء ذهب');
+      assert.equal(analytics.describeFilter(s, { type: 'income', excludeCategoryIds: ['x'] }), 'دخل تاني');
+    });
+  });
+
+  describe('snapshots keep the breakdown analytics needs', () => {
+    it('new snapshots carry the breakdown and the rates, and old estimates are rebuilt with them', () => {
+      const s: FinanceState = {
+        ...emptyState(),
+        accounts: [account('egp', 'EGP', 1000), account('sar', 'SAR', 100, 'SA')],
+        holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 1, updatedAt: T0 }],
+        settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' },
+      };
+      const list = snapshots.syncedSnapshots(s, NOW)!;
+      const oct = list.at(-1)!;
+      assert.deepEqual(oct.breakdown, {
+        EG: { cashEGP: 1000, goldEGP: 6000, currenciesEGP: 0 },
+        SA: { cashEGP: 1250, goldEGP: 0, currenciesEGP: 0 },
+        liabilitiesEGP: 0,
+      });
+      assert.deepEqual(oct.ratesSnapshot, { SAR_EGP: 12.5, USD_EGP: 50 });
+      assert.ok(list.every((p) => p.breakdown && p.ratesSnapshot));
+      assert.equal(snapshots.syncedSnapshots({ ...s, netWorthSnapshots: list }, NOW), null);
+
+      // Snapshots from before: an estimate is worked out again, a recorded one is left alone.
+      const old = list.map(({ breakdown: _b, ratesSnapshot: _r, ...rest }) => rest);
+      const upgraded = snapshots.syncedSnapshots({ ...s, netWorthSnapshots: old.map((p) => (p.month === '2026-09' ? { ...p, estimated: undefined, netWorthEGP: 42 } : p)) }, NOW)!;
+      assert.equal(upgraded.find((p) => p.month === '2026-08')!.breakdown!.SA.cashEGP, 1250);
+      const kept = upgraded.find((p) => p.month === '2026-09')!;
+      assert.equal(kept.netWorthEGP, 42);
+      assert.equal(kept.breakdown, undefined);
+    });
+  });
+});
+
+// --- Analytics UI helpers ----------------------------------------------------------------
+
+describe('analytics UI helpers', () => {
+  it('formats chart numbers compactly', () => {
+    assert.deepEqual([950, 1000, 1500, 9990, 12400, 999999, 1250000, -2500].map(analyticsUi.compactNumber), [
+      '950',
+      '1k',
+      '1.5k',
+      '10k',
+      '12k',
+      '1000k',
+      '1.3M',
+      '−2.5k',
+    ]);
+  });
+
+  it('picks a round axis step and handles negative values', () => {
+    assert.equal(analyticsUi.niceStep(48000, 4), 20000);
+    assert.equal(analyticsUi.niceStep(10, 4), 2.5);
+    assert.equal(analyticsUi.niceStep(0, 4), 1);
+    assert.deepEqual(analyticsUi.chartAxis(0, 48000), { step: 20000, above: 3, below: 0 });
+    assert.deepEqual(analyticsUi.chartAxis(-3000, 10000), { step: 2500, above: 4, below: 2 });
+  });
+
+  it('words runway, change and projection', () => {
+    assert.equal(analyticsUi.runwayPhrase(null), '—');
+    assert.equal(analyticsUi.runwayPhrase(0.4), 'أقل من شهر');
+    assert.equal(analyticsUi.runwayPhrase(2), 'شهرين');
+    assert.equal(analyticsUi.runwayPhrase(3.04), '3 شهور');
+    assert.equal(analyticsUi.runwayPhrase(3.46), '3.5 شهر');
+    assert.equal(analyticsUi.runwayPhrase(14), '14 شهر');
+    assert.equal(analyticsUi.runwayPhrase(500), 'أكتر من 10 سنين');
+    assert.deepEqual(analyticsUi.changeText({ direction: 'up', changePct: 0.6, isNew: false }), { text: '↑ ⁦‎60%⁩', color: 'warning' });
+    assert.deepEqual(analyticsUi.changeText({ direction: 'down', changePct: -0.25, isNew: false }), { text: '↓ ⁦‎25%⁩', color: 'primary700' });
+    assert.equal(analyticsUi.changeText({ direction: 'up', changePct: null, isNew: true })!.text, 'جديد');
+    assert.equal(analyticsUi.changeText({ direction: 'flat', changePct: 0, isNew: false })!.text, '–');
+    assert.equal(analyticsUi.changeText({ direction: null, changePct: null, isNew: false }), null);
+    assert.equal(analyticsUi.projectionPhrase({ status: 'stalled', projectedDate: null, lateVsDue: false }), 'مش هيخلص بالمعدل ده');
+    assert.equal(analyticsUi.projectionPhrase({ status: 'completed', projectedDate: null, lateVsDue: false }), 'وصل للهدف');
+    assert.ok(analyticsUi.projectionPhrase({ status: 'projected', projectedDate: '2028-03-15', lateVsDue: false }).startsWith('هيخلص حوالي مارس'));
+    assert.ok(analyticsUi.projectionPhrase({ status: 'projected', projectedDate: '2028-03-15', lateVsDue: true }).endsWith('بعد الموعد'));
+    assert.equal(analyticsUi.truncateLabel('مساعدة الأهل في الشهر', 10), 'مساعدة ال…');
+    assert.equal(analyticsUi.truncateLabel('صدقة', 10), 'صدقة');
+  });
+
+  it('labels the periods', () => {
+    assert.equal(analyticsUi.periodLabel({ kind: 'month', from: '2026-10-01', to: '2026-10-31' }), 'أكتوبر ٢٠٢٦');
+    assert.equal(analyticsUi.periodLabel({ kind: '3m', from: '2026-08-01', to: '2026-10-31' }), 'أغسطس ٢٠٢٦ – أكتوبر ٢٠٢٦');
+    assert.ok(analyticsUi.periodLabel({ kind: 'custom', from: '2026-08-05', to: '2026-08-14' }).includes('–'));
+    assert.deepEqual(analyticsUi.PERIOD_OPTIONS.map((o) => o.value), ['month', '3m', '6m', 'year', 'sinceStart', 'custom']);
+  });
+
+  it('the narrow-screen stacked bar covers where the money went, not the categories', () => {
+    const flow: analytics.SpendingFlow = {
+      nodes: [
+        { id: 's', label: 'راتب', kind: 'source', value: 100, group: 'income', drill: null },
+        { id: 'b', label: 'أساسيات', kind: 'bucket', value: 60, group: 'essentials', drill: null },
+        { id: 'l', label: 'فايض', kind: 'leaf', value: 40, group: 'surplus', drill: null },
+        { id: 'c', label: 'إيجار', kind: 'category', value: 60, group: 'essentials', drill: null },
+      ],
+      links: [],
+      totalIn: 100,
+      totalOut: 100,
+      empty: false,
+    };
+    const segments = analyticsUi.stackedFlowSegments(flow);
+    assert.deepEqual(segments.map((s) => [s.node.id, s.pct]), [['b', 0.6], ['l', 0.4]]);
+    assert.deepEqual(analyticsUi.stackedFlowSegments({ ...flow, nodes: [] }), []);
+  });
+
+  it('lays the Sankey out right to left, inside its frame, with ribbons from source to target', () => {
+    const state: FinanceState = {
+      ...emptyState(),
+      settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' },
+      transactions: [
+        { id: 'i', type: 'income', amount: 10000, currency: 'EGP', accountId: 'a', categoryId: 'cat-income-salary', date: '2026-10-02', rateToEGP: 1, createdAt: T0, updatedAt: T0 },
+        { id: 'e1', type: 'expense', amount: 3000, currency: 'EGP', accountId: 'a', categoryId: 'cat-essentials-rent', date: '2026-10-03', rateToEGP: 1, createdAt: T0, updatedAt: T0 },
+        { id: 'e2', type: 'expense', amount: 1000, currency: 'EGP', accountId: 'a', categoryId: 'cat-lifestyle-dining', date: '2026-10-04', rateToEGP: 1, createdAt: T0, updatedAt: T0 },
+      ] as Transaction[],
+    };
+    const flow = analytics.spendingFlow(state, { period: analytics.resolvePeriod(state, 'month', NOW), currency: 'EGP', includeOneTime: true });
+    const margins = { left: 100, right: 70, top: 8, bottom: 8 };
+    const layout = sankeyLayout.layoutSankey(flow, 340, 300, margins);
+    const x = (id: string) => layout.nodes.find((n) => n.node.id === id)!;
+    // Money comes in on the right and flows left.
+    assert.ok(x('src:salary').x0 > x('bucket:essentials').x0);
+    assert.ok(x('bucket:essentials').x0 > x('cat:essentials:cat-essentials-rent').x0);
+    assert.deepEqual(layout.nodes.map((n) => n.column).sort(), [0, 1, 1, 1, 2, 2]);
+    for (const n of layout.nodes) {
+      // Mirrored: the layout's right margin is the left room (for category labels).
+      assert.ok(n.x0 >= margins.right - 0.5 && n.x1 <= 340 - margins.left + 0.5, n.node.id);
+      assert.ok(n.y0 >= margins.top - 0.5 && n.y1 <= 300 - margins.bottom + 0.5, n.node.id);
+    }
+    assert.equal(layout.links.length, flow.links.length);
+    for (const l of layout.links) {
+      assert.ok(l.path.startsWith(`M${l.source.x0},`));
+      // It ends on the target's right edge.
+      assert.ok(l.path.includes(` ${l.target.x1},`));
+      assert.ok(l.width >= 1);
+    }
+    // A bigger flow gets a thicker node (same scale across columns).
+    const height = (id: string) => x(id).y1 - x(id).y0;
+    assert.ok(height('bucket:essentials') > height('bucket:lifestyle'));
+    approx(height('src:salary') / 10000, height('bucket:essentials') / 3000);
   });
 });

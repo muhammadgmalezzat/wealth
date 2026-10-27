@@ -37,6 +37,7 @@ export default function RootLayout() {
         <Stack.Screen name="due" options={{ title: 'المستحقات', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="categories" options={{ title: 'البنود', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="review" options={{ title: 'مراجعة الشهر', headerBackTitle: 'رجوع' }} />
+        <Stack.Screen name="period-transactions" options={{ title: 'المعاملات', headerBackTitle: 'رجوع' }} />
       </Stack>
       <RecurringRunner />
       <PriceRunner />

@@ -2,6 +2,8 @@ import type { Category } from './types';
 
 // Stable ids so migrations and seeds can reference specific categories.
 export const CATEGORY_IDS = {
+  salary: 'cat-income-salary',
+  freelance: 'cat-income-freelance',
   otherIncome: 'cat-income-other',
   groceries: 'cat-essentials-groceries',
 } as const;

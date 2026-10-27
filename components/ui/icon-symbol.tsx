@@ -18,9 +18,10 @@ const MAPPING = {
   'paperplane.fill': 'send',
   'chevron.left.forwardslash.chevron.right': 'code',
   'chevron.right': 'chevron-right',
-  // Tab bar (Calm Wealth): الرئيسية · المعاملات · الخطة · الأصول · الصناديق
+  // Tab bar (Calm Wealth): الرئيسية · المعاملات · الخطة · التحليلات · الأصول · الصناديق
   'list.bullet.rectangle': 'receipt-long',
   calendar: 'event-note',
+  'chart.bar': 'bar-chart',
   'wallet.pass': 'account-balance-wallet',
   target: 'track-changes',
 } as IconMapping;

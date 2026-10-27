@@ -46,6 +46,9 @@ Islamic-finance constraint: the model deliberately has **no interest/APR fields*
 | Local notifications | `expo-notifications` | 57.0.21 (due reminders; native module, needs a build) |
 | Date picker | `@react-native-community/datetimepicker` | 9.1.0 (native only; web uses `<input type="date">`) |
 | Animations | `react-native-reanimated` / `react-native-worklets` | 4.5.1 / 0.10.1 |
+| Charts | `react-native-gifted-charts` | 1.4.81 (bars, line, donut; JS + SVG, no Skia) |
+| SVG | `react-native-svg` / `expo-linear-gradient` | 15.15.4 / 57.0.2 (native modules, in Expo Go; gifted-charts' peers; **need a build**) |
+| Sankey layout | `d3-sankey` (+ `@types/d3-sankey`) | 0.12.3 (geometry only, pure JS; drawn with react-native-svg) |
 | Language | `typescript` | 6.0.3 (`strict`) |
 | Tests | `tsx` + `node:test` | 4.23.15 / Node 22 |
 | Lint | `eslint` + `eslint-config-expo` | 9.x / 57.0.2 |
@@ -87,10 +90,11 @@ Notes:
 app/                        expo-router routes
   _layout.tsx               Root Stack: (tabs), fund/[id], settings, recurring, due, categories,
                             review; mounts <RecurringRunner/>, <PriceRunner/>, <SnapshotRunner/> and <AppLockGate/>
-  (tabs)/_layout.tsx        Bottom tabs (order): index, transactions, plan, assets, goals
+  (tabs)/_layout.tsx        Bottom tabs (order): index, transactions, plan, analytics, assets, goals
   (tabs)/index.tsx          الرئيسية — dashboard
   (tabs)/transactions.tsx   المعاملات — month list grouped by day
   (tabs)/plan.tsx           الخطة — monthly plan
+  (tabs)/analytics.tsx      التحليلات — charts and insights (sticky controls)
   (tabs)/assets.tsx         الأصول — accounts & holdings
   (tabs)/goals.tsx          الصناديق — funds
   fund/[id].tsx             Fund detail (stack)
@@ -99,6 +103,7 @@ app/                        expo-router routes
   due.tsx                   المستحقات — due inbox (stack)
   categories.tsx            البنود — category management (stack)
   review.tsx                مراجعة الشهر — monthly review, ?month=YYYY-MM (stack)
+  period-transactions.tsx   المعاملات — the transactions behind a tapped chart node (stack)
 
 components/
   AppLockGate.tsx           Biometric/PIN lock overlay (Modal)
@@ -109,6 +114,9 @@ components/
   assets/HoldingSheet       Holding details (value, cost, value difference, linked fund) + delete
   assets/assetsUi.ts        Pure: LOCATION_LABELS, ACCOUNT_TYPE_ICONS, holdingTitle, signedDifference, groupAccounts
   categories/CategorySheet  Add / edit / archive / restore / delete a category
+  analytics/                Analytics tab: analyticsUi.ts (pure helpers), sankeyLayout.ts (d3-sankey geometry),
+                            SankeyChart, TrendSection, BreakdownSection, NetWorthSection, MoneySections
+                            (money map · runway · funds · insights), AnalyticsControls, common.tsx
   dashboard/                SafeToSpendCard, MonthlySnapshot, RecurringCard (جاي قريب),
                             NetWorthCard (+ change vs last month), NextActionsCard,
                             homeInsights.ts (pure Home logic)
@@ -146,6 +154,7 @@ store/                      ALL business logic lives here (pure, no React)
   nextActions.ts            Next Best Action engine (rules, priority, snooze)
   snapshots.ts              Monthly net worth snapshots (backfill, upsert, change)
   review.ts                 Monthly review numbers
+  analytics.ts              Analytics tab numbers (periods, Sankey, trend, breakdown, net worth series, money map, runway, funds, insights, drill-down)
   errors.ts                 FinanceValidationError + typed codes
   migrations.ts             v0 → v7 migration chain
   backup.ts                 Backup file format, AES-GCM/PBKDF2, open/validate/preview
@@ -172,7 +181,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencies.ts (DEFAULT_RATES), market.ts
-tests/logic.test.ts         219 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         270 tests over store/*, utils/* and the pure UI helpers
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
 .easignore                  EAS upload filter (keeps store/seed.local.ts)
@@ -185,7 +194,8 @@ app.json / eas.json         Expo + EAS config
 Root `Stack` (`app/_layout.tsx`): `(tabs)` (no header), `fund/[id]` (title "الصندوق", replaced by
 the fund name; back "رجوع"),
 `settings` (title "الإعدادات"), `recurring` ("المعاملات المتكررة"), `due` ("المستحقات"),
-`categories` ("البنود"), `review` ("مراجعة الشهر", replaced by "مراجعة {month}").
+`categories` ("البنود"), `review` ("مراجعة الشهر", replaced by "مراجعة {month}"), `period-transactions`  ("المعاملات", replaced by what is listed).
+Tabs, in order: الرئيسية · المعاملات · الخطة · التحليلات · الأصول · الصناديق (six; labels get tight on a 390 px screen).
 `<RecurringRunner/>`, `<PriceRunner/>` and `<SnapshotRunner/>` (render nothing) and `<AppLockGate/>` sit above everything.
 `<StatusBar style="dark" />` (light theme only, dark icons on the light background).
 
@@ -551,6 +561,79 @@ Exchange rates and gold prices come from free, key-less APIs called straight fro
 - `netWorthChange(state, now)`: live net worth − last month's snapshot (`pct` = change ÷
   |start|, null from 0); null without the snapshot.
 
+### Analytics (`app/(tabs)/analytics.tsx`, `store/analytics.ts`, `components/analytics/`)
+
+The "التحليلات" tab (between الخطة and الأصول). **Every number comes from pure, unit-tested selectors
+in `store/analytics.ts`**; the components only lay them out. Charts: `react-native-gifted-charts`
+(grouped / stacked bars, line, donut), a Sankey whose geometry comes from `d3-sankey` and is drawn
+with `react-native-svg`. No Skia / victory-native. Works on web (same code).
+
+**Controls** (sticky: `Screen`'s `header`): period chips (الشهر ده / 3 شهور / 6 شهور / السنة / من بداية
+التتبع / مخصص), display currency (ج.م / ر.س), "اشمل المصاريف اللي لمرة واحدة" (default on). "مخصص" opens
+a FormSheet with two `PastDateField`s. State is local to the screen. The same
+`AnalyticsQuery { period, currency, includeOneTime }` feeds every selector.
+
+**Periods** (`resolvePeriod`): `month` = this calendar month; `3m` / `6m` / `year` (= 12) = that many
+calendar months up to and including this one; `sinceStart` = `trackingStartDate` → end of this month;
+`custom` = as given (swapped if reversed). Presets never start before `trackingStartDate`; a custom
+period that starts earlier **explicitly covers** those rows (and only then). `previousPeriod` = the equal
+span right before (same number of months; same number of days for custom); `null` when it would start
+before tracking (`monthOf(from) < monthOf(trackingStartDate)` for month-based ones, `from < start` for
+custom) and for `sinceStart` — the UI then shows no arrows. A partly tracked first month counts as a month.
+
+**Conversion rules** (the app-wide ones, see "Conversion rules"): transactions and fund movements are shown
+in the display currency **as recorded** (`transactionAmountIn` / `movementAmountIn`: same currency
+untouched, otherwise their own `rateToEGP` and `ratesSnapshot`), so history never moves when settings
+rates change and a SAR expense in a SAR display is exact. Current valuations — the money map, runway
+amounts, today's net worth point — use today's rates. Net worth snapshots use the rates they were
+valued at (`NetWorthSnapshot.ratesSnapshot`; today's for the current month and for snapshots that kept none).
+Transfers are never spending; `asset_purchase` (gold) is never an expense, it is the "ذهب" destination.
+Expenses are bucketed by their category (`essentials` for a category that is gone); a transaction before
+tracking is out of a preset.
+
+| # | Section | Selector | Rules |
+|---|---|---|---|
+| 1 | فلوسك راحت فين | `spendingFlow` | Sources: راتب (`cat-income-salary`), فري لانس (`cat-income-freelance`), دخل تاني (every other income category), **من الصناديق** (net fund movements < 0 in the period), **من رصيدك** (out > in). Destinations: أساسيات / رفاهيات / عطاء (expenses by bucket), **صناديق** (net fund movements > 0), **ذهب** (asset purchases), **فايض** (in > out). Exactly one of من رصيدك / فايض can be > 0, so `totalIn === totalOut` (tested). Each source is spread over the destinations in proportion to their size, then every bucket → its **top 5 categories**, the rest as "تاني". Node `drill` = the filter for the transactions behind it (null for funds, surplus, balance). |
+| 2 | الاتجاه الشهري | `monthlyTrend` | Per month of the period: income, expense, net, savings rate (null without income), `overspent` (expense > income); `averageSavingsRate` over months with income. |
+| 3 | المصروف على إيه | `spendingBreakdown` | Bucket shares and every category ranked: amount, `pct`, previous-period amount, `changePct` ((now − before) ÷ before; null from 0), `direction` (`up` / `down` / `flat` within ±1 %), `isNew`. Same period, currency and toggle for both sides. |
+| 4 | صافي الثروة عبر الوقت | `netWorthSeries` | One point per snapshot (+ today for the current month): cash / gold / currencies and the net total (after liabilities, which belong to Egypt). `location`: all / EG / SA. Estimated points can be hidden (`includeEstimated`) and are otherwise marked `*`. Snapshots without a breakdown (recorded before it existed) show only their total under "all" and are skipped (`skipped`) per location. |
+| 5 | خريطة فلوسك | `moneyMap` | Liquid by currency (native amount + value in the display currency), by location (cash / gold / currencies), gold by karat (grams, value, cost, P&L) and `goldShare` of net worth. Current valuations. |
+| 6 | فلوسك تكفي لحد إمتى | `runway` | Average monthly **essentials** (one-time excluded) of the last 3 *completed* months (only months with essentials, none before tracking) → months the **unassigned** money and **all liquid** money last. Per currency: that currency's balance ÷ the essentials spent *in that currency*. `monthsObserved = 0` → "محتاج شهر بيانات على الأقل". |
+| 7 | الصناديق | `fundsProjection` | Per active fund: `fundProgress`, cash by currency, linked gold, `pace` = net movements (valued in the fund currency at today's rate) per month over the completed months of the last 3 the fund existed in (a fund started this month: this month), `projectedDate` = today + ⌈remaining ÷ pace⌉ months (`addMonthsToDate`), `status` completed / projected / stalled ("مش هيخلص بالمعدل ده"), `lateVsDue`, `behind` (`fundStatus`). |
+| 8 | ملاحظات | `insights` | Rule-based, at most `MAX_INSIGHTS = 5`, in this priority: (1) biggest category increase (≥ 20 % and ≥ 5 % of the period's spending; needs a comparable previous period), (2) savings rate ≥ 5 points above / below your average since tracking began (≥ 2 months with income), (3) one-time spending ≥ 10 % of spending (whatever the toggle says), (4) a fund `behind`, (5) months where spending > income, (6) gold ≥ 30 % of net worth. Each has a `target`: `drill` (transactions), `fund`, `assets`, or `trend` (scrolls to the trend section via `Screen`'s `scrollRef`). |
+
+**Drill-down**: `drillTransactions(state, query, filter)` (`DrillFilter { type: income | expense | asset_purchase,
+bucket?, categoryIds?, excludeCategoryIds?, oneTimeOnly? }`) returns the transactions of the period newest
+first and their total — which equals the tapped node's value (tested for every node). `drillParams` /
+`parseDrillParams` carry it in the route (`/period-transactions?from&to&currency&oneTime&type[&bucket&cats&
+notCats&oneTimeOnly]`, invalid → an error state); the screen lists them grouped by day (rows open
+`TransactionSheet`). Taps on the Sankey go through plain `Pressable`s laid over the picture (SVG press
+handlers don't work on web). `dest:funds` opens /goals.
+
+**Sankey** (`SankeyChart`, `sankeyLayout.ts`): `d3-sankey` (`sankeyLeft`, node width 10, padding 12) lays out
+columns sources → buckets/funds/gold/surplus → categories; `layoutSankey` mirrors x so money enters on the
+right and flows left (the app is RTL) and builds each ribbon's centre path. Labels: sources on the right
+of their node, categories on the left (name + compact amount; name only when the node is thin), the
+middle column as a haloed chip over the node. Margins are in the layout's own (unmirrored) coordinates:
+`left` = room for the source labels, `right` = room for the category labels. Ribbons are coloured by their
+target (`FLOW_COLOR` → design tokens). Below `MIN_SANKEY_WIDTH` (300 px of container) it falls back to a
+stacked bar of the destinations (`stackedFlowSegments`) with a list.
+
+**gifted-charts notes**: the line over bars (`lineConfig`) adds half a bar to its first point and a bar to
+each step, so `initialSpacing` / `spacing` are `gap/2…` and `pitch − barWidth` to sit on the bars; its default
+SVG circles log a web-only dev warning, so points are plain views (`customDataPoint`). Axes use
+`chartAxis` (round step, sections above / below zero for negative nets).
+
+**Empty states**: no income/expense since tracking → one EmptyState for the tab; per section
+"محتاج شهر بيانات على الأقل" (trend, breakdown, net worth with < 2 points, runway) or its own message (no
+funds, no insights).
+
+**Net worth snapshots** carry what these charts need: `breakdown { EG, SA: { cashEGP, goldEGP,
+currenciesEGP }, liabilitiesEGP }` and `ratesSnapshot` (optional, additive: **no migration**, data stays v7).
+`syncedSnapshots` rewrites the current month's snapshot once if it lacks them, and works **estimated**
+snapshots from before out again with them (they were estimates anyway); recorded ones without a
+breakdown are left alone. New: `netWorthBreakdown(state)`, `NetWorthFigures.breakdown`.
+
 ### Assets, Categories, Settings, Backup, Lock (Calm Wealth phase 6)
 
 - Assets / Categories / Settings: see the route table. Balances first; value differences are
@@ -752,7 +835,7 @@ Every synced entity has `updatedAt` (set only by operations).
 - **MonthlyPlan** `{ id = plan-YYYY-MM, month, currency, expectedIncome, lines: PlanLine[], fundContributions: PlannedContribution[], createdAt, updatedAt }`
   - `PlanLine { categoryId, limit, kind: fixed|flexible }`, `PlannedContribution { fundId, amount }` (plan currency)
 - **Settings** `{ exchangeRates {SAR_EGP, USD_EGP, lastUpdated}, goldPrice24kEGP, goldPrice21kEGP, goldPriceUpdatedAt, trackingStartDate, deviceId, lastBackupAt?, appLockEnabled?, dueNotificationsEnabled?, lastUsed?, priceSource? ('auto' | 'manual', missing = manual; a fresh install is set to 'auto' on first launch), localPremiumPct? (missing = 0), lastPriceFetchAt?, lastPriceFetchError? ('network' | 'fx' | 'gold'), fxSource? ('open.er-api' | 'exchangerate.fun'), lastGoldUsdPerOunce? }`
-- **NetWorthSnapshot** (v7) `{ id = nw-YYYY-MM, month, netWorthEGP, liquidEGP, holdingsEGP, takenAt, estimated?, updatedAt }` — one per month; the current month follows the live figures, `estimated` marks months filled in afterwards.
+- **NetWorthSnapshot** (v7) `{ id = nw-YYYY-MM, month, netWorthEGP, liquidEGP, holdingsEGP, breakdown? { EG, SA: { cashEGP, goldEGP, currenciesEGP }, liabilitiesEGP }, ratesSnapshot?, takenAt, estimated?, updatedAt }` — one per month; the current month follows the live figures, `estimated` marks months filled in afterwards.
 - **ActionDismissal** (v7) `{ id = actionId, actionId, until (ISO), updatedAt }` — a snoozed Next Best Action.
 - **MonthlyReview** (v7) `{ id = review-YYYY-MM, month, completedAt, updatedAt }` — a finished review.
 - **Tombstone** `{ entity: SyncEntity, id, deletedAt }` — deletion log for a future sync. `SyncEntity` also covers `netWorthSnapshot`, `actionDismissal`, `monthlyReview` (v7).
@@ -1061,7 +1144,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 13. Build & release
 
-- `app.json`: `version` **1.1.0** (bumped for `expo-notifications`; 1.0.0 builds can't take 1.1.0 updates), `android.package`/`ios.bundleIdentifier` `com.muhammad404.wealth`,
+- `app.json`: `version` **1.2.0** (bumped for `react-native-svg` + `expo-linear-gradient`, the Analytics tab's charts; 1.1.0 builds can't take 1.2.0 updates — a **new build** is required, then `eas update` as usual; before that 1.1.0 for `expo-notifications`), `android.package`/`ios.bundleIdentifier` `com.muhammad404.wealth`,
   `owner: muhammad404`, `extra.eas.projectId`, `runtimeVersion: { policy: "appVersion" }`,
   `updates.url` (EAS project), `checkAutomatically: "ON_LOAD"`, `userInterfaceStyle: "light"`,
   `web.output: "single"`, plugins incl. `expo-notifications`.
@@ -1080,7 +1163,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts` (219 tests, ~20 s; the encrypted round
+`npm run test:logic` → `tsx --test tests/logic.test.ts` (270 tests, ~20 s; the encrypted round
 trip uses the real 200k-iteration KDF). Suites: migrations (v0–v7), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,
@@ -1102,7 +1185,12 @@ currency exact after a rate change, other currencies at their own snapshot, sugg
 impact / fund allocations unaffected by rate changes, records without a snapshot, snapshot kept
 or retaken on edit, same-currency sinking payment), live prices (FX and gold math with a premium,
 response validation, fallback, error codes, timeout, apply in auto / never in manual, 6-hour
-throttle, premium re-pricing, historical amounts unchanged, action rule skip).
+throttle, premium re-pricing, historical amounts unchanged, action rule skip), analytics (periods and
+previous periods, filters before the tracking start, one-time and currency toggles with history unaffected by
+rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previous-period change, net worth
+series by location and estimated points, money map, runway, fund projections, every insight trigger and the
+limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
+stacked fallback, Sankey layout).
 
 Adding tests: import pure modules (`@/store/*`, `@/utils/*` — never React Native ones), build
 state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
@@ -1124,6 +1212,11 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 - `DEFAULT_TRACKING_START_DATE` is the owner's date ('2026-08-05') for every install.
 - `fundStatus` counts any movement dated this month — e.g. a migrated opening allocation — as
   this month's contribution.
+- Analytics: charts are LTR (time runs left to right, numbers stay Western); there is no pinch / tooltip on the bars
+  (exact numbers are in the lists under them). Net worth snapshots recorded between v7 and the Analytics tab have no
+  breakdown, so they only show under \"الكل\" and are skipped per location. The savings-rate comparison and runway need
+  a month of history. The previous-period comparison treats a partly tracked first month as a full month.
+  Insight thresholds are fixed constants in \store/analytics.ts\. Six tabs are crowded on narrow phones.
 - Net worth snapshots of past months that were never recorded live (everything before v7, or
   months the app wasn't opened) are estimates at the rates and gold price of when they were
   filled in, so "change vs last month" right after the upgrade mostly shows that month's cash
@@ -1188,7 +1281,8 @@ transfers (auto or confirm, due inbox, plan integration, local reminders), categ
 (add/rename/move/archive) and a better "أضف بند".
 
 **Done (data v7):** Next Best Action engine on Home, net worth change vs last month, monthly
-review. **Next:** carry-over of unspent plan money, liabilities UI.
+review, live prices, per-currency fund money, the Analytics tab. **Next:** carry-over of unspent plan money,
+liabilities UI.
 
 **V2:** allocation engine (where should new money go), priority engine
 across funds/plan, server sync (using `updatedAt` + tombstones + `deviceId`).

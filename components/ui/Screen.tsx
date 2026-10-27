@@ -1,4 +1,4 @@
-import type { ReactElement, ReactNode } from 'react';
+import type { ReactElement, ReactNode, Ref } from 'react';
 import { Platform, ScrollView, StyleSheet, View, type RefreshControlProps, type StyleProp, type ViewStyle } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -21,6 +21,8 @@ interface ScreenProps {
   // Applied to the ScrollView content (scroll) or the inner container (no scroll).
   contentStyle?: StyleProp<ViewStyle>;
   refreshControl?: ReactElement<RefreshControlProps>;
+  // The scroll view (scroll screens), for jumping to a section.
+  scrollRef?: Ref<ScrollView>;
   // Fixed above the content (doesn't scroll).
   header?: ReactNode;
   // Absolutely positioned layer above the content, e.g. a Fab.
@@ -31,7 +33,7 @@ interface ScreenProps {
 export const SCREEN_TOP_GAP = 8;
 export const SCREEN_BOTTOM_GAP = 16;
 
-export function Screen({ scroll = false, edges = ['top'], contentStyle, refreshControl, header, overlay, children }: ScreenProps) {
+export function Screen({ scroll = false, edges = ['top'], contentStyle, refreshControl, scrollRef, header, overlay, children }: ScreenProps) {
   const insets = useSafeAreaInsets();
   const top = edges.includes('top') ? insets.top + SCREEN_TOP_GAP : 0;
   const bottomInset = edges.includes('bottom') ? insets.bottom + SCREEN_BOTTOM_GAP : 0;
@@ -45,6 +47,7 @@ export function Screen({ scroll = false, edges = ['top'], contentStyle, refreshC
       {header}
       {scroll ? (
         <ScrollView
+          ref={scrollRef}
           style={styles.fill}
           contentContainerStyle={[styles.readable, contentStyle, { paddingBottom: bottom }]}
           refreshControl={refreshControl}

@@ -1,7 +1,8 @@
+import { snapshotRates } from '@/utils/currency';
 import { monthOf, shiftMonth, toMonthKey } from '@/utils/dates';
 import { netWorthAsOf, netWorthEGP, netWorthFigures, type NetWorthFigures } from './selectors';
 import { daysInMonth } from './shared';
-import type { FinanceState, NetWorthSnapshot } from './types';
+import type { FinanceState, NetWorthBreakdown, NetWorthSnapshot, RatesSnapshot } from './types';
 
 // Monthly net worth snapshots. Pure functions only.
 //
@@ -24,11 +25,18 @@ export function snapshotFor(state: Pick<State, 'netWorthSnapshots'>, month: stri
 
 const monthEnd = (month: string) => `${month}-${String(daysInMonth(month)).padStart(2, '0')}`;
 
-function snapshot(month: string, figures: NetWorthFigures, at: string, estimated: boolean): NetWorthSnapshot {
+function snapshot(
+  month: string,
+  figures: NetWorthFigures,
+  at: string,
+  estimated: boolean,
+  rates: RatesSnapshot
+): NetWorthSnapshot {
   return {
     id: snapshotIdFor(month),
     month,
     ...figures,
+    ratesSnapshot: snapshotRates(rates),
     takenAt: at,
     updatedAt: at,
     ...(estimated ? { estimated: true } : {}),
@@ -45,27 +53,48 @@ export function missingPastSnapshots(state: State, now: Date): NetWorthSnapshot[
   for (let n = MAX_BACKFILL_MONTHS; n >= 1; n--) {
     const month = shiftMonth(current, -n);
     if (month < startMonth || snapshotFor(state, month)) continue;
-    result.push(snapshot(month, netWorthAsOf(state, monthEnd(month)), at, true));
+    result.push(snapshot(month, netWorthAsOf(state, monthEnd(month)), at, true, state.settings.exchangeRates));
   }
   return result;
 }
 
-const same = (a: NetWorthFigures, b: NetWorthFigures) =>
+const sameBreakdown = (a: NetWorthBreakdown, b: NetWorthBreakdown) =>
+  Math.abs(a.liabilitiesEGP - b.liabilitiesEGP) < EPSILON &&
+  (['EG', 'SA'] as const).every((where) =>
+    (['cashEGP', 'goldEGP', 'currenciesEGP'] as const).every((part) => Math.abs(a[where][part] - b[where][part]) < EPSILON)
+  );
+
+// Whether a stored snapshot already says what the live figures say (and carries the breakdown
+// and rates analytics needs, which older snapshots lack).
+const same = (a: NetWorthSnapshot, b: NetWorthFigures) =>
   Math.abs(a.netWorthEGP - b.netWorthEGP) < EPSILON &&
   Math.abs(a.liquidEGP - b.liquidEGP) < EPSILON &&
-  Math.abs(a.holdingsEGP - b.holdingsEGP) < EPSILON;
+  Math.abs(a.holdingsEGP - b.holdingsEGP) < EPSILON &&
+  !!a.ratesSnapshot &&
+  !!a.breakdown &&
+  sameBreakdown(a.breakdown, b.breakdown);
+
+// Estimated snapshots from before the breakdown existed are estimates anyway: work them out
+// again, now with the breakdown and the rates they are valued at.
+function upgradedEstimates(state: State, now: Date): NetWorthSnapshot[] {
+  const at = now.toISOString();
+  return state.netWorthSnapshots
+    .filter((s) => s.estimated && (!s.breakdown || !s.ratesSnapshot) && s.month < toMonthKey(now))
+    .map((s) => snapshot(s.month, netWorthAsOf(state, monthEnd(s.month)), at, true, state.settings.exchangeRates));
+}
 
 // The snapshot list with missing past months filled in and the current month's snapshot set to
 // the live figures, oldest first; null when nothing would change (so callers skip the write).
 export function syncedSnapshots(state: State, now: Date): NetWorthSnapshot[] | null {
   const current = toMonthKey(now);
-  const missing = missingPastSnapshots(state, now);
+  const missing = [...missingPastSnapshots(state, now), ...upgradedEstimates(state, now)];
   const live = netWorthFigures(state);
   const existing = snapshotFor(state, current);
   const currentChanged = !existing || existing.estimated || !same(existing, live);
   if (missing.length === 0 && !currentChanged) return null;
-  const kept = state.netWorthSnapshots.filter((s) => !(currentChanged && s.month === current));
-  const added = currentChanged ? [snapshot(current, live, now.toISOString(), false)] : [];
+  const replaced = new Set(missing.map((s) => s.month));
+  const kept = state.netWorthSnapshots.filter((s) => !replaced.has(s.month) && !(currentChanged && s.month === current));
+  const added = currentChanged ? [snapshot(current, live, now.toISOString(), false, state.settings.exchangeRates)] : [];
   return [...kept, ...missing, ...added].sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
 }
 

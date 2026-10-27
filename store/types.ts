@@ -247,12 +247,31 @@ export interface MonthlyPlan extends Synced {
 // recomputed from what existed at the month's end, valued at the rates/prices of `takenAt`
 // (there is no price history).
 // One per month; the id derives from the month (nw-YYYY-MM).
+// What net worth is made of, in EGP, per location (Egypt / Saudi): cash in accounts, gold, and
+// currency holdings. Liabilities have no location and are subtracted from Egypt, so
+// EG + SA - liabilitiesEGP is the net worth.
+export interface LocationBreakdown {
+  cashEGP: number;
+  goldEGP: number;
+  currenciesEGP: number;
+}
+
+export interface NetWorthBreakdown {
+  EG: LocationBreakdown;
+  SA: LocationBreakdown;
+  liabilitiesEGP: number;
+}
+
 export interface NetWorthSnapshot extends Synced {
   id: string;
   month: string; // 'YYYY-MM'
   netWorthEGP: number;
   liquidEGP: number;
   holdingsEGP: number;
+  // Optional: snapshots taken before the analytics tab have none (see snapshotDetail).
+  breakdown?: NetWorthBreakdown;
+  // The rates the EGP figures were valued at, to show them in another currency as they were.
+  ratesSnapshot?: RatesSnapshot;
   takenAt: string;
   estimated?: boolean;
 }
