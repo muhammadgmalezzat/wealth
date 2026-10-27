@@ -20,6 +20,8 @@ interface ListRowProps {
   subtitle?: string;
   icon?: IconName;
   iconTone?: IconTone;
+  // Overrides the icon glyph color (e.g. a chart series color); the tile keeps the tone's ground.
+  iconColor?: ColorToken;
   // Left side: Money, Switch, StatusChip…
   trailing?: ReactNode;
   // Shows a chevron (pointing left, the "forward" direction in RTL).
@@ -41,6 +43,7 @@ export function ListRow({
   subtitle,
   icon,
   iconTone = 'neutral',
+  iconColor,
   trailing,
   chevron,
   archived,
@@ -55,7 +58,7 @@ export function ListRow({
     <>
       {icon && (
         <View style={[styles.iconTile, { backgroundColor: colors[tone.bg] }]}>
-          <MaterialIcons name={icon} size={20} color={colors[tone.fg]} />
+          <MaterialIcons name={icon} size={20} color={colors[iconColor ?? tone.fg]} />
         </View>
       )}
       <View style={styles.text}>

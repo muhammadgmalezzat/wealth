@@ -46,6 +46,7 @@ Islamic-finance constraint: the model deliberately has **no interest/APR fields*
 | Local notifications | `expo-notifications` | 57.0.21 (due reminders; native module, needs a build) |
 | Date picker | `@react-native-community/datetimepicker` | 9.1.0 (native only; web uses `<input type="date">`) |
 | Animations | `react-native-reanimated` / `react-native-worklets` | 4.5.1 / 0.10.1 |
+| Blur | `expo-blur` | ~57.0.3 (iOS frosted glass; native module, **needs the 1.2.0 build**) |
 | Charts | `react-native-gifted-charts` | 1.4.81 (bars, line, donut; JS + SVG, no Skia) |
 | SVG | `react-native-svg` / `expo-linear-gradient` | 15.15.4 / 57.0.2 (native modules, in Expo Go; gifted-charts' peers; **need a build**) |
 | Sankey layout | `d3-sankey` (+ `@types/d3-sankey`) | 0.12.3 (geometry only, pure JS; drawn with react-native-svg) |
@@ -68,6 +69,7 @@ npx expo start            # scan the QR with Expo Go (SDK 57) on Android/iOS
 npx expo start --web      # web build (single-page output; no server rendering)
 npm run test:logic        # pure-logic test suite (node:test via tsx)
 npm run lint              # expo lint
+npm run brand             # re-render the app icon / splash PNGs from assets/brand/*.svg
 npx tsc --noEmit          # type check (must be 0 errors)
 npx expo-doctor           # dependency/config health (must pass)
 ```
@@ -90,14 +92,14 @@ Notes:
 app/                        expo-router routes
   _layout.tsx               Root Stack: (tabs), fund/[id], settings, recurring, due, categories,
                             review; mounts <RecurringRunner/>, <PriceRunner/>, <SnapshotRunner/> and <AppLockGate/>
-  (tabs)/_layout.tsx        Bottom tabs (order): index, transactions, plan, analytics, assets, goals
+  (tabs)/_layout.tsx        Bottom tabs (order): index, transactions, plan, analytics, goals
   (tabs)/index.tsx          الرئيسية — dashboard
   (tabs)/transactions.tsx   المعاملات — month list grouped by day
   (tabs)/plan.tsx           الخطة — monthly plan
   (tabs)/analytics.tsx      التحليلات — charts and insights (sticky controls)
-  (tabs)/assets.tsx         الأصول — accounts & holdings
   (tabs)/goals.tsx          الصناديق — funds
   fund/[id].tsx             Fund detail (stack)
+  assets.tsx                الأصول — accounts & holdings (stack; from Home's net worth card and Settings)
   settings.tsx              Settings (stack)
   recurring.tsx             المعاملات المتكررة — rules list (stack)
   due.tsx                   المستحقات — due inbox (stack)
@@ -181,7 +183,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencies.ts (DEFAULT_RATES), market.ts
-tests/logic.test.ts         270 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         274 tests over store/*, utils/* and the pure UI helpers
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
 .easignore                  EAS upload filter (keeps store/seed.local.ts)
@@ -195,9 +197,9 @@ Root `Stack` (`app/_layout.tsx`): `(tabs)` (no header), `fund/[id]` (title "ال
 the fund name; back "رجوع"),
 `settings` (title "الإعدادات"), `recurring` ("المعاملات المتكررة"), `due` ("المستحقات"),
 `categories` ("البنود"), `review` ("مراجعة الشهر", replaced by "مراجعة {month}"), `period-transactions`  ("المعاملات", replaced by what is listed).
-Tabs, in order: الرئيسية · المعاملات · الخطة · التحليلات · الأصول · الصناديق (six; labels get tight on a 390 px screen).
+Tabs, in order: الرئيسية · المعاملات · الخطة · التحليلات · الصناديق (five). الأصول is a stack route (`assets`, title "الأصول"), opened by tapping the net worth card on Home and from the "الأصول" row at the top of Settings' planning group; Analytics' gold-share insight opens it too.
 `<RecurringRunner/>`, `<PriceRunner/>` and `<SnapshotRunner/>` (render nothing) and `<AppLockGate/>` sit above everything.
-`<StatusBar style="dark" />` (light theme only, dark icons on the light background).
+`<StatusBar style="light" />` (dark only, light icons on the dark background).
 
 ### Layout & safe-area conventions
 
@@ -239,7 +241,7 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 | `/` (`index`) | الرئيسية | Calm Wealth Home (see "Home" below): greeting + date + settings icon; safe to spend (hero) → /plan; early-month "راجع الشهر اللي فات" card → /review; next best action card + "كمان X حاجات" list (store/nextActions.ts); هذا الشهر (income / spent / saved to funds / invested) → /transactions; جاي قريب → /recurring, /due; up to 3 funds → /fund/[id], "عرض كل الصناديق" → /goals; money available to plan (Assign/Cover sheets); net worth + change vs last month; last 5 transactions (tap to edit, "+ معاملة"). |
 | `/transactions` | المعاملات | MonthSwitcher; MonthlySnapshot for the selected month (no link); filter chips الكل/مصروف/دخل/تحويل/ذهب (UI-only, by type); days (FlatList), each a header row (day label · day net in textSecondary, never red) and one ListGroup of TransactionRows (tap → edit); EmptyState for an empty month, a one-line message for a filter with no match; "+" FAB → TransactionSheet. |
 | `/plan` | الخطة | Calm Wealth plan (see "Plan" below): MonthSwitcher; "خطة الشهر" + تعديل; MetricGroup الدخل المتوقع / المخطط / المتبقي للتخطيط + status line; safe-to-spend info row (ثابت/مرن explained); PlanLineRows by bucket (tap → LineSheet, saved via savePlan); "+ أضف بند" (AddLineSheet); fund contributions (tap → fund); spending outside the plan → /transactions; المعاملات المتكررة row. No plan: EmptyState + اقترح من مصروفي / انسخ خطة … / ابدأ من الصفر. Past months: "مراجعة {month}" row → /review?month= (chip "اتراجع" once done). |
-| `/assets` | الأصول | Hero "إجمالي الأصول" (`totalAssetsEGP`) + MetricGroup سيولة / ذهب واستثمارات (gold cell) / التزامات (only when liabilities exist, text color); الحسابات ("+ حساب") grouped مصر / السعودية, archived ones in a collapsed "مؤرشفة" group (tap → EditAccountSheet); الذهب (total grams) as ListRows (value; cost · signed value difference in textSecondary; "مربوط بـ {fund}" gold chip; tap → HoldingSheet) or EmptyState → TransactionSheet on ذهب; other holdings / الالتزامات only when present; "+" FAB → add account / opening gold. Web QA: Metro serves `/assets` itself, open this tab from Home. |
+| `/assets` | (stack) | Hero "إجمالي الأصول" (`totalAssetsEGP`) + MetricGroup سيولة / ذهب واستثمارات (gold cell) / التزامات (only when liabilities exist, text color); الحسابات ("+ حساب") grouped مصر / السعودية, archived ones in a collapsed "مؤرشفة" group (tap → EditAccountSheet); الذهب (total grams) as ListRows (value; cost · signed value difference in textSecondary; "مربوط بـ {fund}" gold chip; tap → HoldingSheet) or EmptyState → TransactionSheet on ذهب; other holdings / الالتزامات only when present; "+" FAB → add account / opening gold. Web QA: Metro serves `/assets` itself, open this tab from Home. |
 | `/goals` | الصناديق | Calm Wealth funds (see "Funds, Recurring, Due" below): title; UnassignedPanel; MetricGroup إجمالي المحجوز / مطلوب الشهر ده / صناديق; sections الطوارئ · الأهداف · مصاريف دورية (empty ones skipped) of FundCards; EmptyState "لسه معندكش صناديق." + أنشئ صندوق طوارئ (FundSheet with emergency preselected); "+" FAB → FundSheet (goal). |
 | `/fund/[id]` | (stack) | Hero (type + icon, current من target, bar with gold part, % + status chip, due + months left) · next step · actions (one primary: إضافة مبلغ, or اتدفعت for sinking) · facts ListGroup · linked gold (+ "ربط ذهب" → FundSheet when gold is linkable) · movements (newest first, last); header "تعديل" → FundSheet (edit / delete). `?allocate=1` (Home's fund actions) opens the allocate sheet. |
 | `/settings` | (stack) | Groups: السوق (Segment تلقائي / يدوي. Auto: read-only rows ريال ← جنيه, دولار ← جنيه, gold 24k / 21k + 18k computed; source + "آخر تحديث منذ …"; the last fetch error; gold note; ExchangeRate-API attribution link; "فرق السوق المحلي %" input; secondary "تحديث الأسعار الآن". Manual: the rate and gold inputs as before) · التخطيط (tracking start + the single primary "حفظ الإعدادات" for rates/gold/date; إدارة البنود, المعاملات المتكررة, تنبيهات المستحقات switch) · البيانات (backup status "آخر نسخة احتياطية" + age, overdue chip + Home's sentence, secondary "تصدير نسخة"; استعادة نسخة; استيراد البيانات الافتتاحية) · الأمان (قفل التطبيق switch) · عن التطبيق (version; collapsed "تفاصيل تقنية": runtime / channel / update id). `?export=1` opens the export sheet (Home's backup action). |
@@ -248,7 +250,7 @@ bar and the Android navigation bar, so insets must be handled explicitly. Rules:
 | `/review` | (stack) | Monthly review, `?month=YYYY-MM` (default last month): الملخص · الخطة مقابل الفعلي · أكتر 5 بنود صرف + مصاريف مرة واحدة · الصناديق · خطوتك الجاية (suggest / copy next month's plan, وزّع الفايض); primary "خلّصت المراجعة" marks it reviewed. See "Monthly review" below. |
 | `/categories` | (stack) | Dense ListGroups أساسيات · رفاهيات · عطاء · دخل · مؤرشفة (empty sections skipped): name, neutral "أساسي" chip on defaults, chevron; archived rows muted (with their old bucket); tap → CategorySheet (name; مصروف/دخل on create; bucket required for expenses with an inline error; أرشفة / استرجاع secondary; احذف البند destructive — only for unused custom ones); "+" FAB. |
 
-### Design system (Calm Wealth)
+### Design system (Calm Wealth → Dark Glassy Wealth)
 
 The single source of truth for how the app looks. Every screen was migrated in phases 1–6; phase 7
 removed the legacy aliases (`Colors`, `FinanceColors`, `Fonts`), the Expo template hooks
@@ -256,13 +258,14 @@ removed the legacy aliases (`Colors`, `FinanceColors`, `Fonts`), the Expo templa
 hex colors and no raw font sizes, weights, radii or shadows — only the tokens below.
 
 **Tokens (`constants/theme.ts`)**
-- **Colors** — `palette.light` → `colors` (type `ThemeColors`, keys = `ColorToken`); `colors` is
-  the single switch point for a future dark palette. Grounds: `background` #F8F7F3, `surface`
-  #FFFFFF, `surfaceSubtle`, `border`, `borderStrong`, `progressTrack`. Text: `text`,
-  `textSecondary`, `textMuted` (placeholders/disabled only — fails 4.5:1). Brand green
-  `primary900…primary50`, `onPrimary`. Gold: `gold`, `goldSurface`, `goldText`. States:
-  `warning`/`warningSurface`, `danger`/`dangerSurface`. `scrim`. Need a new tint? Add one named
-  token to the palette — never `color + '22'`.
+- **Colors** — `palette.dark` → `colors` (type `ThemeColors`, keys = `ColorToken`); dark is the only
+  appearance. Grounds: `background` #0A1014, `surface` #15232A, `surfaceSubtle`, `border`, `borderStrong`,
+  `progressTrack`; glass: `glassSubtle` / `glass` / `glassStrong` / `glassBorder`. Text: `text`,
+  `textSecondary`, `textMuted` (placeholders/disabled; still ≥ 4.5:1). Emerald `primary900…primary50`,
+  `primary`, `primarySoft`, **`onPrimary` (dark text on emerald fills)**. Gold: `gold`, `goldSurface`,
+  `goldText`. States: `warning`/`warningSurface`, `danger`/`dangerSurface`. Charts: `chartSky` /
+  `chartViolet` / `chartRose`. `scrim`. Full table in "Dark Glassy Wealth" below. Need a new tint? Add one
+  named token to the palette — never `color + '22'`.
 - **`space`** xxs 2 · xs 4 · sm 8 · md 12 · lg 16 · xl 20 · xxl 24 · xxxl 32 · huge 40. In-between
   values are sums (`space.xs + space.xxs` = 6).
 - **`radius`** sm 8 · md 12 · lg 16 · xl 24 · pill 999 (also for dots and discs).
@@ -272,7 +275,7 @@ hex colors and no raw font sizes, weights, radii or shadows — only the tokens 
   amountInputCompact 40/50, sheetTitle 18/26. Money is rendered with `fontVariant: ['tabular-nums']`.
 - **`weight`** regular 400 · medium 500 · semibold 600 · bold 700 (for a style that changes only
   the weight of a `type` entry, e.g. a selected chip).
-- **`shadow.card`**, **`shadow.raised`** (the only two; the tab bar has none). `opacity` pressed
+- **`shadow.card`**, **`shadow.raised`** (the only two; on dark they are only a soft lift — depth comes from the hairline and the glass). `opacity` pressed
   0.85 / disabled 0.4. **`size`** touchMin 44, fab 56, icon 24, progress 8, readableMax 640.
 - System fonts only; icons = MaterialIcons (+ `IconSymbol`).
 - Hex values exist only in `constants/theme.ts` (palette, shadowColor) and `app.json` (splash /
@@ -305,16 +308,18 @@ reordered inside Arabic text. Inputs of numbers stay LTR (AmountInput).
 | Component | Props | Notes |
 |---|---|---|
 | `AppText` | `variant` (TypeVariant, default body), `color` (ColorToken, default text), `align` (default right), + Text props | Base of all primitives |
-| `Card` | `variant` default \| subtle \| hero, `style` | default: surface, 1px border, radius.lg, padding lg, shadow.card · subtle: surfaceSubtle, flat · hero: radius.xl, padding xl |
+| `GlassSurface` | `variant` subtle \| regular \| strong \| hero, `blur?` (iOS only), `radius?`, `style` | Translucent fill + hairline + faint highlight; hero has an emerald light. Always readable without blur |
+| `AppBackground` | — | Midnight backdrop + soft emerald glow; rendered by `Screen` / `FormSheet` / the lock screen |
+| `Card` | `variant` default \| subtle \| hero, `style`, `blur?` | A `GlassSurface`: default `strong` (nearly opaque, dense data), padding lg, hairline, shadow.card · subtle: flat translucent inset · hero: radius.xl, padding xl, emerald light |
 | `Button` | `label`, `onPress`, `variant` primary \| secondary \| tertiary \| destructive, `icon?`, `disabled`, `loading`, `block`, `accessibilityLabel?` | minHeight 48, radius.md; primary pressed → primary900. One primary per screen or sheet (exception: each Due row's "تم") |
-| `Chip` / `ChipRow` | `label`, `selected`, `disabled`, `onPress` | pill, minHeight 36 + hitSlop → 44; selected primary50 / primary700 border / primary800 semibold |
+| `Chip` / `ChipRow` | `label`, `selected`, `disabled`, `onPress` | pill, minHeight 36 + hitSlop → 44; selected primarySoft / primary700 border / primary800 semibold |
 | `StatusChip` | `label` (required), `tone` ok \| attention \| danger \| gold \| neutral, `icon?` | Status never by color alone |
-| `Segment` | `options`, `value` (may be undefined), `onChange` | Track surfaceSubtle, active surface + shadow.card + primary800 bold |
+| `Segment` | `options`, `value` (may be undefined), `onChange` | Track surfaceSubtle, active primarySoft + primary700 border + primary800 bold |
 | `ProgressBar` | `progress` 0–1, `tone` normal \| attention \| over, `goldPortion?`, `height` | Fills primary600 / warning / danger from the right; gold part first; `accessibilityRole="progressbar"` |
 | `Money` (+ `formatMoney` in pure `formatMoney.ts`) | `amount`, `currency`, `size` hero \| lg \| md \| row, `tone` default \| positive \| danger \| muted, `showSign?`, `converted?` {amount, currency}, `align` | Never colored by sign; tabular nums; `LRI` + symbol + `LRM` + sign + number + `PDI`. Never clipped: native shrinks to fit (`adjustsFontSizeToFit`, min 0.6); web wraps (`word-break: break-all`). Use `formatMoney` for money inside a sentence |
 | `AmountInput` | `value`, `onChangeText`, `onChangeAmount?` (parseAmount), `currency`, `hint?` {tone neutral \| attention, text}, `allowZero`, `autoFocus`, `accessibilityLabel?` | type.amountInput (amountInputCompact when long), centred |
 | `FormField` | `label`, `helper?`, `error?`, children (input) | Error: danger border + dangerSurface + icon + text. `FormInput`/`FieldLabel` in FormSheet share the look: borderStrong, radius.md, minHeight 48, body, placeholder textMuted |
-| `ListRow` / `ListGroup` | `title`, `subtitle?`, `subtitleLines` (2), `icon?`, `iconTone` neutral \| ok \| gold, `trailing?`, `accessory?` (chips under the subtitle), `titleColor?`, `chevron?`, `archived?`, `onPress?`, `accessibilityLabel?` | 36px icon tile, minHeight 56; group = surface, radius.lg, border, hairline separators |
+| `ListRow` / `ListGroup` | `title`, `subtitle?`, `subtitleLines` (2), `icon?`, `iconTone` neutral \| ok \| gold, `iconColor?` (glyph color token, e.g. a chart series color), `trailing?`, `accessory?` (chips under the subtitle), `titleColor?`, `chevron?`, `archived?`, `onPress?`, `accessibilityLabel?` | 36px icon tile, minHeight 56; group = surface, radius.lg, border, hairline separators |
 | `SectionHeader` | `title`, `actionLabel?`, `onAction?`, `trailing?` (non-pressable info) | section type + tertiary action |
 | `MetricGroup` | `metrics: {label, value, tone?: 'gold'}[]`, `accessibilityLabel?` | One grouped surface, equal cells, hairline dividers. When a cell would be narrower than 96px it stacks into label/value rows |
 | `InsightCard` | `tone` ok \| attention \| danger, `message`, `icon?`, `actionLabel?`, `onAction?` | Grounds primary50 / warningSurface / dangerSurface |
@@ -350,7 +355,7 @@ step. Icon-only buttons always carry an Arabic `accessibilityLabel`; every touch
 **Device QA checklist (owner, on the phone).** Web QA covers layout at 320/360/414 px, desktop
 and 150% zoom; these need a real device (Android first):
 - Edge-to-edge: no screen or sheet content under the status bar or the navigation bar (gesture
-  and 3-button navigation); FABs sit above the navigation bar on الأصول / المعاملات / الصناديق /
+  and 3-button navigation); FABs sit above the navigation bar on الأصول (stack FAB) / المعاملات / الصناديق /
   المتكررة / البنود.
 - Keyboard: open each sheet (معاملة, بند, خطة، صندوق, توزيع, تغطية, حساب, ذهب, متكرر, تأكيد, نسخة,
   استعادة), focus the last field — it must stay visible above the keyboard and "حفظ" reachable.
@@ -365,13 +370,102 @@ and 150% zoom; these need a real device (Android first):
 - Export a backup and restore it (file picker / share sheet).
 - Pull to refresh where offered; switching tabs keeps scroll position sensible.
 
-### Navigation theme & tab bar (Calm Wealth phase 2)
+### Dark Glassy Wealth (1.2.0 — the only appearance)
 
-- `app/_layout.tsx` passes a light React Navigation theme built from tokens (`background` and
-  `card` = colors.background, `text`, `border`, `primary` = primary700); the color-scheme hook is
-  no longer used (light only). Header titles and back behavior unchanged.
-- `app/(tabs)/_layout.tsx`: same 5 tabs, order and `HapticTab`; bar on colors.background, hairline
-  top border, no elevation/shadow; active primary700, inactive textSecondary; labels
+The app is dark-only (no switcher): `app.json` `userInterfaceStyle: "dark"`, `<StatusBar style="light"/>`,
+React Navigation `DarkTheme` built from the tokens. Because every screen reads only tokens, the palette in
+`constants/theme.ts` (`palette.dark` → `colors`) is the single place the look lives; the old token **names**
+were kept and their meaning mapped onto the dark palette (`primary700` = the emerald, `primary900` = its
+pressed shade, `primary800` = light emerald for text on a soft emerald ground, `primary50` = that soft ground,
+`surface` / `surfaceSubtle` = solid card / inset, `border*` = translucent hairlines).
+
+| Token | Value | Use |
+|---|---|---|
+| `background` / `backgroundElevated` | `#0A1014` / `#101A20` | screen ground, sticky bars |
+| `surface` / `surfaceElevated` (= `surfaceSubtle`) | `#15232A` / `#1B2D34` | solid cards, lists / insets |
+| `glassSubtle` / `glass` / `glassStrong` | `rgba(27,45,52,.40 / .62 / .84)` | translucent fills |
+| `glassBorder`, `border`, `divider`, `borderStrong` | `rgba(210,245,231,.13 / .13 / .10 / .28)` | hairlines |
+| `glassHighlight`, `emeraldGlow` | `rgba(233,245,240,.07)`, `rgba(40,197,154,.16)` | card top highlight, backdrop glow |
+| `text` / `textSecondary` / `textMuted` | `#E9F5F0` / `#A7B8B2` / `#81958F` | text (muted is still ≥ 4.5:1) |
+| `primary` (= `primary700`), `primaryPressed` (= `primary900`), `primarySoft` (= `primary50`) | `#28C59A`, `#19A981`, `rgba(40,197,154,.13)` | emerald |
+| `onPrimary` | `#06231A` | **dark** text/icons on emerald fills (7.6:1; white would be 2:1) |
+| `gold`, `goldText`, `goldSurface` | `#D8AD62`, `#E3BB74`, `rgba(216,173,98,.13)` | gold holdings only |
+| `success`, `warning`, `danger` (+ `*Surface`) | `#28C59A`, `#F2BD69`, `#EF8585` | states; red only for genuine problems |
+| `chartSky`, `chartViolet`, `chartRose` | `#6BAED6`, `#A99BD8`, `#D79AB5` | chart hues next to emerald / gold |
+
+Contrast is **tested** (`dark theme contrast` in `tests/logic.test.ts`): text, secondary, muted, emerald, gold,
+warning and danger are ≥ 4.5:1 on every ground; `onPrimary` ≥ 7:1 on the emerald and ≥ 4.5:1 pressed; each
+coloured text is ≥ 4.5:1 on its own soft ground; chart colours are ≥ 3:1 on the card.
+
+- **`GlassSurface`** (`components/ui/`): `variant` subtle | regular | strong | hero, `blur?`, `radius?`. A
+  translucent fill + hairline + faint top gradient highlight (hero: emerald light and an emerald hairline).
+  The fill is **always** drawn, so text stays readable without blur. `blur` adds `expo-blur`'s `BlurView`
+  (`tint="dark"`) on **iOS only**; Android and web keep the translucent fill. Blur is not used per list row.
+- **`AppBackground`**: the shared backdrop (midnight + a very soft emerald glow that fades in/out, so there is no
+  hard edge under a stack header), static, behind everything. `Screen`, `FormSheet` and the lock screen render it.
+- **`Card`** is now a `GlassSurface` (default → `strong`, nearly opaque, for dense financial data; subtle;
+  hero). `ListGroup` / `MetricGroup` stay solid `surface` (cheap in long lists).
+- **Primary actions**: `Button` primary / `Fab` / `Chip` filled states use `onPrimary` dark text. `Segment` active =
+  `primarySoft` + emerald border. `Switch` thumbs are `text`, tracks emerald / `borderStrong`.
+- **Inputs**: every `TextInput` (`FormInput`, `AmountInput`) sets `keyboardAppearance="dark"`, `placeholderTextColor`
+  = `textMuted`, `selectionColor` / `cursorColor` = emerald; the web amount field drops the browser focus ring.
+  **Date pickers**: `themeVariant="dark"` + emerald `accentColor` (iOS); Android's dialog follows the dark app
+  theme; web `<input type="date">` uses `colorScheme: dark`.
+- **System chrome**: stack headers (`headerStyle` = background, light tint, no shadow, `contentStyle` background
+  so there is no white flash), `StatusBar` light. Android navigation bar: with edge-to-edge (always on in SDK 57)
+  the bar is transparent and the dark app theme (`userInterfaceStyle: dark`) makes its buttons light, so
+  **`expo-navigation-bar` is not needed and was not installed**. `app.json`: splash (both modes) and the
+  Android adaptive-icon background are `#0A1014` (the adaptive `backgroundImage` was removed so the colour
+  applies); version unchanged (1.2.0).
+- **Home**: the safe-to-spend card is the hero (`Card variant="hero"`); the other Home cards, the monthly
+  snapshot, recurring, funds, unassigned panel, net worth and recent transactions all pick the dark look from the
+  tokens / `Card`. Normal expenses stay neutral; no calculation changed.
+- **Analytics**: chart colours come from the tokens — `FLOW_COLOR`: income emerald, essentials `chartSky`,
+  lifestyle `chartViolet`, giving `chartRose`, funds `primary900`, gold `gold`, surplus `textMuted`, balance
+  `warning` (gold is only for gold). Bars income = emerald, spending = `chartSky`, net line = `text`; net worth
+  stack cash emerald / gold / currencies `chartSky` with a `text` line. Each chart sits in a `ChartCard` (glass,
+  tight padding); axes use `textSecondary`, gridlines `border`, the x-axis `borderStrong`; the sticky controls are
+  `glassStrong`. Calculations are untouched. The narrow-screen Sankey fallback (stacked bar + list) colors each
+  row's icon with its bar segment's `FLOW_COLOR` via `ListRow.iconColor` (gold keeps the gold tone).
+- **Tab bar**: a floating glass bar — `tabBarBackground` is a `GlassSurface` (strong, `radius.xl`) and the bar is
+  inset (`marginHorizontal` md, `marginBottom` sm) but **stays in the layout**, so it never covers content or
+  the add buttons. Active = emerald, inactive = `textSecondary`.
+
+### App identity: name, icon, splash (`assets/brand/`, `scripts/brand.mjs`, 1.2.0)
+
+- **Display name** `expo.name` = **حصّالة** (Arabic for piggy bank). **Unchanged on purpose** (changing them breaks
+  install-over and OTA): `slug` `wealth`, `android.package` / `ios.bundleIdentifier` `com.muhammad404.wealth`, the
+  EAS `projectId`, `owner`, `scheme` `wealth`. Also deliberately unchanged because they are data identifiers, not
+  names: the AsyncStorage keys (`@wealth_finance_state…`), the backup file's `app: 'wealth'` marker and the
+  `wealth-backup-YYYY-MM-DD.json` file name (`store/backup.ts`, tested), the `package.json` name. Strings that
+  show the name to the user were updated: the Face ID permission text (`app.json`), the lock screen title
+  (`AppLockGate`), the biometric prompt (`utils/appLock.ts`) and the invalid-backup error
+  (`utils/errorMessages.ts`).
+- **Mark**: a minimal piggy bank facing left (forward in RTL) in emerald `#28C59A` with a gold `#D8AD62` coin
+  above its slot, on `#0A1014`. No text. The shape lives in one file, `assets/brand/mark.svg`; the eye, the slot
+  and the coin's inner ring are real holes (SVG masks), so they show whatever is behind (also in the monochrome
+  icon).
+- **`npm run brand`** (`scripts/brand.mjs`, dev dependency `sharp`) composes and renders every image from
+  `mark.svg` into `assets/images/`: `icon.png` (1024, full-bleed dark ground with a faint emerald glow, mark
+  scaled 1.22×), `android-icon-foreground.png` (transparent, mark at scale 1), `android-icon-monochrome.png`
+  (single white silhouette for Android 13 themed icons), `splash-icon.png` (transparent mark), `favicon.png`
+  (48 px, mark 1.4×). `npm run brand -- <dir>` also writes 1024 / 192 / 48 px icon previews, a splash mock-up
+  (width read from `app.json`) and a monochrome preview into `<dir>`. Colors and scales are constants at the top
+  of the script. It **fails** if the mark leaves the adaptive-icon safe zone (circle of 66/108 of the canvas,
+  313 px radius; currently 311 px). Re-run after editing and commit the PNGs.
+- **`app.json`**: `icon` → `icon.png`; `android.adaptiveIcon` = `foregroundImage` + `monochromeImage` +
+  `backgroundColor #0A1014` (no `backgroundImage`); `expo-splash-screen` plugin `image` `splash-icon.png`,
+  `imageWidth` 300, `resizeMode contain`, `backgroundColor` and `dark.backgroundColor` both `#0A1014`;
+  `web.favicon`. The Expo template images (including the unused `android-icon-background.png`) are gone.
+  Changing any of this is **native config**, so it ships with the 1.2.0 build (not via `eas update`).
+
+### Navigation theme & tab bar (Calm Wealth phase 2; dark in 1.2.0)
+
+- `app/_layout.tsx` passes `DarkTheme` adjusted from tokens (`background` and `card` = colors.background,
+  `text`, `border` = divider, `primary` = emerald) plus Stack `screenOptions` (dark header, no shadow,
+  `contentStyle`); the color-scheme hook is not used (dark only). Header titles and back behavior unchanged.
+- `app/(tabs)/_layout.tsx`: 5 tabs (الرئيسية · المعاملات · الخطة · التحليلات · الصناديق), order and `HapticTab`;
+  a floating glass bar (see "Dark Glassy Wealth"), no elevation/shadow; active emerald, inactive textSecondary; labels
   `type.micro` size/weight (no fixed lineHeight — it clipped Arabic glyphs); icons 24
   (`size.icon`). Web only: bar height 58 + bottom padding 6 (web has no bottom inset and the
   default 48px clipped the labels' descent).
@@ -563,7 +657,7 @@ Exchange rates and gold prices come from free, key-less APIs called straight fro
 
 ### Analytics (`app/(tabs)/analytics.tsx`, `store/analytics.ts`, `components/analytics/`)
 
-The "التحليلات" tab (between الخطة and الأصول). **Every number comes from pure, unit-tested selectors
+The "التحليلات" tab (between الخطة and الصناديق). **Every number comes from pure, unit-tested selectors
 in `store/analytics.ts`**; the components only lay them out. Charts: `react-native-gifted-charts`
 (grouped / stacked bars, line, donut), a Sankey whose geometry comes from `d3-sankey` and is drawn
 with `react-native-svg`. No Skia / victory-native. Works on web (same code).
@@ -1146,7 +1240,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 - `app.json`: `version` **1.2.0** (bumped for `react-native-svg` + `expo-linear-gradient`, the Analytics tab's charts; 1.1.0 builds can't take 1.2.0 updates — a **new build** is required, then `eas update` as usual; before that 1.1.0 for `expo-notifications`), `android.package`/`ios.bundleIdentifier` `com.muhammad404.wealth`,
   `owner: muhammad404`, `extra.eas.projectId`, `runtimeVersion: { policy: "appVersion" }`,
-  `updates.url` (EAS project), `checkAutomatically: "ON_LOAD"`, `userInterfaceStyle: "light"`,
+  `updates.url` (EAS project), `checkAutomatically: "ON_LOAD"`, `userInterfaceStyle: "dark"`,
   `web.output: "single"`, plugins incl. `expo-notifications`.
 - `eas.json` (`appVersionSource: remote`): `development` (dev client, internal), `preview`
   (internal **APK**, channel `preview`), `production` (autoIncrement, channel `production`).
@@ -1163,7 +1257,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts` (270 tests, ~20 s; the encrypted round
+`npm run test:logic` → `tsx --test tests/logic.test.ts` (274 tests, ~20 s; the encrypted round
 trip uses the real 200k-iteration KDF). Suites: migrations (v0–v7), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,
@@ -1190,7 +1284,7 @@ previous periods, filters before the tracking start, one-time and currency toggl
 rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previous-period change, net worth
 series by location and estimated points, money map, runway, fund projections, every insight trigger and the
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
-stacked fallback, Sankey layout).
+stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
 
 Adding tests: import pure modules (`@/store/*`, `@/utils/*` — never React Native ones), build
 state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
@@ -1214,9 +1308,10 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
   this month's contribution.
 - Analytics: charts are LTR (time runs left to right, numbers stay Western); there is no pinch / tooltip on the bars
   (exact numbers are in the lists under them). Net worth snapshots recorded between v7 and the Analytics tab have no
-  breakdown, so they only show under \"الكل\" and are skipped per location. The savings-rate comparison and runway need
+  breakdown, so they only show under "الكل" and are skipped per location. The savings-rate comparison and runway need
   a month of history. The previous-period comparison treats a partly tracked first month as a full month.
-  Insight thresholds are fixed constants in \store/analytics.ts\. Six tabs are crowded on narrow phones.
+  Insight thresholds are fixed constants in `store/analytics.ts`.
+- Dark theme: native blur only on iOS (Android / web use the translucent fill); not validated on a device or in Expo Go (web at 320 / 390 / 414 px only). The launcher / splash artwork is still the Expo template (`assets/images/*`), now on a dark background; the stacked-bar fallback list in Analytics uses neutral icon tiles (not colour-matched to the bar). On the dev server, /assets can't be loaded by URL (Metro serves its own `/assets` path); open it from Home. 
 - Net worth snapshots of past months that were never recorded live (everything before v7, or
   months the app wasn't opened) are estimates at the rates and gold price of when they were
   filled in, so "change vs last month" right after the upgrade mostly shows that month's cash
@@ -1321,7 +1416,7 @@ on flexible lines ÷ days left for per-day; reports ignore tx before trackingSta
 recurring: processDue (auto, idempotent, current rate) after hydration + on foreground, confirm
 rules → /due inbox (تم / تخطّي), recurring rules feed planSuggestion (fixed lines + income).
 
-Screens: tabs الرئيسية/المعاملات/الخطة/الأصول/الصناديق + stack fund/[id], settings, recurring, due,
+Screens: tabs الرئيسية/المعاملات/الخطة/التحليلات/الصناديق + stack assets, fund/[id], settings, recurring, due,
 categories.
 Backups: AES-256-GCM, PBKDF2-SHA256 200k, AAD-bound header, restore via migration chain,
 pre-restore snapshot. App lock via expo-local-authentication. Local due reminders via

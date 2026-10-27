@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    The Hassala mark: a piggy bank facing left (the "forward" direction in RTL) with a gold coin
+    dropping into its slot. Single source of truth: scripts/brand.mjs composes every icon from this
+    file. Keep it inside a 626px circle around (512,512) so Android's adaptive-icon crop never
+    cuts it (the script checks this). Only two colors: emerald #28C59A and gold #D8AD62; the eye
+    and the slot are real holes (masks), so they show whatever is behind the icon.
+  -->
+  <defs>
+    <mask id="pig-holes" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff" />
+      <circle cx="352" cy="522" r="18" fill="#000" />
+      <rect x="457" y="424" width="130" height="24" rx="12" fill="#000" />
+    </mask>
+    <mask id="coin-holes" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff" />
+      <circle cx="522" cy="285" r="42" fill="none" stroke="#000" stroke-width="10" />
+    </mask>
+  </defs>
+  <g id="mark" transform="translate(-30 8)">
+    <g id="pig" mask="url(#pig-holes)" fill="#28C59A">
+      <!-- body -->
+      <ellipse cx="522" cy="565" rx="235" ry="175" />
+      <!-- snout -->
+      <rect x="262" y="530" width="110" height="104" rx="38" />
+      <!-- ear -->
+      <path d="M398 440 L418 366 L486 412 Z" stroke="#28C59A" stroke-width="30" stroke-linejoin="round" />
+      <!-- legs -->
+      <rect x="395" y="690" width="84" height="100" rx="32" />
+      <rect x="590" y="690" width="84" height="100" rx="32" />
+      <!-- tail -->
+      <path d="M752 540 C812 524 832 470 792 448" fill="none" stroke="#28C59A" stroke-width="28" stroke-linecap="round" />
+    </g>
+    <g id="coin" mask="url(#coin-holes)">
+      <circle cx="522" cy="285" r="68" fill="#D8AD62" />
+    </g>
+  </g>
+</svg>

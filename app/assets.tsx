@@ -206,8 +206,9 @@ export default function AssetsScreen() {
   return (
     <Screen
       scroll
+      edges={['bottom']}
       contentStyle={styles.content}
-      overlay={<Fab placement="tab" onPress={() => openModal()} accessibilityLabel="إضافة أصل" />}>
+      overlay={<Fab placement="stack" onPress={() => openModal()} accessibilityLabel="إضافة أصل" />}>
       {/* ── Hero ── */}
       <Card variant="hero" style={styles.hero}>
         <AppText variant="secondary" color="textSecondary">

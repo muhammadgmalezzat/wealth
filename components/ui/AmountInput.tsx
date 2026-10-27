@@ -1,6 +1,6 @@
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import type { ComponentProps } from 'react';
-import { StyleSheet, TextInput, View } from 'react-native';
+import { Platform, StyleSheet, TextInput, View } from 'react-native';
 
 import { colors, radius, space, type } from '@/constants/theme';
 import type { CurrencyCode } from '@/store/types';
@@ -52,6 +52,9 @@ export function AmountInput({
           keyboardType="decimal-pad"
           placeholder="0"
           placeholderTextColor={colors.textMuted}
+          selectionColor={colors.primary}
+          cursorColor={colors.primary}
+          keyboardAppearance="dark"
           autoFocus={autoFocus}
           accessibilityLabel={accessibilityLabel}
           style={[styles.input, value.length > 7 && styles.inputSmall]}
@@ -89,6 +92,8 @@ const styles = StyleSheet.create({
     // In the style too: react-native-web ignores the textAlign prop on inputs.
     textAlign: 'center',
     fontVariant: ['tabular-nums'],
+    // Web: no white browser focus ring on dark (the number itself is the focus).
+    ...(Platform.OS === 'web' ? ({ outlineStyle: 'none' } as object) : null),
   },
   inputSmall: { ...type.amountInputCompact },
   // RTL: icon first, on the right.

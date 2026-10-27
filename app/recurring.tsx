@@ -159,7 +159,7 @@ export default function RecurringScreen() {
                             true: colors.primary600,
                             false: colors.borderStrong,
                           }}
-                          thumbColor={colors.surface}
+                          thumbColor={colors.text}
                           accessibilityLabel={rule.active ? `إيقاف ${rule.name}` : `تشغيل ${rule.name}`}
                           style={styles.switch}
                         />

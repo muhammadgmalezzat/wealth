@@ -30,6 +30,8 @@ export function DatePicker({ value, onChange, onClose }: DatePickerProps) {
         backgroundColor: colors.surface,
         color: colors.text,
         direction: 'rtl',
+        // Dark calendar popup and icon in the browser.
+        colorScheme: 'dark',
       }}
     />
   );

@@ -1,4 +1,4 @@
-import { DefaultTheme, Stack, ThemeProvider } from 'expo-router';
+import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
@@ -12,30 +12,41 @@ export const unstable_settings = {
   anchor: '(tabs)',
 };
 
-// Light theme only, built from the design tokens: headers and tab bar sit on the warm ground
-// (card = background) with hairline borders.
+// Dark only, built from the design tokens: headers sit on the midnight ground (card = background)
+// with hairline borders; the tab bar is its own glass surface (see (tabs)/_layout.tsx).
 const navigationTheme = {
-  ...DefaultTheme,
+  ...DarkTheme,
+  dark: true,
   colors: {
-    ...DefaultTheme.colors,
+    ...DarkTheme.colors,
     background: colors.background,
     card: colors.background,
     text: colors.text,
-    border: colors.border,
-    primary: colors.primary700,
+    border: colors.divider,
+    primary: colors.primary,
+    notification: colors.danger,
   },
 };
 
 export default function RootLayout() {
   return (
     <ThemeProvider value={navigationTheme}>
-      <Stack>
+      <Stack
+        screenOptions={{
+          // No white flash between screens, and a header that melts into the backdrop.
+          contentStyle: { backgroundColor: colors.background },
+          headerStyle: { backgroundColor: colors.background },
+          headerTintColor: colors.text,
+          headerTitleStyle: { color: colors.text },
+          headerShadowVisible: false,
+        }}>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="fund/[id]" options={{ title: 'الصندوق', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="settings" options={{ title: 'الإعدادات', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="recurring" options={{ title: 'المعاملات المتكررة', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="due" options={{ title: 'المستحقات', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="categories" options={{ title: 'البنود', headerBackTitle: 'رجوع' }} />
+        <Stack.Screen name="assets" options={{ title: 'الأصول', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="review" options={{ title: 'مراجعة الشهر', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="period-transactions" options={{ title: 'المعاملات', headerBackTitle: 'رجوع' }} />
       </Stack>
@@ -43,8 +54,8 @@ export default function RootLayout() {
       <PriceRunner />
       <SnapshotRunner />
       <AppLockGate />
-      {/* Light theme only: dark status-bar icons on the light background. */}
-      <StatusBar style="dark" />
+      {/* Dark only: light status-bar icons on the dark background. */}
+      <StatusBar style="light" />
     </ThemeProvider>
   );
 }

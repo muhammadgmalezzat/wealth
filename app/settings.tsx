@@ -280,6 +280,7 @@ export default function SettingsScreen() {
         </Card>
         <View style={styles.listGap}>
           <ListGroup>
+            <ListRow title="الأصول" subtitle="الحسابات والذهب" icon="account-balance-wallet" chevron onPress={() => router.push('/assets')} />
             <ListRow title="إدارة البنود" icon="category" chevron onPress={() => router.push('/categories')} />
             <ListRow title="المعاملات المتكررة" icon="repeat" chevron onPress={() => router.push('/recurring')} />
             <ListRow
@@ -298,7 +299,7 @@ export default function SettingsScreen() {
                   onValueChange={toggleDueReminders}
                   disabled={!notificationsAvailable()}
                   trackColor={{ true: colors.primary600, false: colors.borderStrong }}
-                  thumbColor={colors.surface}
+                  thumbColor={colors.text}
                   accessibilityLabel="تنبيهات المستحقات"
                 />
               }
@@ -355,7 +356,7 @@ export default function SettingsScreen() {
                 onValueChange={toggleAppLock}
                 disabled={!lock?.available}
                 trackColor={{ true: colors.primary600, false: colors.borderStrong }}
-                thumbColor={colors.surface}
+                thumbColor={colors.text}
                 accessibilityLabel="قفل التطبيق"
               />
             }

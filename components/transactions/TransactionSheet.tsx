@@ -478,7 +478,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
               value={oneTime}
               onValueChange={setOneTime}
               trackColor={{ true: colors.primary600, false: colors.borderStrong }}
-              thumbColor={colors.surface}
+              thumbColor={colors.text}
               accessibilityLabel="مصروف لمرة واحدة"
             />
             <View style={styles.switchText}>

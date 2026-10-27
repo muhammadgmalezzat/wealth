@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Modal, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { AppBackground } from '@/components/ui/AppBackground';
 import { AppText } from '@/components/ui/AppText';
 import { Button } from '@/components/ui/Button';
 import { colors, radius, space } from '@/constants/theme';
@@ -82,6 +83,7 @@ export function AppLockGate() {
       navigationBarTranslucent
       onRequestClose={() => {}}>
       {/* Covers the whole display; the content is centred inside the safe area. */}
+      <AppBackground />
       <View
         style={[
           styles.overlay,
@@ -91,7 +93,7 @@ export function AppLockGate() {
           <MaterialIcons name="lock" size={32} color={colors.primary700} />
         </View>
         <AppText variant="display" align="center">
-          Wealth
+          حصّالة
         </AppText>
         <AppText variant="secondary" color="textSecondary" align="center">
           بياناتك المالية محمية

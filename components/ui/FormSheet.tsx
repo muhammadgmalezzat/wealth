@@ -15,6 +15,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { colors, opacity, radius, space, type, size } from '@/constants/theme';
 
+import { AppBackground } from './AppBackground';
+
 // Page-sheet modal with cancel / title / save header, shared by the app's edit forms.
 // Safe area: on Android the modal is a full-screen window drawn under the status and navigation
 // bars (edge-to-edge), so the header is pushed below insets.top. On iOS a page sheet already
@@ -58,6 +60,7 @@ export function FormSheet({
       <KeyboardAvoidingView
         style={[styles.root, { paddingTop: insets.top }]}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <AppBackground />
         <View style={[styles.header, styles.readable]}>
           <TouchableOpacity onPress={onCancel} hitSlop={12} accessibilityRole="button">
             <Text style={styles.cancel}>إلغاء</Text>
@@ -93,6 +96,9 @@ export function FormInput(props: TextInputProps) {
   return (
     <TextInput
       placeholderTextColor={colors.textMuted}
+      selectionColor={colors.primary}
+      cursorColor={colors.primary}
+      keyboardAppearance="dark"
       textAlign="right"
       {...props}
       style={[styles.input, props.style]}
@@ -126,7 +132,7 @@ const styles = StyleSheet.create({
   },
   save: {
     ...type.bodyStrong,
-    color: colors.primary700,
+    color: colors.primary,
   },
   saveDisabled: {
     opacity: opacity.disabled,

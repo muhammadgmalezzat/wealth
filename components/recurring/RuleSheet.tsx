@@ -150,7 +150,7 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
           value={variableAmount}
           onValueChange={setVariableAmount}
           trackColor={{ true: colors.primary600, false: colors.borderStrong }}
-          thumbColor={colors.surface}
+          thumbColor={colors.text}
           accessibilityLabel="المبلغ بيتغير"
         />
         <View style={styles.flex}>

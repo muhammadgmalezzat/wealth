@@ -131,7 +131,7 @@ function Sankey({ flow, width, currency, onNodePress }: { flow: SpendingFlow; wi
           d={l.path}
           fill="none"
           stroke={fill(l.target.node)}
-          strokeOpacity={0.28}
+          strokeOpacity={0.4}
           strokeWidth={l.width}
         />
       ))}
@@ -192,7 +192,8 @@ function StackedFlow({ flow, currency, onNodePress }: SankeyChartProps) {
             subtitleLines={1}
             trailing={<AppText variant="moneyRow">{formatMoney(node.value, currency)}</AppText>}
             icon={node.group === 'gold' ? 'diamond' : 'circle'}
-            iconTone={node.group === 'gold' ? 'gold' : node.group === 'surplus' ? 'neutral' : 'ok'}
+            iconTone={node.group === 'gold' ? 'gold' : 'neutral'}
+            iconColor={FLOW_COLOR[node.group]}
             onPress={() => onNodePress(node)}
           />
         ))}
@@ -206,7 +207,7 @@ const fillOf = (node: FlowNode) => colors[FLOW_COLOR[node.group]];
 const styles = StyleSheet.create({
   placeholder: { height: MIN_HEIGHT },
   hit: { position: 'absolute' },
-  hitPressed: { backgroundColor: colors.primary50, opacity: 0.5, borderRadius: radius.sm },
+  hitPressed: { backgroundColor: colors.primarySoft, borderRadius: radius.sm },
   stacked: { gap: space.md },
   // RTL: the first segment on the right.
   bar: { flexDirection: 'row-reverse', height: 18, borderRadius: radius.pill, overflow: 'hidden', backgroundColor: colors.surfaceSubtle },

@@ -1,21 +1,27 @@
-import { StyleSheet, View } from 'react-native';
+import { router } from 'expo-router';
+import { Pressable, StyleSheet, View } from 'react-native';
 
 import { AppText } from '@/components/ui/AppText';
 import { Card } from '@/components/ui/Card';
 import { Money } from '@/components/ui/Money';
-import { colors, radius, space } from '@/constants/theme';
+import { colors, opacity, radius, space } from '@/constants/theme';
 import { holdingsTotalEGP, liquidTotalEGP, netWorthByLocation, netWorthEGP } from '@/store/selectors';
 import { netWorthChange } from '@/store/snapshots';
 import type { FinanceState } from '@/store/types';
 import { formatMonthLabel, formatPercent } from '@/utils/formatters';
 
-// "صافي الثروة": total, the change since last month's snapshot (hidden without one), the
+// "صافي الثروة" (tap → الأصول): total, the change since last month's snapshot (hidden without one), the
 // Egypt / Saudi split, and liquid vs gold & investments (all EGP).
 export function NetWorthCard({ state, now = new Date() }: { state: FinanceState; now?: Date }) {
   const byLocation = netWorthByLocation(state);
   const change = netWorthChange(state, now);
   const tone = change && change.amountEGP < -0.005 ? 'danger' : 'positive';
   return (
+    <Pressable
+      onPress={() => router.push('/assets')}
+      accessibilityRole="button"
+      accessibilityLabel="صافي الثروة، يفتح الأصول"
+      style={({ pressed }) => pressed && { opacity: opacity.pressed }}>
     <Card style={styles.card}>
       <AppText variant="secondary" color="textSecondary">
         صافي الثروة
@@ -41,6 +47,7 @@ export function NetWorthCard({ state, now = new Date() }: { state: FinanceState;
         <Part label="ذهب واستثمارات" amount={holdingsTotalEGP(state)} gold />
       </View>
     </Card>
+    </Pressable>
   );
 }
 

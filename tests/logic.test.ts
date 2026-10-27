@@ -44,6 +44,7 @@ import * as planning from '@/store/planning';
 import * as reviewLogic from '@/store/review';
 import * as analyticsUi from '@/components/analytics/analyticsUi';
 import * as sankeyLayout from '@/components/analytics/sankeyLayout';
+import * as theme from '@/constants/theme';
 import * as analytics from '@/store/analytics';
 import * as snapshots from '@/store/snapshots';
 import * as sel from '@/store/selectors';
@@ -4784,5 +4785,75 @@ describe('analytics UI helpers', () => {
     const height = (id: string) => x(id).y1 - x(id).y0;
     assert.ok(height('bucket:essentials') > height('bucket:lifestyle'));
     approx(height('src:salary') / 10000, height('bucket:essentials') / 3000);
+  });
+});
+
+// --- Dark theme tokens -----------------------------------------------------------------------
+
+describe('dark theme contrast', () => {
+  const rgb = (value: string): [number, number, number, number] => {
+    const hex = /^#([0-9a-f]{6})$/i.exec(value);
+    if (hex) return [0, 2, 4].map((i) => parseInt(hex[1].slice(i, i + 2), 16)).concat(1) as [number, number, number, number];
+    const m = /^rgba?\(([^)]+)\)$/.exec(value)!;
+    const [r, g, b, a = '1'] = m[1].split(',').map((p) => p.trim());
+    return [Number(r), Number(g), Number(b), Number(a)];
+  };
+  // A translucent colour as it looks over an opaque one.
+  const over = (top: string, base: string): string => {
+    const [r, g, b, a] = rgb(top);
+    const [br, bg, bb] = rgb(base);
+    const mix = (x: number, y: number) => Math.round(x * a + y * (1 - a));
+    return `#${[mix(r, br), mix(g, bg), mix(b, bb)].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  };
+  const luminance = (value: string) => {
+    const [r, g, b] = rgb(value).slice(0, 3).map((v) => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = (a: string, b: string) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  const c = theme.colors;
+  const grounds = { background: c.background, surface: c.surface, surfaceSubtle: c.surfaceSubtle, backgroundElevated: c.backgroundElevated };
+
+  it('text is AA (4.5:1) on every ground', () => {
+    for (const [name, ground] of Object.entries(grounds)) {
+      for (const token of ['text', 'textSecondary', 'textMuted', 'primary700', 'primary800', 'gold', 'goldText', 'warning', 'danger'] as const) {
+        assert.ok(contrast(c[token], ground) >= 4.5, `${token} on ${name}: ${contrast(c[token], ground).toFixed(2)}`);
+      }
+    }
+  });
+
+  it('dark text on emerald fills is AA, including pressed (white would fail)', () => {
+    assert.ok(contrast(c.onPrimary, c.primary700) >= 7, `onPrimary on primary: ${contrast(c.onPrimary, c.primary700).toFixed(2)}`);
+    assert.ok(contrast(c.onPrimary, c.primary900) >= 4.5, `onPrimary on pressed: ${contrast(c.onPrimary, c.primary900).toFixed(2)}`);
+    assert.ok(contrast('#ffffff', c.primary700) < 4.5, 'white on emerald is the case this token avoids');
+  });
+
+  it('coloured text on its own soft ground is AA', () => {
+    const pairs: [string, string][] = [
+      [c.primary800, c.primary50],
+      [c.goldText, c.goldSurface],
+      [c.warning, c.warningSurface],
+      [c.danger, c.dangerSurface],
+      [c.primary700, c.primarySoft],
+    ];
+    for (const [text, soft] of pairs) {
+      for (const ground of [c.surface, c.background]) {
+        assert.ok(contrast(text, over(soft, ground)) >= 4.5, `${text} on ${soft} over ${ground}: ${contrast(text, over(soft, ground)).toFixed(2)}`);
+      }
+    }
+  });
+
+  it('chart colours stand out from the card (3:1) and from each other in the legend', () => {
+    const card = over(c.glassStrong, c.surface);
+    const chart = [c.primary700, c.chartSky, c.chartViolet, c.chartRose, c.gold, c.textMuted, c.warning, c.primary900];
+    for (const colour of chart) assert.ok(contrast(colour, card) >= 3, `${colour} on card: ${contrast(colour, card).toFixed(2)}`);
+    assert.equal(new Set(chart).size, chart.length);
+    // Axis labels and gridlines on the card.
+    assert.ok(contrast(c.textSecondary, card) >= 4.5);
   });
 });

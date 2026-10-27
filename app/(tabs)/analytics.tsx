@@ -4,7 +4,7 @@ import { ScrollView, StyleSheet, View } from 'react-native';
 
 import { AnalyticsControls } from '@/components/analytics/AnalyticsControls';
 import { BreakdownSection } from '@/components/analytics/BreakdownSection';
-import { EmptyNote } from '@/components/analytics/common';
+import { ChartCard, EmptyNote } from '@/components/analytics/common';
 import { FundsSection, InsightsSection, MoneyMapSection, RunwaySection } from '@/components/analytics/MoneySections';
 import { NetWorthSection } from '@/components/analytics/NetWorthSection';
 import { SankeyChart } from '@/components/analytics/SankeyChart';
@@ -103,7 +103,9 @@ export default function AnalyticsScreen() {
         {flow.empty ? (
           <EmptyNote>مفيش دخل أو مصروف في الفترة دي.</EmptyNote>
         ) : (
-          <SankeyChart flow={flow} currency={currency} onNodePress={onNodePress} />
+          <ChartCard>
+            <SankeyChart flow={flow} currency={currency} onNodePress={onNodePress} />
+          </ChartCard>
         )}
       </View>
 

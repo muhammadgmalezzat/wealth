@@ -28,16 +28,16 @@ export function periodLabel(period: Pick<Period, 'kind' | 'from' | 'to'>): strin
   return from === to ? from : `${from} – ${to}`;
 }
 
-// Sankey / legend colours by what a node is (design tokens only).
+// Sankey / donut / legend colours by what a node is (the dark token palette; gold is only for gold).
 export const FLOW_COLOR: Record<FlowNode['group'], ColorToken> = {
-  income: 'primary600',
+  income: 'primary700',
   balance: 'warning',
-  essentials: 'primary700',
-  lifestyle: 'gold',
-  giving: 'primary500',
+  essentials: 'chartSky',
+  lifestyle: 'chartViolet',
+  giving: 'chartRose',
   funds: 'primary900',
-  gold: 'goldText',
-  surplus: 'borderStrong',
+  gold: 'gold',
+  surplus: 'textMuted',
 };
 
 // Below this container width the Sankey doesn't fit its labels and becomes a stacked bar.

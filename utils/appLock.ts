@@ -21,7 +21,7 @@ export async function appLockAvailability(): Promise<LockAvailability> {
 }
 
 // Biometrics with fallback to the device PIN/pattern. Resolves true on success.
-export async function authenticate(promptMessage = 'افتح Wealth'): Promise<boolean> {
+export async function authenticate(promptMessage = 'افتح حصّالة'): Promise<boolean> {
   try {
     const result = await LocalAuthentication.authenticateAsync({
       promptMessage,

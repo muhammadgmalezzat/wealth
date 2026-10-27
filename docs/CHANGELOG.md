@@ -6,6 +6,77 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-27) — 1.2.0 · data v7 · **needs a new build** · App name, icon and splash
+
+> Part of the same unbuilt 1.2.0 (`app.json` `version` **not** bumped). Name, icon and splash are native config,
+> so they only show in the 1.2.0 build, never via `eas update`. `slug`, `android.package`, the iOS bundle id,
+> the EAS `projectId`, `owner` and `scheme` are unchanged, so it still installs over the current app and keeps
+> its OTA channel. No data, migration, backup or calculation change.
+
+**For users**
+- The app is called **حصّالة** on the phone. New icon: a minimal emerald piggy bank with a gold coin dropping in
+  (readable at 48 px), on the app's dark ground. Android 13 themed icons get a single-color version. The splash
+  screen is dark with the same mark (light and dark mode alike). The template images are gone.
+- The lock screen, the Face ID message, the biometric prompt and the invalid-backup message now say حصّالة.
+- Analytics, narrow screens: each row of the "where the money went" list now has an icon in its bar segment's
+  color (it was a neutral / green tile).
+
+**Technical**
+- `app.json`: `expo.name` → `حصّالة`; splash `imageWidth` 300; Face ID permission text. Unchanged identifiers:
+  `slug`, `android.package`, `ios.bundleIdentifier`, `extra.eas.projectId`, `owner`, `scheme`, plus the
+  AsyncStorage keys, the backup `app: 'wealth'` marker and the `wealth-backup-…json` file name (data
+  identifiers, tested).
+- `assets/brand/mark.svg` (single source of the shape) + `scripts/brand.mjs` + `npm run brand` (dev dependency
+  `sharp`): renders `icon.png`, `android-icon-foreground.png`, `android-icon-monochrome.png`, `splash-icon.png`,
+  `favicon.png` into `assets/images/`; fails when the mark leaves the adaptive-icon safe zone; optional preview
+  directory argument. `android-icon-background.png` deleted (the background is the flat `#0A1014`).
+- `ListRow` gained `iconColor?: ColorToken`; `SankeyChart`'s `StackedFlow` passes `FLOW_COLOR[node.group]`.
+- Strings: `AppLockGate`, `utils/appLock.ts`, `utils/errorMessages.ts`.
+
+---
+
+## Unreleased (2026-10-27) — 1.2.0 · data v7 · **needs a new build** · Dark Glassy Wealth (whole app)
+
+> Part of the same unbuilt 1.2.0 (`app.json` `version` **not** bumped). It adds one more native module,
+> `expo-blur` (iOS frosted glass), to the 1.2.0 build; `react-native-svg` and `expo-linear-gradient` were already
+> in. No data, migration, backup or calculation change.
+
+**For users**
+- The whole app is now dark: midnight charcoal with emerald undertones, translucent frosted-glass cards, soft
+  hairlines, a quiet emerald glow at the top of every screen, readable numbers, gold only for gold. Home's
+  **تقدر تصرف بأمان** card is the emerald-glass hero. Every screen, sheet, form, picker, chip, empty state,
+  backup / restore and the lock screen is dark; there is no theme switcher.
+- A floating glass tab bar (five tabs). Text on emerald buttons and filled chips is now dark (white on emerald
+  fails contrast); red is only for genuine problems.
+- Analytics: glass cards around every chart, chart colours from the dark palette (Sankey, bars, lines, donut),
+  readable axes and legends.
+- Keyboards, date pickers and the status bar match (dark keyboard, dark calendar, light status-bar icons).
+
+**Technical**
+- `constants/theme.ts`: `palette.dark` replaces the light palette; **all old token names are kept** (so no screen
+  code changed to get the base look) and new ones added: `backgroundElevated`, `surfaceElevated`, `glassSubtle` /
+  `glass` / `glassStrong` / `glassBorder` / `glassHighlight`, `emeraldGlow`, `divider`, `primary` /
+  `primaryPressed` / `primarySoft`, `success`, `chartSky` / `chartViolet` / `chartRose`; `onPrimary` is now
+  `#06231A`. Contrast is covered by a test (4 tests: text ≥ 4.5:1 on every ground, `onPrimary` ≥ 7:1, coloured
+  text on soft grounds, chart colours ≥ 3:1). 274 tests.
+- New `components/ui/GlassSurface.tsx` (subtle / regular / strong / hero; blur on iOS only, translucent fallback
+  elsewhere) and `AppBackground.tsx`; `Card` is built on `GlassSurface`; `Screen` / `FormSheet` / the lock
+  screen draw the backdrop; `Segment` active state, `Switch` thumbs, sticky Analytics controls restyled.
+- `app/_layout.tsx`: `DarkTheme` from tokens, Stack `screenOptions` (dark header, `contentStyle`), `StatusBar` light;
+  `app/(tabs)/_layout.tsx`: in-layout floating glass bar (`tabBarBackground`); `app.json`: `userInterfaceStyle`
+  `dark`, splash and Android adaptive-icon background `#0A1014` (adaptive `backgroundImage` removed).
+- Inputs: `keyboardAppearance="dark"`, `placeholderTextColor` / `selectionColor` / `cursorColor`; date picker
+  `themeVariant="dark"` + emerald accent, web date input `colorScheme: dark`, no web focus ring on the amount field.
+- Analytics: `FLOW_COLOR` and the bar / line / stack colours moved to the dark palette; `ChartCard` wraps each chart.
+- `expo-blur` installed (`npx expo install expo-blur`). `expo-navigation-bar` was **not** installed: with
+  edge-to-edge the bar is transparent and the dark theme makes its buttons light. `npx expo install --fix` reports
+  everything up to date and `expo-doctor` passes 21/21.
+- Checked on web at 320 / 390 / 414 px with real data (Home, Transactions, Plan, Analytics, Funds, Assets, Settings,
+  Recurring, Due, Categories, Review, the transaction sheet): no overflow, no console warnings. **Not validated on
+  a device or in Expo Go.**
+
+---
+
 ## Unreleased (2026-10-27) — 1.2.0 · data v7 · **needs a new build** · Analytics tab ("التحليلات")
 
 > **A new build is required** (`eas build`), then `eas update` as usual: it adds two native modules,
@@ -14,8 +85,9 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 > SDK 57. Data version stays 7: the snapshot additions are optional fields, no migration.
 
 **For users**
-- New tab **التحليلات** between الخطة and الأصول (six tabs now: الرئيسية · المعاملات · الخطة · التحليلات ·
-  الأصول · الصناديق). Sticky controls: period (الشهر ده / 3 شهور / 6 شهور / السنة / من بداية التتبع / مخصص),
+- New tab **التحليلات** between الخطة and الصناديق. **الأصول** is no longer a tab (five tabs: الرئيسية · المعاملات ·
+  الخطة · التحليلات · الصناديق): it opens from the net worth card on Home and from a new "الأصول" row in
+  Settings, with every feature it had (accounts, gold, holdings, add button, sheets). Sticky controls: period (الشهر ده / 3 شهور / 6 شهور / السنة / من بداية التتبع / مخصص),
   display currency (ج.م / ر.س) and "اشمل المصاريف اللي لمرة واحدة".
 - **فلوسك راحت فين:** a Sankey from income (راتب / فري لانس / دخل تاني, "من رصيدك" when you spent more
   than you earned) to أساسيات / رفاهيات / عطاء / صناديق / ذهب / فايض and then each bucket's top 5

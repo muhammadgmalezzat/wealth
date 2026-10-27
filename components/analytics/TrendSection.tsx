@@ -10,7 +10,7 @@ import type { DisplayCurrency, MonthlyTrend } from '@/store/analytics';
 import { formatMonthLabel, formatPercent } from '@/utils/formatters';
 
 import { chartAxis, compactNumber, monthShort } from './analyticsUi';
-import { EmptyNote, LegendDot, LegendRow, NOT_ENOUGH_DATA, useMeasuredWidth } from './common';
+import { ChartCard, EmptyNote, LegendDot, LegendRow, NOT_ENOUGH_DATA, useMeasuredWidth } from './common';
 
 const Y_AXIS_WIDTH = 38;
 const CHART_HEIGHT = 170;
@@ -36,18 +36,19 @@ export function TrendSection({ trend, currency }: { trend: MonthlyTrend; currenc
   const data = months.flatMap((m) => [
     {
       value: m.income,
-      frontColor: colors.primary500,
+      frontColor: colors.primary,
       spacing: pair,
       label: monthShort(m.month),
       labelWidth: barWidth * 2 + pair,
       labelTextStyle: { color: colors.textSecondary, fontSize: typeScale.micro.fontSize },
     },
-    { value: m.expense, frontColor: colors.primary900, spacing: gap },
+    { value: m.expense, frontColor: colors.chartSky, spacing: gap },
   ]);
   const lineData = months.map((m) => ({ value: m.net }));
 
   return (
     <View style={styles.wrap}>
+      <ChartCard>
       <View onLayout={onLayout} accessibilityLabel="الدخل والمصروف والصافي لكل شهر">
         {width > 0 && (
           <BarChart
@@ -67,7 +68,7 @@ export function TrendSection({ trend, currency }: { trend: MonthlyTrend; currenc
             yAxisLabelWidth={Y_AXIS_WIDTH}
             yAxisThickness={0}
             xAxisThickness={1}
-            xAxisColor={colors.border}
+            xAxisColor={colors.borderStrong}
             rulesColor={colors.border}
             yAxisTextStyle={{ color: colors.textSecondary, fontSize: typeScale.micro.fontSize }}
             formatYLabel={(label: string) => compactNumber(Number(label))}
@@ -77,7 +78,7 @@ export function TrendSection({ trend, currency }: { trend: MonthlyTrend; currenc
             showLine
             lineData={lineData}
             lineConfig={{
-              color: colors.gold,
+              color: colors.text,
               thickness: 2,
               // gifted-charts adds half a bar to the first point and a bar to each step.
               initialSpacing: gap / 2 + barWidth / 2 + pair / 2,
@@ -85,17 +86,18 @@ export function TrendSection({ trend, currency }: { trend: MonthlyTrend; currenc
               // Plain views for the points: gifted-charts' SVG circles log a dev warning on the web.
               dataPointsWidth: 8,
               dataPointsHeight: 8,
-              customDataPoint: () => <View style={[styles.dot, { backgroundColor: colors.gold }]} />,
+              customDataPoint: () => <View style={[styles.dot, { backgroundColor: colors.text }]} />,
               curved: false,
             }}
           />
         )}
       </View>
       <LegendRow>
-        <LegendDot color="primary500" label="دخل" />
-        <LegendDot color="primary900" label="مصروف" />
-        <LegendDot color="gold" label="الصافي" />
+        <LegendDot color="primary700" label="دخل" />
+        <LegendDot color="chartSky" label="مصروف" />
+        <LegendDot color="text" label="الصافي" />
       </LegendRow>
+      </ChartCard>
 
       <Card variant="subtle" style={styles.average}>
         <AppText variant="secondary" color="textSecondary">

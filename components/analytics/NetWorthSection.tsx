@@ -8,7 +8,7 @@ import { colors, space, type as typeScale } from '@/constants/theme';
 import type { DisplayCurrency, NetWorthLocation, NetWorthSeries } from '@/store/analytics';
 
 import { chartAxis, compactNumber, monthShort } from './analyticsUi';
-import { EmptyNote, LegendDot, LegendRow, NOT_ENOUGH_DATA, useMeasuredWidth } from './common';
+import { ChartCard, EmptyNote, LegendDot, LegendRow, NOT_ENOUGH_DATA, useMeasuredWidth } from './common';
 
 const Y_AXIS_WIDTH = 42;
 const CHART_HEIGHT = 190;
@@ -44,7 +44,7 @@ export function NetWorthSection({ series, currency, location, onLocationChange, 
           value={hideEstimated}
           onValueChange={onHideEstimatedChange}
           trackColor={{ true: colors.primary600, false: colors.borderStrong }}
-          thumbColor={colors.surface}
+          thumbColor={colors.text}
           accessibilityLabel="إخفاء الأرقام التقديرية"
         />
       </View>
@@ -73,11 +73,11 @@ export function NetWorthSection({ series, currency, location, onLocationChange, 
     stacks:
       p.cash + p.gold + p.currencies > 0
         ? [
-            { value: Math.max(0, p.cash), color: colors.primary600 },
+            { value: Math.max(0, p.cash), color: colors.primary },
             { value: Math.max(0, p.gold), color: colors.gold },
-            { value: Math.max(0, p.currencies), color: colors.primary900 },
+            { value: Math.max(0, p.currencies), color: colors.chartSky },
           ]
-        : [{ value: Math.max(0, p.total), color: colors.borderStrong }],
+        : [{ value: Math.max(0, p.total), color: colors.textMuted }],
     label: `${monthShort(p.month)}${p.estimated ? '*' : ''}`,
     labelTextStyle: { color: colors.textSecondary, fontSize: typeScale.micro.fontSize },
     spacing: gap,
@@ -85,7 +85,7 @@ export function NetWorthSection({ series, currency, location, onLocationChange, 
   const last = points[points.length - 1];
 
   return (
-    <View style={styles.wrap}>
+    <ChartCard>
       {controls}
       <View style={styles.now}>
         <AppText variant="secondary" color="textSecondary">
@@ -111,7 +111,7 @@ export function NetWorthSection({ series, currency, location, onLocationChange, 
             yAxisLabelWidth={Y_AXIS_WIDTH}
             yAxisThickness={0}
             xAxisThickness={1}
-            xAxisColor={colors.border}
+            xAxisColor={colors.borderStrong}
             rulesColor={colors.border}
             yAxisTextStyle={{ color: colors.textSecondary, fontSize: typeScale.micro.fontSize }}
             formatYLabel={(label: string) => compactNumber(Number(label))}
@@ -138,9 +138,9 @@ export function NetWorthSection({ series, currency, location, onLocationChange, 
       <LegendRow>
         {detailed && (
           <>
-            <LegendDot color="primary600" label="كاش" />
+            <LegendDot color="primary700" label="كاش" />
             <LegendDot color="gold" label="ذهب" />
-            <LegendDot color="primary900" label="عملات" />
+            <LegendDot color="chartSky" label="عملات" />
           </>
         )}
         <LegendDot color="text" label="الصافي بعد الالتزامات" />
@@ -155,7 +155,7 @@ export function NetWorthSection({ series, currency, location, onLocationChange, 
           {series.skipped} شهر قديم من غير تفاصيل مش ظاهر في العرض ده.
         </AppText>
       )}
-    </View>
+    </ChartCard>
   );
 }
 

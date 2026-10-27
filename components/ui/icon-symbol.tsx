@@ -18,7 +18,7 @@ const MAPPING = {
   'paperplane.fill': 'send',
   'chevron.left.forwardslash.chevron.right': 'code',
   'chevron.right': 'chevron-right',
-  // Tab bar (Calm Wealth): الرئيسية · المعاملات · الخطة · التحليلات · الأصول · الصناديق
+  // Tab bar: الرئيسية · المعاملات · الخطة · التحليلات · الصناديق
   'list.bullet.rectangle': 'receipt-long',
   calendar: 'event-note',
   'chart.bar': 'bar-chart',

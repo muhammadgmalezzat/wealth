@@ -9,7 +9,7 @@ import { BUCKET_LABELS, type DisplayCurrency, type DrillFilter, type SpendingBre
 import { formatPercent } from '@/utils/formatters';
 
 import { changeText, compactNumber, FLOW_COLOR } from './analyticsUi';
-import { EmptyNote, LegendDot, LegendRow, NOT_ENOUGH_DATA, useMeasuredWidth } from './common';
+import { ChartCard, EmptyNote, LegendDot, LegendRow, NOT_ENOUGH_DATA, useMeasuredWidth } from './common';
 
 interface BreakdownSectionProps {
   breakdown: SpendingBreakdown;
@@ -33,6 +33,7 @@ export function BreakdownSection({ breakdown, currency, onDrill }: BreakdownSect
 
   return (
     <View style={styles.wrap}>
+      <ChartCard>
       <View onLayout={onLayout} style={styles.donut} accessibilityLabel="المصروف حسب النوع">
         {width > 0 && (
           <PieChart
@@ -60,6 +61,7 @@ export function BreakdownSection({ breakdown, currency, onDrill }: BreakdownSect
           <LegendDot key={b.bucket} color={FLOW_COLOR[b.bucket]} label={`${BUCKET_LABELS[b.bucket]} ${formatPercent(b.pct)}`} />
         ))}
       </LegendRow>
+      </ChartCard>
 
       <ListGroup>
         {breakdown.categories.map((c) => {

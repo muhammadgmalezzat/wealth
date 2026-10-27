@@ -1,6 +1,7 @@
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Platform } from 'react-native';
 
+import { colors } from '@/constants/theme';
 import { fromDateKey, toDateKey } from '@/utils/dates';
 
 interface DatePickerProps {
@@ -16,6 +17,9 @@ export function DatePicker({ value, onChange, onClose }: DatePickerProps) {
     <DateTimePicker
       value={fromDateKey(value)}
       mode="date"
+      // Dark calendar on iOS; Android's dialog follows the app's dark theme.
+      themeVariant="dark"
+      accentColor={colors.primary}
       display={Platform.OS === 'ios' ? 'inline' : 'default'}
       onValueChange={(_event, date) => {
         onChange(toDateKey(date));

@@ -1,6 +1,6 @@
 import { Pressable, StyleSheet, View } from 'react-native';
 
-import { colors, radius, shadow, space, weight } from '@/constants/theme';
+import { colors, radius, space, weight } from '@/constants/theme';
 
 import { AppText } from './AppText';
 
@@ -57,6 +57,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.xs,
     borderRadius: radius.md - space.xxs,
   },
-  itemActive: { backgroundColor: colors.surface, ...shadow.card },
+  itemActive: { backgroundColor: colors.primarySoft, borderWidth: 1, borderColor: colors.primary700 },
   textActive: { fontWeight: weight.bold },
 });

@@ -50,7 +50,7 @@ export function AnalyticsControls({
           value={includeOneTime}
           onValueChange={onIncludeOneTimeChange}
           trackColor={{ true: colors.primary600, false: colors.borderStrong }}
-          thumbColor={colors.surface}
+          thumbColor={colors.text}
           accessibilityLabel="اشمل المصاريف اللي لمرة واحدة"
         />
       </View>
@@ -64,9 +64,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.lg,
     paddingTop: space.sm,
     paddingBottom: space.md,
-    backgroundColor: colors.background,
+    // Sticky glass: nearly opaque so scrolling charts never show through the controls.
+    backgroundColor: colors.glassStrong,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
+    borderBottomColor: colors.glassBorder,
   },
   row: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.md },
   currency: { width: 112 },
