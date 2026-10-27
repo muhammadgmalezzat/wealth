@@ -193,21 +193,62 @@ function findFund(state: State, fundId: string): Fund | undefined {
   return state.funds.find((f) => f.id === fundId);
 }
 
-// Cash allocated to the fund (fund currency): sum of its movements.
-export function fundAllocated(state: State, fundId: string): number {
-  return sum(state.fundMovements.filter((m) => m.fundId === fundId).map((m) => m.amount));
+const CURRENCY_ORDER: readonly CurrencyCode[] = ['EGP', 'SAR', 'USD'];
+const zeroByCurrency = (): Record<CurrencyCode, number> => ({ EGP: 0, SAR: 0, USD: 0 });
+// Float noise isn't money.
+const MONEY_EPSILON = 0.005;
+
+// The currency a movement's amount is in: its own, else its fund's (undefined when the fund is
+// gone, which is also why such movements are ignored everywhere).
+export function movementCurrency(
+  state: Pick<State, 'funds'>,
+  movement: Pick<FundMovement, 'fundId' | 'currency'>
+): CurrencyCode | undefined {
+  return movement.currency ?? state.funds.find((f) => f.id === movement.fundId)?.currency;
 }
 
-// Market value of the fund's linked holdings, in the fund's currency.
+// Cash set aside for the fund, per currency, each in its own currency: nothing is converted, so
+// 1000 SAR stays 1000 SAR whatever the rates do.
+export function fundCashByCurrency(state: State, fundId: string): Record<CurrencyCode, number> {
+  const result = zeroByCurrency();
+  const fund = findFund(state, fundId);
+  if (!fund) return result;
+  for (const m of state.fundMovements) {
+    if (m.fundId === fundId) result[m.currency ?? fund.currency] += m.amount;
+  }
+  return result;
+}
+
+export function fundAllocatedIn(state: State, fundId: string, currency: CurrencyCode): number {
+  return fundCashByCurrency(state, fundId)[currency];
+}
+
+// Cash allocated to the fund, in the fund's currency: each currency's cash at TODAY's rate.
+// (A fund that only holds its own currency, like every fund saved before currencies, is just
+// the sum of its movements.)
+export function fundAllocated(state: State, fundId: string): number {
+  const fund = findFund(state, fundId);
+  if (!fund) return 0;
+  const cash = fundCashByCurrency(state, fundId);
+  return sum(CURRENCY_ORDER.map((c) => convertCurrency(cash[c], c, fund.currency, state.settings.exchangeRates)));
+}
+
+// Market value of the fund's linked holdings, in the fund's currency: a currency holding is its
+// quantity (no round trip through EGP when it is the fund's own currency), gold is its EGP
+// market value converted.
 export function fundLinkedValue(state: State, fundId: string): number {
   const fund = findFund(state, fundId);
   if (!fund) return 0;
-  const linkedEGP = sum(
+  const rates = state.settings.exchangeRates;
+  return sum(
     state.holdings
       .filter((h) => fund.linkedHoldingIds.includes(h.id))
-      .map((h) => holdingValueEGP(state, h))
+      .map((h) =>
+        h.type === 'currency'
+          ? convertCurrency(h.quantity, h.currency, fund.currency, rates)
+          : fromEGP(holdingValueEGP(state, h), fund.currency, rates)
+      )
   );
-  return fromEGP(linkedEGP, fund.currency, state.settings.exchangeRates);
 }
 
 // Fund currency: cash movements + market value of linked holdings.
@@ -223,16 +264,28 @@ export function fundProgress(state: State, fundId: string): number {
   return Math.max(0, fundCurrent(state, fundId) / fund.targetAmount);
 }
 
-// A fund movement (stored in the fund's currency) in `currency`, at the rates of when it was
-// made. Movements made before they carried a snapshot convert at today's rates.
+// A fund movement in `currency` as it was worth when made (for history: plan progress, the
+// monthly review, month totals): its own currency is returned unchanged, otherwise converted
+// with its ratesSnapshot. Movements made before they carried a snapshot convert at today's rates.
 export function movementAmountIn(
   state: State,
-  movement: Pick<FundMovement, 'fundId' | 'amount' | 'ratesSnapshot'>,
+  movement: Pick<FundMovement, 'fundId' | 'amount' | 'currency' | 'ratesSnapshot'>,
   currency: CurrencyCode
+): number {
+  const from = movementCurrency(state, movement);
+  if (!from) return 0;
+  return convertCurrency(movement.amount, from, currency, movement.ratesSnapshot ?? state.settings.exchangeRates);
+}
+
+// A movement's CURRENT value in its fund's currency (today's rate): what it adds to
+// fundAllocated.
+export function movementValueInFund(
+  state: State,
+  movement: Pick<FundMovement, 'fundId' | 'amount' | 'currency'>
 ): number {
   const fund = findFund(state, movement.fundId);
   if (!fund) return 0;
-  return convertCurrency(movement.amount, fund.currency, currency, movement.ratesSnapshot ?? state.settings.exchangeRates);
+  return convertCurrency(movement.amount, movement.currency ?? fund.currency, fund.currency, state.settings.exchangeRates);
 }
 
 // When the target must be reached: the deadline for goals, the next due date for sinking funds.
@@ -304,7 +357,7 @@ function monthPace(state: State, fundId: string, now: Date): MonthPace | null {
   const allocatedThisMonth = sum(
     state.fundMovements
       .filter((m) => m.fundId === fundId && monthOf(m.date) === month)
-      .map((m) => m.amount)
+      .map((m) => movementValueInFund(state, m))
   );
   const currentAtMonthStart = fundCurrent(state, fundId) - allocatedThisMonth;
   const remainingAtMonthStart = Math.max(0, fund.targetAmount - currentAtMonthStart);
@@ -330,17 +383,101 @@ export function linkableHoldings(state: State, fundId?: string): Holding[] {
   );
 }
 
-// Liquid money not yet earmarked by any fund (cash movements only; linked holdings
-// are not cash). Negative means more is allocated than the accounts hold.
-export function unassignedEGP(state: State): number {
+// --- Money without a job ------------------------------------------------------
+
+export interface CurrencyAmount {
+  currency: CurrencyCode;
+  // Always positive.
+  amount: number;
+}
+
+export interface UnassignedSummary {
+  // Per currency, each in its own currency: negative = more of that currency is set aside than
+  // the accounts hold.
+  byCurrency: Record<CurrencyCode, number>;
+  // The currencies with money left / with too little, native amounts (> 0.005 only).
+  surpluses: CurrencyAmount[];
+  deficits: CurrencyAmount[];
+  // Display only: every currency converted to EGP at today's rate.
+  totalEGP: number;
+  surplusEGP: number;
+  deficitEGP: number;
+}
+
+// Liquid money not yet set aside by any fund, per currency (linked holdings are not cash).
+// Account balances are summed in their own currency and a movement takes its own currency's
+// money, so nothing is converted until display: 1000 SAR stays 1000 SAR whatever the rates do.
+//
+// A movement without a `currency` (saved before currencies, or made by the fund edit sheet) has
+// no source currency. It is covered by the money in its fund's currency first, then by what is
+// left in the other currencies at today's rate (EGP → SAR → USD), and any rest is a shortfall in
+// its own currency. So data from before currencies shows exactly the totals it always did.
+export function unassignedByCurrency(state: State): Record<CurrencyCode, number> {
   const rates = state.settings.exchangeRates;
-  const allocatedEGP = sum(
-    state.fundMovements.map((m) => {
-      const fund = findFund(state, m.fundId);
-      return fund ? toEGP(m.amount, fund.currency, rates) : 0;
-    })
-  );
-  return liquidTotalEGP(state) - allocatedEGP;
+  const pool = liquidByCurrency(state);
+  const need = zeroByCurrency();
+  for (const m of state.fundMovements) {
+    const fund = findFund(state, m.fundId);
+    if (!fund) continue;
+    if (m.currency) pool[m.currency] -= m.amount;
+    else need[fund.currency] += m.amount;
+  }
+  // 1. Each currency's currency-less movements take from the same currency's money first.
+  for (const c of CURRENCY_ORDER) {
+    if (need[c] <= 0) {
+      // A net release (withdrawals beyond the allocations) gives the money back to its currency.
+      pool[c] -= need[c];
+      need[c] = 0;
+      continue;
+    }
+    const take = Math.min(need[c], Math.max(0, pool[c]));
+    pool[c] -= take;
+    need[c] -= take;
+  }
+  // 2. What is still uncovered takes from the other currencies' leftovers at today's rate.
+  for (const c of CURRENCY_ORDER) {
+    for (const d of CURRENCY_ORDER) {
+      if (d === c || need[c] <= MONEY_EPSILON) continue;
+      const available = Math.max(0, pool[d]);
+      if (available <= 0) continue;
+      const wanted = convertCurrency(need[c], c, d, rates);
+      if (wanted <= available) {
+        pool[d] -= wanted;
+        need[c] = 0;
+      } else {
+        pool[d] -= available;
+        need[c] -= convertCurrency(available, d, c, rates);
+      }
+    }
+  }
+  // 3. Anything left over is short in its own currency.
+  for (const c of CURRENCY_ORDER) pool[c] -= Math.max(0, need[c]);
+  return pool;
+}
+
+export function unassignedSummary(state: State): UnassignedSummary {
+  const rates = state.settings.exchangeRates;
+  const byCurrency = unassignedByCurrency(state);
+  const summary: UnassignedSummary = { byCurrency, surpluses: [], deficits: [], totalEGP: 0, surplusEGP: 0, deficitEGP: 0 };
+  for (const currency of CURRENCY_ORDER) {
+    const amount = byCurrency[currency];
+    const egp = toEGP(amount, currency, rates);
+    summary.totalEGP += egp;
+    if (amount > MONEY_EPSILON) {
+      summary.surpluses.push({ currency, amount });
+      summary.surplusEGP += egp;
+    } else if (amount < -MONEY_EPSILON) {
+      summary.deficits.push({ currency, amount: -amount });
+      summary.deficitEGP -= egp;
+    }
+  }
+  return summary;
+}
+
+// The total of unassignedByCurrency in EGP at today's rate, for display. Negative means more
+// is set aside than the accounts hold.
+export function unassignedEGP(state: State): number {
+  return unassignedSummary(state).totalEGP;
 }
 
 // unassignedEGP if the fund's cash allocation were set to `cashAllocation` (fund currency).
@@ -360,18 +497,54 @@ export function unassignedEGPWithFundCash(
 
 export interface FundAmount {
   fundId: string;
-  amount: number; // fund currency
+  // In `currency`, or in the fund's currency when `currency` is omitted.
+  amount: number;
+  currency?: CurrencyCode;
 }
 
 // Sum of `amounts` in EGP at current rates (unknown funds count as 0).
 export function fundAmountsEGP(state: State, amounts: FundAmount[]): number {
   const rates = state.settings.exchangeRates;
   return sum(
-    amounts.map(({ fundId, amount }) => {
+    amounts.map(({ fundId, amount, currency }) => {
       const fund = findFund(state, fundId);
-      return fund ? toEGP(amount, fund.currency, rates) : 0;
+      return fund ? toEGP(amount, currency ?? fund.currency, rates) : 0;
     })
   );
+}
+
+// A withdrawal of `amount` of `currency` from `fund`; the currency is left out when it is the
+// fund's own.
+function withdrawalOf(fund: Fund, currency: CurrencyCode, amount: number): FundAmount {
+  return { fundId: fund.id, amount, ...(currency !== fund.currency ? { currency } : {}) };
+}
+
+// How to take `amount` (in `currency`) out of a fund's cash: the same currency's cash first, then
+// the fund's own currency, then the others, converted at today's rate. `shortfall` is what the
+// fund's cash could not cover (in `currency`).
+export function withdrawalPlan(
+  state: State,
+  fundId: string,
+  amount: number,
+  currency: CurrencyCode
+): { withdrawals: FundAmount[]; shortfall: number } {
+  const fund = findFund(state, fundId);
+  if (!fund) return { withdrawals: [], shortfall: amount };
+  const rates = state.settings.exchangeRates;
+  const cash = fundCashByCurrency(state, fundId);
+  const order = [currency, fund.currency, ...CURRENCY_ORDER].filter((c, i, all) => all.indexOf(c) === i);
+  const withdrawals: FundAmount[] = [];
+  let left = amount;
+  for (const c of order) {
+    if (left <= MONEY_EPSILON) break;
+    const available = Math.max(0, cash[c]);
+    const wanted = convertCurrency(left, currency, c, rates);
+    const take = Math.min(wanted, available);
+    if (take <= MONEY_EPSILON) continue;
+    withdrawals.push(withdrawalOf(fund, c, take));
+    left = take >= wanted ? 0 : left - convertCurrency(take, c, currency, rates);
+  }
+  return { withdrawals, shortfall: left <= MONEY_EPSILON ? 0 : left };
 }
 
 // How much a fund should get this month (fund currency): its required monthly amount if it
@@ -386,7 +559,8 @@ export function fundSuggestedMonthly(state: State, fundId: string, now: Date = n
 }
 
 // Splits `amountEGP` across funds in priority order, each capped by its suggested monthly
-// amount, until the money runs out. Funds that would get nothing are omitted.
+// amount, until the money runs out. Funds that would get nothing are omitted. Amounts are in
+// each fund's currency.
 export function suggestAllocation(state: State, amountEGP: number, now: Date = new Date()): FundAmount[] {
   const rates = state.settings.exchangeRates;
   let leftEGP = Math.max(0, amountEGP);
@@ -402,39 +576,69 @@ export function suggestAllocation(state: State, amountEGP: number, now: Date = n
   return result;
 }
 
+// The same split for money in one currency: `amount` of `currency` across the funds, in that
+// currency (each fund's suggestion converted at today's rate). Every entry carries `currency`.
+export function suggestAllocationIn(
+  state: State,
+  currency: CurrencyCode,
+  amount: number,
+  now: Date = new Date()
+): FundAmount[] {
+  const rates = state.settings.exchangeRates;
+  let left = Math.max(0, amount);
+  const result: FundAmount[] = [];
+  for (const fund of fundsByPriority(state)) {
+    if (left <= MONEY_EPSILON) break;
+    const want = convertCurrency(fundSuggestedMonthly(state, fund.id, now), fund.currency, currency, rates);
+    const give = Math.min(want, left);
+    if (give <= MONEY_EPSILON) continue;
+    result.push({ fundId: fund.id, amount: round2(give), currency });
+    left -= give;
+  }
+  return result;
+}
+
 export interface CoverPlan {
   withdrawals: FundAmount[];
   // EGP still uncovered after the withdrawals (0 when fully covered).
   remainingEGP: number;
 }
 
-// Withdraws cash from the chosen funds, lowest priority first, until unassigned money is
-// back to zero. Funds without cash are skipped.
-export function planCover(state: State, fundIds: string[]): CoverPlan {
+// Withdraws cash from the chosen funds, lowest priority first, until each short currency's
+// unassigned money is back to zero. A currency is covered by funds' cash in that same currency
+// (the shortfall is in that currency's money). `only` limits it to one currency. Funds without
+// cash in the currency are skipped.
+export function planCover(state: State, fundIds: string[], only?: CurrencyCode): CoverPlan {
   const rates = state.settings.exchangeRates;
-  let deficitEGP = Math.max(0, -unassignedEGP(state));
-  const withdrawals: FundAmount[] = [];
+  const unassigned = unassignedByCurrency(state);
   const chosen = state.funds
     .filter((f) => fundIds.includes(f.id))
     .sort((a, b) => b.priority - a.priority);
-  for (const fund of chosen) {
-    if (deficitEGP <= 0.005) break;
-    const cashEGP = toEGP(fundAllocated(state, fund.id), fund.currency, rates);
-    const takeEGP = Math.min(cashEGP, deficitEGP);
-    if (takeEGP <= 0.005) continue;
-    // Round up to the cent so the cover never falls a fraction short.
-    const amount = Math.min(fundAllocated(state, fund.id), Math.ceil(fromEGP(takeEGP, fund.currency, rates) * 100) / 100);
-    withdrawals.push({ fundId: fund.id, amount });
-    deficitEGP -= takeEGP;
+  const withdrawals: FundAmount[] = [];
+  let remainingEGP = 0;
+  for (const currency of CURRENCY_ORDER) {
+    if (only && currency !== only) continue;
+    let deficit = Math.max(0, -unassigned[currency]);
+    for (const fund of chosen) {
+      if (deficit <= MONEY_EPSILON) break;
+      const cash = fundAllocatedIn(state, fund.id, currency);
+      const take = Math.min(cash, deficit);
+      if (take <= MONEY_EPSILON) continue;
+      // Round up to the cent so the cover never falls a fraction short.
+      withdrawals.push(withdrawalOf(fund, currency, Math.min(cash, Math.ceil(take * 100) / 100)));
+      deficit -= take;
+    }
+    remainingEGP += toEGP(Math.max(0, deficit), currency, rates);
   }
-  return { withdrawals, remainingEGP: Math.max(0, deficitEGP) };
+  return { withdrawals, remainingEGP };
 }
 
-// Default cover choice: the lowest-priority fund that holds cash.
-export function defaultCoverFundId(state: State): string | undefined {
-  return [...fundsByPriority(state)].reverse().find((f) => fundAllocated(state, f.id) > 0)?.id;
+// Default cover choice: the lowest-priority fund that holds cash (in `currency`, when given).
+export function defaultCoverFundId(state: State, currency?: CurrencyCode): string | undefined {
+  return [...fundsByPriority(state)]
+    .reverse()
+    .find((f) => (currency ? fundAllocatedIn(state, f.id, currency) : fundAllocated(state, f.id)) > 0)?.id;
 }
-
 // --- Transaction lists ------------------------------------------------------
 
 export type TransactionFilter = 'all' | Transaction['type'];

@@ -13,7 +13,7 @@ import { FIXED_CATEGORY_IDS } from '@/store/defaultCategories';
 import { pickerCategories } from '@/store/selectors';
 import type { CurrencyCode, ExpenseBucket, PlanLineKind } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { fromEGP, toEGP } from '@/utils/currency';
+import { convertCurrency } from '@/utils/currency';
 import { showMessage } from '@/utils/dialogs';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
@@ -87,7 +87,7 @@ export function AddLineSheet({ month, currency, usedIds, onAdd, onManage, onClos
     // The saved plan may still be in another currency than the draft.
     const planCurrency = state.monthlyPlans.find((p) => p.month === month)?.currency ?? currency;
     const rates = state.settings.exchangeRates;
-    const savedLimit = planCurrency === currency ? limit : fromEGP(toEGP(limit, currency, rates), planCurrency, rates);
+    const savedLimit = convertCurrency(limit, currency, planCurrency, rates);
     let categoryId = '';
     const ok = runAction('تعذّر إضافة البند', () => {
       categoryId = state.addCategoryWithPlanLine({ name, bucket }, { month, limit: savedLimit, kind });

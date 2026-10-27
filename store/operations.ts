@@ -15,11 +15,10 @@ import {
 } from './errors';
 import {
   fundAllocated,
-  fundAmountsEGP,
+  fundAllocatedIn,
   SINKING_CYCLE_MONTHS,
-  transactionAmountIn,
-  unassignedEGP,
-  unassignedEGPWithFundCash,
+  unassignedSummary,
+  withdrawalPlan,
   type FundAmount,
 } from './selectors';
 import type {
@@ -599,45 +598,74 @@ export function deleteFund(state: State, id: string, ctx: OpContext): Patch {
   };
 }
 
-function newMovement(state: State, fundId: string, amount: number, note: string | undefined, ctx: OpContext): FundMovement {
+function newMovement(
+  state: State,
+  fundId: string,
+  amount: number,
+  note: string | undefined,
+  ctx: OpContext,
+  currency?: CurrencyCode
+): FundMovement {
   return {
     updatedAt: ctx.now().toISOString(),
     id: ctx.newId(),
     fundId,
     amount,
+    // Only when the money's currency was chosen; otherwise the movement is in the fund's currency
+    // and covered by whichever money is available (see unassignedByCurrency).
+    ...(currency ? { currency } : {}),
     date: toDateKey(ctx.now()),
     ratesSnapshot: snapshotRates(state.settings.exchangeRates),
     ...(note ? { note } : {}),
   };
 }
 
+function assertCurrency(currency: CurrencyCode | undefined) {
+  if (currency !== undefined && !CURRENCY_CODES.includes(currency)) fail('CURRENCY_MISMATCH');
+}
+
+// Whether the new movements leave more money short (in EGP, per currency) than before.
+function worsensShortfall(state: State, added: FundMovement[]): boolean {
+  const before = unassignedSummary(state).deficitEGP;
+  const after = unassignedSummary({ ...state, fundMovements: [...state.fundMovements, ...added] }).deficitEGP;
+  return after > before + 0.005;
+}
+
+// Sets `amount` of `currency` aside for the fund (the fund's currency when omitted).
 export function allocateToFund(
   state: State,
   fundId: string,
   amount: number,
   note: string | undefined,
-  ctx: OpContext
+  ctx: OpContext,
+  currency?: CurrencyCode
 ): Patch {
   requireById(state.funds, fundId, 'fund');
   assertPositive(amount, 'amount');
-  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, amount, note, ctx)] };
+  assertCurrency(currency);
+  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, amount, note, ctx, currency)] };
 }
 
+// Takes `amount` of `currency` out of the fund's cash in that currency (the fund's currency when
+// omitted, from its own-currency cash).
 export function withdrawFromFund(
   state: State,
   fundId: string,
   amount: number,
   note: string | undefined,
-  ctx: OpContext
+  ctx: OpContext,
+  currency?: CurrencyCode
 ): Patch {
-  requireById(state.funds, fundId, 'fund');
+  const fund = requireById(state.funds, fundId, 'fund');
   assertPositive(amount, 'amount');
-  if (amount > fundAllocated(state, fundId)) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
-  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, -amount, note, ctx)] };
+  assertCurrency(currency);
+  if (amount > fundAllocatedIn(state, fundId, currency ?? fund.currency)) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
+  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, -amount, note, ctx, currency)] };
 }
 
-// Allocates to several funds at once. All or nothing: the total may not exceed the
-// money that is currently unassigned.
+// Allocates to several funds at once. All or nothing: the money may not exceed what is
+// unassigned in its currency (an allocation without a currency is in its fund's currency and,
+// like data from before currencies, may use any currency's money).
 export function allocateMany(
   state: State,
   allocations: FundAmount[],
@@ -645,20 +673,18 @@ export function allocateMany(
   ctx: OpContext
 ): Patch {
   if (allocations.length === 0) fail('NOTHING_SELECTED');
-  for (const { fundId, amount } of allocations) {
+  for (const { fundId, amount, currency } of allocations) {
     requireById(state.funds, fundId, 'fund');
     assertPositive(amount, 'amount');
+    assertCurrency(currency);
   }
-  if (fundAmountsEGP(state, allocations) > unassignedEGP(state) + 0.005) fail('INSUFFICIENT_UNASSIGNED');
-  return {
-    fundMovements: [
-      ...state.fundMovements,
-      ...allocations.map(({ fundId, amount }) => newMovement(state, fundId, amount, note, ctx)),
-    ],
-  };
+  const added = allocations.map(({ fundId, amount, currency }) => newMovement(state, fundId, amount, note, ctx, currency));
+  if (worsensShortfall(state, added)) fail('INSUFFICIENT_UNASSIGNED');
+  return { fundMovements: [...state.fundMovements, ...added] };
 }
 
-// Withdraws from several funds at once. All or nothing: no fund may go below zero cash.
+// Withdraws from several funds at once. All or nothing: no fund may go below zero cash in any
+// currency.
 export function withdrawMany(
   state: State,
   withdrawals: FundAmount[],
@@ -666,26 +692,31 @@ export function withdrawMany(
   ctx: OpContext
 ): Patch {
   if (withdrawals.length === 0) fail('NOTHING_SELECTED');
-  const perFund = new Map<string, number>();
-  for (const { fundId, amount } of withdrawals) {
-    requireById(state.funds, fundId, 'fund');
+  const perFundCurrency = new Map<string, { fundId: string; currency: CurrencyCode; total: number }>();
+  for (const { fundId, amount, currency } of withdrawals) {
+    const fund = requireById(state.funds, fundId, 'fund');
     assertPositive(amount, 'amount');
-    perFund.set(fundId, (perFund.get(fundId) ?? 0) + amount);
+    assertCurrency(currency);
+    const cur = currency ?? fund.currency;
+    const key = `${fundId}|${cur}`;
+    const entry = perFundCurrency.get(key) ?? { fundId, currency: cur, total: 0 };
+    entry.total += amount;
+    perFundCurrency.set(key, entry);
   }
-  for (const [fundId, total] of perFund) {
-    if (total > fundAllocated(state, fundId) + 0.005) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
+  for (const { fundId, currency, total } of perFundCurrency.values()) {
+    if (total > fundAllocatedIn(state, fundId, currency) + 0.005) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
   }
   return {
     fundMovements: [
       ...state.fundMovements,
-      ...withdrawals.map(({ fundId, amount }) => newMovement(state, fundId, -amount, note, ctx)),
+      ...withdrawals.map(({ fundId, amount, currency }) => newMovement(state, fundId, -amount, note, ctx, currency)),
     ],
   };
 }
-
 // Edits a fund's details and sets its cash allocation in one atomic patch. The allocation is
-// changed by a single adjustment movement for the difference. Increasing it may not push
-// unassigned money below zero; decreasing is always allowed (it only frees money).
+// changed by an adjustment movement for the difference (a decrease comes out of the fund's cash
+// currency by currency, so it can be several). Increasing it may not leave more money short;
+// decreasing is always allowed (it only frees money).
 // Omitted optional fields keep their current values, except `deadline`, which is cleared.
 export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpContext): Patch {
   const fund = requireById(state.funds, fundId, 'fund');
@@ -706,14 +737,17 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
   assertNonNegative(edit.cashAllocation, 'cashAllocation');
 
   const change = edit.cashAllocation - fundAllocated(state, fundId);
-  if (change > 0 && unassignedEGPWithFundCash(state, fundId, edit.cashAllocation) < 0) {
-    fail('INSUFFICIENT_UNASSIGNED', { id: fundId });
+  let adjustments: FundMovement[] = [];
+  if (change >= 0.005) {
+    // In the fund's currency, covered by any currency's money (like data from before currencies).
+    adjustments = [newMovement(state, fundId, change, 'تعديل الرصيد', ctx)];
+    if (worsensShortfall(state, adjustments)) fail('INSUFFICIENT_UNASSIGNED', { id: fundId });
+  } else if (change <= -0.005) {
+    const plan = withdrawalPlan(state, fundId, -change, fund.currency);
+    adjustments = plan.withdrawals.map((w) => newMovement(state, fundId, -w.amount, 'تعديل الرصيد', ctx, w.currency));
+    if (plan.shortfall > 0.005) adjustments.push(newMovement(state, fundId, -plan.shortfall, 'تعديل الرصيد', ctx));
   }
-
-  const fundMovements =
-    Math.abs(change) >= 0.005
-      ? [...state.fundMovements, newMovement(state, fundId, change, 'تعديل الرصيد', ctx)]
-      : state.fundMovements;
+  const fundMovements = adjustments.length > 0 ? [...state.fundMovements, ...adjustments] : state.fundMovements;
   return { funds: replaceById(state.funds, updated, 'fund'), fundMovements };
 }
 
@@ -728,8 +762,8 @@ export interface SinkingPayment {
 }
 
 // Records a sinking fund's bill as one atomic step: the expense transaction, a withdrawal of
-// the same value from the fund's cash (as much as it holds; any excess comes out of
-// unassigned money), and nextDueDate advanced by one cycle.
+// the same value from the fund's cash (as much as it holds, the payment's currency first; any
+// excess comes out of unassigned money), and nextDueDate advanced by one cycle.
 export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpContext): Patch {
   const fund = requireById(state.funds, payment.fundId, 'fund');
   if (fund.type !== 'sinking') fail('NOT_A_SINKING_FUND', { id: fund.id });
@@ -758,11 +792,12 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
       ctx
     )
   );
-  // The payment in the fund's currency, at the expense's own rates (exact when both match).
-  const expense = draft.transactions[0] as IncomeExpenseTransaction;
-  const valueInFund = transactionAmountIn(state, expense, fund.currency);
-  const take = Math.min(valueInFund, fundAllocated(draft, fund.id));
-  if (take > 0.005) apply(withdrawFromFund(draft, fund.id, take, `اتدفعت: ${fund.name}`, ctx));
+  // Cash in the payment's own currency pays first (no conversion), then the fund's own currency
+  // and the others at today's rate.
+  const { withdrawals } = withdrawalPlan(draft, fund.id, payment.amount, account.currency);
+  for (const w of withdrawals) {
+    apply(withdrawFromFund(draft, fund.id, w.amount, `اتدفعت: ${fund.name}`, ctx, w.currency));
+  }
 
   const nextDue = addMonthsToDate(fund.nextDueDate, SINKING_CYCLE_MONTHS[fund.frequency]);
   apply({

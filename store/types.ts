@@ -122,12 +122,18 @@ export interface Fund extends Synced {
 export interface FundMovement extends Synced {
   id: string;
   fundId: string;
-  // In the fund's currency: positive = allocate, negative = withdraw.
+  // In `currency`: positive = allocate, negative = withdraw. It never changes with the rates;
+  // only its value in the fund's currency does (see fundAllocated).
   amount: number;
+  // The currency `amount` is in, and so the currency of the money that was set aside. Missing =
+  // the fund's currency, covered by whichever money is available (matching currency first, then
+  // the others at today's rate): every movement saved before currencies existed, and the fund
+  // edit sheet's adjustments.
+  currency?: CurrencyCode;
   date: string;
   note?: string;
-  // Rates when the movement was made; used to show it in another currency (plan, EGP totals).
-  // Missing on older movements, which convert at today's rates.
+  // Rates when the movement was made; used to show it in another currency in history (plan,
+  // review, month totals). Missing on older movements, which convert at today's rates.
   ratesSnapshot?: RatesSnapshot;
 }
 

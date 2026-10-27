@@ -14,7 +14,7 @@ import { space } from '@/constants/theme';
 import { fundAllocated, pickerCategories, SINKING_CYCLE_MONTHS } from '@/store/selectors';
 import type { Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { fromEGP, toEGP } from '@/utils/currency';
+import { convertCurrency } from '@/utils/currency';
 import { addMonthsToDate, toDateKey } from '@/utils/dates';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
@@ -48,7 +48,7 @@ export function PaySinkingSheet({ fund, onClose }: PaySinkingSheetProps) {
 
   const account = accounts.find((a) => a.id === accountId);
   const defaultAmount = account
-    ? round2(fromEGP(toEGP(fund.targetAmount, fund.currency, rates), account.currency, rates))
+    ? round2(convertCurrency(fund.targetAmount, fund.currency, account.currency, rates))
     : fund.targetAmount;
   const amountValue = amountText ?? String(defaultAmount);
   const nextDue =

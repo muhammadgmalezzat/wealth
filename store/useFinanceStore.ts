@@ -11,6 +11,7 @@ import { stateSummary, type FundAmount } from './selectors';
 import type {
   Account,
   Category,
+  CurrencyCode,
   ExchangeRates,
   FinanceState,
   Fund,
@@ -101,8 +102,9 @@ interface FinanceActions {
   allocateMany: (allocations: FundAmount[], note?: string) => void;
   withdrawMany: (withdrawals: FundAmount[], note?: string) => void;
   paySinkingFund: (payment: ops.SinkingPayment) => void;
-  allocateToFund: (fundId: string, amount: number, note?: string) => void;
-  withdrawFromFund: (fundId: string, amount: number, note?: string) => void;
+  // `currency`: the currency of `amount` (the fund's when omitted).
+  allocateToFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode) => void;
+  withdrawFromFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode) => void;
   updateFundMovement: (movement: ops.Editable<FundMovement>) => void;
   deleteFundMovement: (id: string) => void;
 
@@ -225,10 +227,10 @@ export const useFinanceStore = create<FinanceStore>()(
       allocateMany: (allocations, note) => set(ops.allocateMany(get(), allocations, note, ctx)),
       withdrawMany: (withdrawals, note) => set(ops.withdrawMany(get(), withdrawals, note, ctx)),
       paySinkingFund: (payment) => set(ops.paySinkingFund(get(), payment, ctx)),
-      allocateToFund: (fundId, amount, note) =>
-        set(ops.allocateToFund(get(), fundId, amount, note, ctx)),
-      withdrawFromFund: (fundId, amount, note) =>
-        set(ops.withdrawFromFund(get(), fundId, amount, note, ctx)),
+      allocateToFund: (fundId, amount, note, currency) =>
+        set(ops.allocateToFund(get(), fundId, amount, note, ctx, currency)),
+      withdrawFromFund: (fundId, amount, note, currency) =>
+        set(ops.withdrawFromFund(get(), fundId, amount, note, ctx, currency)),
       updateFundMovement: (movement) => set(ops.updateFundMovement(get(), movement, ctx)),
       deleteFundMovement: (id) => set(ops.deleteFundMovement(get(), id, ctx)),
 

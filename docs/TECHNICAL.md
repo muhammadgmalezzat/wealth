@@ -172,7 +172,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencies.ts (DEFAULT_RATES), market.ts
-tests/logic.test.ts         207 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         219 tests over store/*, utils/* and the pure UI helpers
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
 .easignore                  EAS upload filter (keeps store/seed.local.ts)
@@ -275,8 +275,8 @@ hex colors and no raw font sizes, weights, radii or shadows — only the tokens 
 - Amber (`warning`) = needs attention but nothing is wrong yet (fund "محتاج انتباه", plan line
   near its limit, overdue backup, missed due item, over-budget hint while typing).
 - Red (`danger`) only where money is actually short or input is invalid. The complete list:
-  negative unassigned (UnassignedPanel, Home cover InsightCard, CoverSheet deficit), an
-  AssignSheet / FundSheet allocation that would make unassigned negative, a plan line over its
+  a shortfall in any currency of unassigned money (UnassignedPanel, Home cover InsightCard, CoverSheet deficit), an
+  AssignSheet / FundSheet allocation that would leave money short, a plan line over its
   limit (PlanLineRow / LineSheet "عدى الخطة", ProgressBar `over`), validation errors (FormField,
   AccountPicker, CategoryPicker, TransactionSheet), and the `destructive` Button (delete/cover).
 - State is never conveyed by color alone: every colored state has a label (StatusChip, text) or
@@ -402,9 +402,12 @@ Content padding `space.lg`, section gap `space.xxl`. Order (`app/(tabs)/index.ts
    Hidden without content.
 7. **الصناديق** — up to 3 `homeFunds` as FundCards; "عرض كل الصناديق" → /goals; subtle hint when
    there are none.
-8. **UnassignedPanel** — positive: "فلوس متاحة للتخطيط" + "وزّع أموالك" (AssignSheet); negative:
-   dangerSurface card "استخدمت جزء من فلوس الصناديق." + "غطّي الفرق" (CoverSheet); zero: nothing.
-   Hidden when the top action is `cover`/`assign`.
+8. **UnassignedPanel** — "فلوس بدون وظيفة": one row per currency that has money or a shortfall
+   (name + `Money` in that currency, negative in danger) and, when there is more than one row or
+   the only one isn't EGP, "الإجمالي بالجنيه" at today's rate; surplus → "وزّع أموالك"
+   (AssignSheet); any shortfall → dangerSurface card, "استخدمت جزء من فلوس الصناديق." and
+   "غطّي الفرق" (CoverSheet); nothing at all: nothing shown. Hidden when the top action is
+   `cover`/`assign`.
 9. **NetWorthCard** — "صافي الثروة" (Money lg); under it the change since last month's snapshot
    (`netWorthChange`: Money with sign, green ≥ 0 / danger < 0, "{±x.x%} عن {month}"; no % when it
    started at 0; hidden without a snapshot); مصر / السعودية lines (`netWorthByLocation`), سيولة /
@@ -422,14 +425,14 @@ priority order); `nextActions` drops snoozed ones. Each action:
 | # | id | Condition | Severity | Title | CTA |
 |---|---|---|---|---|---|
 | 1 | `due` | `dueOccurrences(today, 'confirm')` not empty | urgent | عندك {dueCountPhrase} | راجعهم → /due |
-| 2 | `cover` | `unassignedEGP < −0.005` | urgent | صرفت {X} من فلوس مخصصة | غطّي الفرق → CoverSheet |
+| 2 | `cover` | some currency is short (`unassignedSummary().deficits`, beyond 0.005) | urgent | صرفت {X} من فلوس مخصصة — X in that currency when only one is short, else the EGP total | غطّي الفرق → CoverSheet |
 | 3 | `overspent` | this month's plan has `overspentLines` | warning | عدّيت ميزانية: {names} | افتح الخطة → /plan |
 | 4 | `review-YYYY-MM` | `pendingReviewMonth`: last month had transactions (≥ trackingStartDate) and no `monthlyReviews` entry | opportunity | راجع شهر {month} | ابدأ المراجعة → /review?month= |
 | 5 | `plan-YYYY-MM` | no plan this month | warning | اعمل خطة الشهر | اعمل الخطة → /plan |
 | 6 | `emergency` | no active emergency fund → create; or emergency cash (EGP) < 1 month of essentials (`suggestedEmergencyTarget(3)/3`, needs history) → allocate | opportunity | ابدأ صندوق الطوارئ | أنشئ الصندوق → FundSheet / خصص الآن → fund |
 | 7 | `sinking-<id>` | sinking fund with `nextDueDate − today ≤ 14` days (overdue included) and `target − fundCurrent > 0` | warning | فاضل {X} على {fund} | خصص الآن → /fund/[id]?allocate=1 |
 | 8 | `behind-<id>` | `fundStatus = behind`, `fundMonthShortfall > 0`, not already listed in 7 | warning | {صندوق name} متأخر {shortfall} الشهر ده | خصص الآن → /fund/[id]?allocate=1 |
-| 9 | `assign` | `unassignedEGP > 0.005` | opportunity | عندك {X} بدون وظيفة، وزّعها | وزّع أموالك → AssignSheet |
+| 9 | `assign` | some currency has money left (`surpluses`, beyond 0.005) | opportunity | عندك {X} بدون وظيفة، وزّعها — X in its own currency when only one has some, else the EGP total | وزّع أموالك → AssignSheet |
 | 10 | `prices` | gold price (when gold holdings exist) or rates (when any non-EGP account / holding / fund / plan exists) updated ≥ 7 days ago — skipped when `pricesFetchedRecently` (auto mode, full success in the last 24 h) | info | حدّث {سعر الذهب / أسعار الصرف / أسعار الذهب والصرف} | حدّث الأسعار → /settings |
 | 11 | `backup` | there is data (transactions, funds or holdings) and `needsBackupReminder` (never, or ≥ 7 days) | info | اعمل نسخة احتياطية | تصدير نسخة → /settings?export=1 |
 
@@ -486,7 +489,7 @@ Numbers from `monthReview(state, month, now)` (`store/review.ts`, pure, unit-tes
    funds that reached their target ("وصل للهدف").
 5. **خطوتك الجاية** — next month has a plan → chip + "افتح الخطة"; otherwise "اقترح خطة الشهر
    الجاي" (`savePlan(planSuggestion)`) and "انسخ خطة {latest planned month before it}"
-   (`copyPlan`). "وزّع الفايض ({unassigned})" → AssignSheet when unassigned > 0.
+   (`copyPlan`). "وزّع الفايض ({surplusEGP})" → AssignSheet when some currency has money left (`surplusEGP`).
 
 The primary "خلّصت المراجعة" calls `completeMonthlyReview(month)` (adds
 `{ id: review-YYYY-MM, month, completedAt }`; once per month; `INVALID_MONTH` for a bad or future
@@ -594,13 +597,23 @@ FundSheet — type Segment (الطوارئ / هدف / مصاريف دورية), 
 keeps its currency; there is no currency choice today), emergency suggestions as tertiary
 "استخدم المقترح (٣ / ٦ شهور): X", deadline (FutureDateField, "بدون موعد"), sinking frequency +
 next due date (+ suggested monthly), priority, linked gold chips, edit: cash allocation + "فلوس
-متاحة للتخطيط بعد الحفظ" preview, احذف الصندوق. MoveMoneySheet — إضافة / سحب Segment (starts on
-the side that opened it), AmountInput with "المتاح للتخطيط" / "في الصندوق نقداً" hint, note (there
-is no date field). PaySinkingSheet — AmountInput, AccountPicker, CategoryPicker, date, note, one
-line about the withdrawal and the next due date. AssignSheet — live "هتوزّع X من Y" + what stays
-available, "وزّع المقترح" (fills `suggestAllocation`, as before), fund ListRows with an amount input
-on the end side. CoverSheet — deficit card, "غطّي الفرق من الصناديق دي:", selectable fund rows with
-the `planCover` withdrawal, result line (amber when something is still uncovered).
+متاحة للتخطيط بعد الحفظ" preview (a "منهم: …" line when the fund holds cash in several currencies),
+احذف الصندوق. MoveMoneySheet — إضافة / سحب Segment (starts on the side that opened it), a currency
+Segment (جنيه / ريال / دولار; adding: all three, default the fund's currency; withdrawing: the
+currencies the fund holds cash in), AmountInput in that currency with "المتاح للتخطيط" / "في الصندوق
+نقداً" (in that currency) hint and, for another currency than the fund's, "بسعر النهارده ≈ X في
+الصندوق", note (there is no date field); saves `allocateMany([{ fundId, amount, currency }])` /
+`withdrawFromFund(…, currency)`. PaySinkingSheet — AmountInput, AccountPicker, CategoryPicker, date, note, one
+line about the withdrawal and the next due date. AssignSheet — a currency Segment when more than
+one currency has money left (default: the biggest by EGP value; switching clears the amounts),
+live "هتوزّع X من Y" + what stays available (all in that currency), "وزّع المقترح" (fills
+`suggestAllocationIn`), fund ListRows (suggestion converted to that currency) with an amount input
+on the end side. CoverSheet — a currency Segment when more than one currency is short, the
+shortfall card in that currency, "غطّي الفرق من الصناديق دي:", selectable fund rows (only funds
+with cash in that currency, showing it) with the `planCover` withdrawal, result line (amber when
+something is still uncovered). Fund detail: a "بالعملات" fact (each currency's cash) when the fund
+holds more than one currency, and every movement shows in its own currency with the fund-currency
+value under it.
 
 **Recurring** — see the route table. `ruleState`: paused (inactive) · ended (no `nextDate`) · active.
 
@@ -732,7 +745,7 @@ Every synced entity has `updatedAt` (set only by operations).
   - `transfer`: `fromAccountId`, `toAccountId`, `toAmount` (in the target account's currency)
   - `asset_purchase`: `accountId`, `currency`, `holdingId` — cash turned into a holding
 - **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), updatedAt }`
-- **FundMovement** `{ id, fundId, amount (+allocate / −withdraw, fund currency), date, note?, ratesSnapshot?, updatedAt }`
+- **FundMovement** `{ id, fundId, amount (+allocate / −withdraw, in `currency`), currency? (the money's currency; missing = the fund's currency, covered by any currency's money — see Funds below), date, note?, ratesSnapshot?, updatedAt }`
 - **Holding** (union): `gold { weightGrams, karat: 18|21|24 }` or `currency { currency, quantity }`; common `id, name, purchaseCostEGP, purchaseDate?, location? (default EG), note?, updatedAt`
 - **Liability** `{ id, name, principal, currency, monthlyPayment?, startDate, notes?, updatedAt }` (no interest)
 - **RecurringRule** `{ id, name, kind: income|expense|transfer, amount, currency (= account currency), accountId, categoryId? (income/expense), toAccountId?, toAmount? (transfers; required when currencies differ), frequency: weekly|monthly|yearly, interval ≥ 1, dayOfMonth? 1–31 (clamped to month end), startDate, endDate?, nextDate ('' when nothing is left), mode: auto|confirm, variableAmount, active, skippedDates[], note?, createdAt, updatedAt }`
@@ -913,7 +926,8 @@ currency; same-currency amounts are never converted). The full table is under "C
 | `movementAmountIn` → `planProgress` contributions, monthly review funds, `monthFlows.savedToFundsEGP` | historical | fund currency = target: none; else `movement.ratesSnapshot` |
 | `monthSummary`, `transactionNetEGP`, review categories / one-time, `monthFlows.investedEGP`, TransactionRow "≈ EGP" | historical | `tx.amount × tx.rateToEGP` |
 | `paySinkingFund` withdrawal (payment → fund currency) | historical (the expense just made) | `transactionAmountIn` on that expense; exact when account and fund share a currency |
-| `fundAllocated`, `fundStatus`, `fundMonthShortfall` | fund currency only | none |
+| `fundCashByCurrency`, `fundAllocatedIn`, `unassignedByCurrency` | native, per currency | none |
+| `fundAllocated`, `fundStatus`, `fundMonthShortfall` (this month's movements) | current valuation in the fund currency | today's (each movement from its own currency; identity for the fund's own) |
 | `spendImpact` (expense being typed), `recurringMonthly`, `suggestedContributions`, `emptyPlan`, transfer / occurrence default `toAmount`, plan editor currency switch, AddLineSheet, PaySinkingSheet / MoveMoneySheet suggestions | not recorded yet | today's (`convertCurrency`, identity for the same currency) |
 | `accountBalanceEGP`, `liquidTotalEGP`, `holdingValueEGP`, `fundLinkedValue` / `fundCurrent` (linked gold part), `liabilitiesTotalEGP`, `netWorthEGP`, `unassignedEGP`, `suggestAllocation`, `planCover`, `fundsSummary`, emergency-fund action | current valuation | today's |
 
@@ -934,7 +948,8 @@ Known approximation: transactions and fund movements recorded before `ratesSnaps
 - `liquidByCurrency`: Σ balances per currency (no conversion); `goldTotals`: grams total, by karat, Σ cost
 
 ### Funds
-- `fundAllocated = Σ movements` (fund currency); `fundLinkedValue = fromEGP(Σ linked holdingValueEGP)`
+- `fundCashByCurrency` = Σ the fund's movements per currency, each **in its own currency** (a movement's currency is `m.currency ?? fund.currency`); `fundAllocatedIn(cur)` = one of them. `fundAllocated` (fund currency) = Σ over currencies of `convertCurrency(cash[c], c, fund.currency)` at **today's** rate, which for a fund that only holds its own currency is just the sum of its movements
+- `fundLinkedValue` (fund currency) = Σ per linked holding: a currency holding → `convertCurrency(quantity, holding.currency, fund.currency)` (its quantity when it is the fund's own currency), gold → `fromEGP(holdingValueEGP)`
 - `fundCurrent = fundAllocated + fundLinkedValue`; `fundProgress = max(0, current / target)` (1 if target ≤ 0)
 - `fundDueDate` = `nextDueDate` (sinking) or `deadline`
 - `monthsUntil(due, now) = max(1, (dy−ny)·12 + (dm−nm) + 1)` (`utils/dates.ts`, current month counts)
@@ -942,11 +957,14 @@ Known approximation: transactions and fund movements recorded before `ratesSnaps
 - `sinkingMonthlySuggestion = target / monthsUntil(nextDueDate)` (ignores savings so far)
 - `fundStatus`: required = `max(0, target − (current − allocatedThisMonth)) / monthsUntil`; `no_deadline` without due date; `ahead` if required ≤ 0 or allocatedThisMonth > 1.1 × required; `on_track` if ≥ required; below required → `pending` while `daysLeftInMonth(month, now) > 7` (today counts: in a 31-day month day 24 leaves 8, day 25 leaves 7) or when the fund's `createdAt` is in the current month, otherwise `behind` (`BEHIND_DAYS_LEFT = 7`)
 - `fundSuggestedMonthly = min(requiredMonthly ?? monthlyContribution ?? 0, target − current)`
-- `unassignedEGP = liquidTotalEGP − Σ toEGP(movement, fund.currency)` (linked gold is not cash)
-- `unassignedEGPWithFundCash(cash)` = preview after setting a fund's cash allocation
-- `suggestAllocation(amountEGP)`: funds by priority, each gets `min(fundSuggestedMonthly in EGP, left)`, rounded to 0.01
-- `planCover(fundIds)`: deficit = `max(0, −unassigned)`; chosen funds lowest priority first; take `min(cash, deficit)`, rounded **up** to 0.01; `defaultCoverFundId` = lowest-priority fund with cash
-- `paySinkingFund` (operations): expense in account currency → withdraw `min(amount × rateToEGP → fund currency, fund cash)` → `nextDueDate += cycle months` (`SINKING_CYCLE_MONTHS`: 12/6/3, `addMonthsToDate` clamps to month end)
+- **Unassigned money is per currency** (`unassignedByCurrency`, linked gold is not cash): start from `liquidByCurrency` (account balances summed in their own currency, never via EGP) and subtract each movement that has a `currency` from that currency. Movements **without** a `currency` (all data from before currencies, and the fund edit sheet's adjustments) have no source currency: per fund currency they are summed, covered by that currency's money first, then by what is left in the other currencies at today's rate (EGP → SAR → USD), and any rest is a shortfall in their own currency. This keeps every figure of old data exactly what it was (the totals are linear), without inventing a shortfall when EGP funds were paid from SAR money.
+- `unassignedSummary`: `byCurrency`, `surpluses` / `deficits` (native, only beyond 0.005), and display totals in EGP at today's rate (`totalEGP`, `surplusEGP`, `deficitEGP`). `unassignedEGP` = `totalEGP`. `unassignedEGPWithFundCash(cash)` = preview after setting a fund's cash allocation (total).
+- `allocateMany`: each allocation is in `currency` (omitted = the fund's currency, any currency's money); it fails with `INSUFFICIENT_UNASSIGNED` when the new movements would raise the EGP total of per-currency shortfalls (`worsensShortfall`). So SAR money can't be allocated beyond the SAR that exists, however much EGP there is.
+- `withdrawFromFund` / `withdrawMany`: per currency, never beyond the fund's cash **in that currency** (`WITHDRAW_EXCEEDS_FUND`); omitted currency = the fund's currency.
+- `withdrawalPlan(fund, amount, currency)`: how to take an amount out of a fund's cash — same currency first, then the fund's own, then the others at today's rate; used by `paySinkingFund` and by `editFund` decreases.
+- `suggestAllocation(amountEGP)` (legacy, fund currencies): funds by priority, each gets `min(fundSuggestedMonthly in EGP, left)`, rounded to 0.01. `suggestAllocationIn(currency, amount)`: the same for money in one currency, each fund's suggestion converted at today's rate, entries carry `currency`.
+- `planCover(fundIds, only?)`: per short currency, deficit = `max(0, −unassigned[c])`; chosen funds lowest priority first; take `min(cash in c, deficit)`, rounded **up** to 0.01, as a withdrawal in c (the `currency` is left out when it is the fund's own); `remainingEGP` = what is still short; `defaultCoverFundId(currency?)` = lowest-priority fund with cash (in that currency)
+- `paySinkingFund` (operations): expense in account currency → `withdrawalPlan` (the payment currency's cash first, so no conversion; then the fund's own currency and the others at today's rate; whatever the cash can't cover stays unassigned) → `nextDueDate += cycle months` (`SINKING_CYCLE_MONTHS`: 12/6/3, `addMonthsToDate` clamps to month end)
 
 ### Cash flow
 - `transactionNetEGP`: income `+amount × rateToEGP`, expense `−…`, transfers/purchases 0
@@ -988,7 +1006,7 @@ Known approximation: transactions and fund movements recorded before `ratesSnaps
 4. `oneTime` expenses count as spending but are excluded from averages (emergency target, plan suggestion).
 5. Cash-flow reports ignore transactions before `settings.trackingStartDate`; balances never do.
 6. Transaction currency always equals its account currency; history keeps its rate snapshot.
-7. Unassigned money = cash not earmarked by fund movements; increasing a fund allocation may not make it negative (`allocateMany`, `editFund` increases); decreases always allowed.
+7. Unassigned money = cash not earmarked by fund movements, **per currency**; increasing a fund allocation may not leave more money short (`allocateMany`, `editFund` increases); decreases always allowed. An amount in a currency never changes with the rates (1000 SAR stays 1000 SAR): only its value in another currency (EGP equivalent, fund value, net worth) follows today's rate.
 8. Sinking payments withdraw at most the fund's cash; the rest comes from unassigned money.
 9. Plans are zero-based, one per month, id `plan-YYYY-MM`; fixed lines never count as safe to spend.
 10. Locations: holdings without location and all liabilities count as Egypt.
@@ -1062,7 +1080,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts` (207 tests, ~20 s; the encrypted round
+`npm run test:logic` → `tsx --test tests/logic.test.ts` (219 tests, ~20 s; the encrypted round
 trip uses the real 200k-iteration KDF). Suites: migrations (v0–v7), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,
@@ -1077,7 +1095,9 @@ reports, bucket move → plan totals, atomic addCategoryWithPlanLine), next best
 on/off, priority order, CTA routes, 24 h snooze, non-dismissible due/cover), net worth snapshots
 (backfill, upsert without loops, as-of-date figures, change vs last month), migration v6 → v7
 (backfill, idempotent, chain), monthly review (savings rate, plan vs actual, top categories,
-one-time, funds, next step, finishing), monthFlows, formatPercent, currency conversion (same
+one-time, funds, next step, finishing), monthFlows, formatPercent, native amounts (1000 SAR stays 1000 SAR when
+the rate moves, SAR allocation to an EGP fund, per-currency withdrawals / cover / sinking payment, old
+movements unchanged, fund edit, plan history), currency conversion (same
 currency exact after a rate change, other currencies at their own snapshot, suggestion / spend
 impact / fund allocations unaffected by rate changes, records without a snapshot, snapshot kept
 or retaken on edit, same-currency sinking payment), live prices (FX and gold math with a premium,
@@ -1109,6 +1129,14 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
   filled in, so "change vs last month" right after the upgrade mostly shows that month's cash
   flow. Live snapshots are only as fresh as the last time the app ran in that month.
 - `DEFAULT_PLAN_CURRENCY` is SAR for every install.
+- Fund movements saved before currencies (and the fund edit sheet's adjustments) have no source currency: they use the
+  fund's currency and are covered by whichever money is available, at today's rate for the part that comes from
+  another currency, so that part of old data still moves with the rate. Only allocations made with a currency
+  (the Assign / Add sheets) are exact. Nothing converts old movements automatically: their source is unknown.
+- A shortfall in one currency is never offset by money in another: a negative balance (or spending SAR beyond
+  the SAR set aside) asks to be covered with that currency's fund cash, even when EGP is spare.
+- Withdrawing from a fund works per currency; there is no "convert the earmark" action (e.g. turning SAR set
+  aside into EGP set aside): withdraw it and add it again in the other currency.
 - Transactions and fund movements recorded before `ratesSnapshot` existed convert into a
   different currency partly at today's rates (see "Conversion rules"); there is no backfill
   because the rates of that time are unknown.
@@ -1194,7 +1222,7 @@ lastBackupAt, appLockEnabled, dueNotificationsEnabled}, tombstones.
 
 Rules: balances at current rates, flows at snapshot rates; net worth = cash + holdings at
 market − liabilities; gold purchase isn't an expense; one fund per holding; unassigned = cash −
-fund movements; sinking payment atomic; plan zero-based; safe to spend = Σ max(0, remaining)
+fund movements, per currency; sinking payment atomic; plan zero-based; safe to spend = Σ max(0, remaining)
 on flexible lines ÷ days left for per-day; reports ignore tx before trackingStartDate;
 recurring: processDue (auto, idempotent, current rate) after hydration + on foreground, confirm
 rules → /due inbox (تم / تخطّي), recurring rules feed planSuggestion (fixed lines + income).

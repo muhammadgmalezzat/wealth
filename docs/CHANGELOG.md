@@ -6,6 +6,59 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-10-27) — 1.1.0 · data v7 (OTA update) · Amounts keep their own currency
+
+> JS-only (ships with `eas update` to 1.1.0 builds). One additive optional field
+> (`FundMovement.currency`), no migration, data version stays 7; older backups restore unchanged.
+
+**For users**
+- Money in a currency no longer drifts with the exchange rate. 1000 SAR stays 1000 SAR; only its
+  value in another currency (the EGP figure, net worth, an EGP fund) follows today's rate.
+- "فلوس بدون وظيفة" (Home and the Funds tab) is now shown per currency, each in its own currency
+  (ج.م / ر.س), with "الإجمالي بالجنيه" at today's rate underneath.
+- Adding to a fund ("إضافة") and "وزّع أموالك" let you choose the currency of the money (جنيه / ريال /
+  دولار). Adding defaults to the fund's currency. A SAR allocation to an EGP fund stays the same
+  SAR amount while the fund's value follows the rate, and the SAR you have left doesn't change.
+  You can't allocate more of a currency than exists, however much of another you have.
+- Withdrawing ("سحب") works in the currencies the fund actually holds; "غطّي الفرق" covers a
+  shortfall in a currency with funds' cash in that same currency (a currency picker appears when
+  several are short); paying a periodic bill ("اتدفعت") uses cash in the payment's currency first.
+- The fund screen shows each movement in its own currency (with the fund-currency value under it)
+  and a "بالعملات" line when the fund holds cash in more than one currency. A currency holding in
+  Assets now shows its quantity (e.g. ر.س 1,000) with its EGP value beside it.
+- Everything saved before this update behaves exactly as before: funds paid from another currency's
+  money are covered by whichever money is available, at today's rate, so no shortfall appears out of
+  nowhere and the totals don't change.
+
+**Technical**
+- `FundMovement.currency?`: the currency of `amount`; missing = the fund's currency, covered by any
+  currency's money (all old data, and `editFund`'s adjustments). `ratesSnapshot` stays for history.
+- Audit of native → EGP → native round trips: `accountBalance` / `liquidByCurrency` were already
+  summed natively (no change; now pinned by a test). Removed round trips: `fundLinkedValue`
+  (currency holdings are their quantity in their own currency), the fund-edit and cover logic
+  (`fundAllocated` summed movements as if all in the fund currency), `PaySinkingSheet` default
+  amount, `TransactionSheet` default received amount, `PlanEditorSheet` currency switch and
+  `AddLineSheet` conversion (all now `convertCurrency`, identity for the same currency).
+- Selectors: `fundCashByCurrency`, `fundAllocatedIn`, `movementCurrency`, `movementValueInFund`,
+  `unassignedByCurrency` / `unassignedSummary` (`unassignedEGP` = its total, so old totals are
+  identical), `withdrawalPlan`, `suggestAllocationIn`; `fundAllocated` converts each currency's
+  cash to the fund currency at today's rate; `movementAmountIn` (history) uses the movement's
+  currency; `planCover(fundIds, only?)` / `defaultCoverFundId(currency?)` work per short currency;
+  `FundAmount.currency?`.
+- Operations: `allocateToFund` / `withdrawFromFund` take an optional currency; `allocateMany` fails
+  when the new movements would increase the per-currency shortfall; `withdrawMany` validates per
+  fund and currency; `paySinkingFund` and `editFund` decreases use `withdrawalPlan`.
+- Next Best Action rules 2 and 9 use per-currency shortfalls / surpluses and quote the amount in
+  its own currency (EGP total when several). Monthly review: new `surplusEGP`.
+- UI: `UnassignedPanel` (rows per currency + EGP total), `MoveMoneySheet` / `AssignSheet` /
+  `CoverSheet` currency Segment, `FundSheet` per-currency hint, fund detail movements,
+  `CURRENCY_NAMES_AR`. Existing tokens and components only.
+- Tests: 219 (12 new: balances stay native, SAR allocation to an EGP fund, old movements
+  unchanged incl. mixed data, per-currency withdrawals / cover / sinking payment / fund edit, Home
+  quotes, suggestion, plan history).
+
+---
+
 ## Unreleased (2026-10-11) — 1.1.0 · data v7 (OTA update) · Live gold and exchange-rate prices
 
 > JS-only (ships with `eas update` to 1.1.0 builds): `fetch` only, no new native module, no

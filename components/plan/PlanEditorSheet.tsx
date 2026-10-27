@@ -18,7 +18,7 @@ import { planProgress, unplannedAmount } from '@/store/planning';
 import { fundsByPriority } from '@/store/selectors';
 import type { CurrencyCode, ExpenseBucket, MonthlyPlan, PlanLineKind } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { fromEGP, toEGP } from '@/utils/currency';
+import { convertCurrency } from '@/utils/currency';
 import { confirmAction } from '@/utils/dialogs';
 import { formatMonthLabel } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
@@ -84,7 +84,7 @@ export function PlanEditorSheet({ plan, onClose }: PlanEditorSheetProps) {
     const rates = state.settings.exchangeRates;
     const convert = (text: string) => {
       const value = amountOf(text);
-      return value === null ? text : String(Math.round(fromEGP(toEGP(value, currency, rates), next, rates)));
+      return value === null ? text : String(Math.round(convertCurrency(value, currency, next, rates)));
     };
     setIncomeText(convert);
     setLines((prev) => prev.map((l) => ({ ...l, limitText: convert(l.limitText) })));

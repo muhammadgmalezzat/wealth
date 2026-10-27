@@ -1,7 +1,7 @@
 import { monthOf, shiftMonth } from '@/utils/dates';
 import { isReviewed } from './nextActions';
 import { planFor, planProgress, previousPlanMonth, type LineProgress } from './planning';
-import { fundProgress, fundsByPriority, monthSummary, movementAmountIn, unassignedEGP } from './selectors';
+import { fundProgress, fundsByPriority, monthSummary, movementAmountIn, unassignedSummary } from './selectors';
 import { monthNetWorthChange, type NetWorthChange } from './snapshots';
 import type { CurrencyCode, ExpenseBucket, FinanceState, Fund, IncomeExpenseTransaction } from './types';
 
@@ -68,7 +68,10 @@ export interface MonthReview {
   nextMonthHasPlan: boolean;
   // The plan "انسخ" would copy into next month (the latest one before it).
   copyFromMonth?: string;
+  // Money without a job: the total in EGP (display), and the part that is surplus in some
+  // currency (what "وزّع الفايض" can distribute).
   unassignedEGP: number;
+  surplusEGP: number;
   reviewed: boolean;
 }
 
@@ -137,6 +140,7 @@ export function monthReview(state: State, month: string, now: Date = new Date())
     .map((f) => ({ fundId: f.id, allocated: allocatedIn(f), planned: planned.get(f.id) ?? null }));
 
   const nextMonth = shiftMonth(month, 1);
+  const unassigned = unassignedSummary(state);
   return {
     month,
     incomeEGP: summary.incomeEGP,
@@ -154,7 +158,8 @@ export function monthReview(state: State, month: string, now: Date = new Date())
     nextMonth,
     nextMonthHasPlan: !!planFor(state, nextMonth),
     copyFromMonth: previousPlanMonth(state, nextMonth),
-    unassignedEGP: unassignedEGP(state),
+    unassignedEGP: unassigned.totalEGP,
+    surplusEGP: unassigned.surplusEGP,
     reviewed: isReviewed(state, month),
   };
 }

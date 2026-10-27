@@ -43,6 +43,7 @@ import * as nba from '@/store/nextActions';
 import * as planning from '@/store/planning';
 import * as reviewLogic from '@/store/review';
 import * as snapshots from '@/store/snapshots';
+import * as sel from '@/store/selectors';
 import * as recurring from '@/store/recurring';
 import * as ops from '@/store/operations';
 import {
@@ -3588,5 +3589,263 @@ describe('live prices: applying', () => {
     assert.equal(has(withSettings(base, { ...recent, lastPriceFetchError: 'gold' })), true);
     assert.equal(has(withSettings(base, { ...recent, priceSource: 'manual' })), true);
     assert.equal(has(withSettings(base, { lastPriceFetchAt: new Date(NOW.getTime() - DAY).toISOString() })), true);
+  });
+});
+
+// --- Native amounts never drift with the rates ------------------------------------
+
+describe('native amounts never drift with the rates', () => {
+  const at = (s: FinanceState, SAR_EGP: number): FinanceState => ({
+    ...s,
+    settings: { ...s.settings, exchangeRates: { ...s.settings.exchangeRates, SAR_EGP } },
+  });
+  // 1000 SAR and 5000 EGP of cash, SAR_EGP 13.
+  const base = (rate = 13): FinanceState =>
+    at({ ...emptyState(), accounts: [account('sar', 'SAR', 1000, 'SA'), account('egp', 'EGP', 5000)] }, rate);
+  const withFund = (): FinanceState => ({ ...base(), funds: [fund({ id: 'F', targetAmount: 100000 })] });
+  const allocate = (s: FinanceState, amount: number, currency?: 'EGP' | 'SAR' | 'USD', fundId = 'F') =>
+    apply(s, ops.allocateMany(s, [{ fundId, amount, ...(currency ? { currency } : {}) }], undefined, makeCtx()));
+  const spendSar = (s: FinanceState, amount: number) =>
+    apply(
+      s,
+      ops.addTransaction(
+        s,
+        { type: 'expense', amount, currency: 'SAR', accountId: 'sar', categoryId: 'cat-essentials-bills', date: '2026-10-10' },
+        makeCtx()
+      )
+    );
+
+  it('a 1000 SAR account stays 1000 SAR when SAR_EGP moves 13 → 15; only its EGP value follows', () => {
+    const before = base(13);
+    const after = at(before, 15);
+    assert.equal(accountBalance(before, 'sar'), 1000);
+    assert.equal(accountBalance(after, 'sar'), 1000);
+    assert.equal(sel.accountBalanceEGP(before, before.accounts[0]), 13000);
+    assert.equal(sel.accountBalanceEGP(after, after.accounts[0]), 15000);
+    assert.deepEqual(liquidByCurrency(after), { EGP: 5000, SAR: 1000, USD: 0 });
+    assert.equal(netWorthEGP(before), 18000);
+    assert.equal(netWorthEGP(after), 20000);
+  });
+
+  it('balances built from SAR income, expenses and same-currency transfers stay exact', () => {
+    const ctx = makeCtx();
+    let s: FinanceState = at({ ...emptyState(), accounts: [account('a', 'SAR', 1000, 'SA'), account('b', 'SAR', 0, 'SA')] }, 13);
+    s = apply(s, ops.addTransaction(s, { type: 'income', amount: 500.55, currency: 'SAR', accountId: 'a', categoryId: 'cat-income-salary', date: '2026-10-01' }, ctx));
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 200.1, currency: 'SAR', accountId: 'a', categoryId: 'cat-essentials-bills', date: '2026-10-02' }, ctx));
+    // No conversion between two SAR accounts: the received amount is exactly what was sent.
+    s = apply(s, ops.addTransfer(s, { fromAccountId: 'a', toAccountId: 'b', amount: 333.33, date: '2026-10-03' }, ctx));
+    assert.equal(s.transactions[0].type === 'transfer' && s.transactions[0].toAmount, 333.33);
+    const natives = [accountBalance(s, 'a'), accountBalance(s, 'b')];
+    approx(natives[0], 1000 + 500.55 - 200.1 - 333.33);
+    approx(natives[1], 333.33);
+    for (const rate of [13, 15, 9.7]) {
+      const moved = at(s, rate);
+      assert.deepEqual([accountBalance(moved, 'a'), accountBalance(moved, 'b')], natives);
+    }
+    // "Set current balance" round-trips exactly too.
+    const opening = openingBalanceForCurrentBalance(s, 'a', 1234.56);
+    const reset = { ...s, accounts: s.accounts.map((x) => (x.id === 'a' ? { ...x, openingBalance: opening } : x)) };
+    approx(accountBalance(at(reset, 15), 'a'), 1234.56);
+  });
+
+  it('a currency holding is its quantity; only its value in EGP follows the rate', () => {
+    const holding = { id: 'h', type: 'currency' as const, name: 'ريال', currency: 'SAR' as const, quantity: 1000, purchaseCostEGP: 12000, updatedAt: T0 };
+    const s: FinanceState = {
+      ...emptyState(),
+      holdings: [holding],
+      funds: [
+        fund({ id: 'FS', currency: 'SAR', targetAmount: 5000, linkedHoldingIds: ['h'] }),
+        fund({ id: 'FE', targetAmount: 50000 }),
+      ],
+    };
+    const before = at(s, 13);
+    const after = at(s, 15);
+    assert.equal(holding.quantity, 1000);
+    assert.equal(sel.holdingValueEGP(before, holding), 13000);
+    assert.equal(sel.holdingValueEGP(after, holding), 15000);
+    // In a SAR fund it is exactly its quantity (no round trip through EGP); in an EGP fund it follows the rate.
+    assert.equal(fundCurrent(before, 'FS'), 1000);
+    assert.equal(fundCurrent(after, 'FS'), 1000);
+    assert.equal(fundCurrent(after, 'FE'), 0);
+    const linkedToEgp = { ...after, funds: [fund({ id: 'FE', targetAmount: 50000, linkedHoldingIds: ['h'] })] };
+    assert.equal(fundCurrent(linkedToEgp, 'FE'), 15000);
+  });
+
+  it('a SAR allocation to an EGP fund: the fund’s value follows the rate, SAR unassigned does not', () => {
+    const s = withFund();
+    assert.throws(() => allocate(s, 1001, 'SAR'), { code: 'INSUFFICIENT_UNASSIGNED' }); // only 1000 SAR exist
+    assert.throws(() => allocate(s, 5001, 'EGP'), { code: 'INSUFFICIENT_UNASSIGNED' }); // only 5000 EGP exist
+    const funded = allocate(s, 400, 'SAR');
+    const later = at(funded, 15);
+
+    assert.equal(funded.fundMovements[0].amount, 400);
+    assert.equal(funded.fundMovements[0].currency, 'SAR');
+    assert.equal(sel.fundAllocatedIn(later, 'F', 'SAR'), 400);
+    approx(fundAllocated(funded, 'F'), 400 * 13);
+    approx(fundAllocated(later, 'F'), 400 * 15);
+    approx(fundProgress(later, 'F'), 6000 / 100000);
+    // Unassigned money per currency is unchanged by the rate…
+    assert.deepEqual(sel.unassignedByCurrency(funded), { EGP: 5000, SAR: 600, USD: 0 });
+    assert.deepEqual(sel.unassignedByCurrency(later), { EGP: 5000, SAR: 600, USD: 0 });
+    // …only its EGP total (display) moves.
+    approx(unassignedEGP(funded), 600 * 13 + 5000);
+    approx(unassignedEGP(later), 600 * 15 + 5000);
+    const summary = sel.unassignedSummary(later);
+    assert.deepEqual(summary.surpluses, [{ currency: 'EGP', amount: 5000 }, { currency: 'SAR', amount: 600 }]);
+    assert.deepEqual(summary.deficits, []);
+  });
+
+  it('old movements (no currency) behave exactly as before', () => {
+    const legacy = (amount: number): FinanceState['fundMovements'] => [
+      { id: 'm', updatedAt: T0, fundId: 'F', amount, date: '2026-09-01' },
+    ];
+    // Everything in EGP: the sum of the movements, the old unassigned figure.
+    const egp: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 10000)], funds: [fund({ id: 'F' })], fundMovements: legacy(6000) };
+    assert.equal(fundAllocated(egp, 'F'), 6000);
+    assert.deepEqual(sel.fundCashByCurrency(egp, 'F'), { EGP: 6000, SAR: 0, USD: 0 });
+    assert.deepEqual(sel.unassignedByCurrency(egp), { EGP: 4000, SAR: 0, USD: 0 });
+    assert.equal(unassignedEGP(egp), 4000);
+
+    // Mixed: EGP movements against SAR money have no source currency, so they take EGP first
+    // and then SAR at today's rate. Totals are the old totals and nothing is falsely "short".
+    const mixed: FinanceState = { ...base(13), funds: [fund({ id: 'F' })], fundMovements: legacy(10000) };
+    approx(unassignedEGP(mixed), 13000 + 5000 - 10000);
+    approx(unassignedEGP(at(mixed, 15)), 15000 + 5000 - 10000);
+    const by = sel.unassignedByCurrency(mixed);
+    approx(by.EGP, 0);
+    approx(by.SAR, 1000 - 5000 / 13);
+    assert.deepEqual(sel.unassignedSummary(mixed).deficits, []);
+    approx(fundAllocated(at(mixed, 15), 'F'), 10000);
+
+    // More than all the money: the rest is short in the fund's currency.
+    const over: FinanceState = { ...base(13), funds: [fund({ id: 'F' })], fundMovements: legacy(20000) };
+    approx(unassignedEGP(over), 13000 + 5000 - 20000);
+    const deficits = sel.unassignedSummary(over).deficits;
+    assert.equal(deficits.length, 1);
+    assert.equal(deficits[0].currency, 'EGP');
+    approx(deficits[0].amount, 2000);
+
+    // The fund edit sheet still sets the total cash: any currency's money may back an increase.
+    const edited = apply(mixed, ops.editFund(mixed, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 12000 }, makeCtx()));
+    assert.equal(edited.fundMovements.at(-1)!.currency, undefined);
+    approx(fundAllocated(edited, 'F'), 12000);
+    assert.throws(() => ops.editFund(mixed, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 30000 }, makeCtx()), {
+      code: 'INSUFFICIENT_UNASSIGNED',
+    });
+  });
+
+  it('withdrawals are per currency: SAR cash can only leave as SAR', () => {
+    const funded = allocate(allocate(withFund(), 400, 'SAR'), 2000, 'EGP');
+    const ctx = makeCtx();
+    // The EGP cash can't pay for a SAR withdrawal, nor SAR cash for an EGP one.
+    assert.throws(() => ops.withdrawFromFund(funded, 'F', 401, undefined, ctx, 'SAR'), { code: 'WITHDRAW_EXCEEDS_FUND' });
+    assert.throws(() => ops.withdrawFromFund(funded, 'F', 2001, undefined, ctx), { code: 'WITHDRAW_EXCEEDS_FUND' });
+    const after = apply(funded, ops.withdrawFromFund(funded, 'F', 150, undefined, ctx, 'SAR'));
+    assert.deepEqual(sel.fundCashByCurrency(after, 'F'), { EGP: 2000, SAR: 250, USD: 0 });
+    assert.deepEqual(sel.unassignedByCurrency(after), { EGP: 3000, SAR: 750, USD: 0 });
+    // A bad currency is rejected.
+    assert.throws(() => ops.allocateToFund(funded, 'F', 1, undefined, ctx, 'XYZ' as 'SAR'), { code: 'CURRENCY_MISMATCH' });
+  });
+
+  it('a shortfall in SAR is covered with SAR cash, never with another currency', () => {
+    const funded = allocate(allocate(withFund(), 400, 'SAR'), 2000, 'EGP');
+    const short = spendSar(funded, 800); // SAR balance 200, SAR set aside 400
+    const summary = sel.unassignedSummary(short);
+    assert.deepEqual(summary.deficits, [{ currency: 'SAR', amount: 200 }]);
+    assert.equal(summary.byCurrency.EGP, 3000);
+
+    const plan = planCover(short, ['F']);
+    assert.deepEqual(plan.withdrawals, [{ fundId: 'F', amount: 200, currency: 'SAR' }]);
+    assert.equal(plan.remainingEGP, 0);
+    assert.deepEqual(planCover(short, ['F'], 'EGP').withdrawals, []);
+
+    const covered = apply(short, ops.withdrawMany(short, plan.withdrawals, 'تغطية مصروف', makeCtx()));
+    assert.deepEqual(sel.unassignedSummary(covered).deficits, []);
+    assert.deepEqual(sel.fundCashByCurrency(covered, 'F'), { EGP: 2000, SAR: 200, USD: 0 });
+
+    // Home asks for it in the shortfall's own currency.
+    const action = nba.nextActions(short, NOW).find((a) => a.id === 'cover')!;
+    assert.equal(action.currency, 'SAR');
+    assert.equal(action.amount, 200);
+    // A fund with no SAR cash can't cover a SAR shortfall.
+    const onlyEgp = allocate(allocate(withFund(), 400, 'SAR'), 2000, 'EGP', 'F');
+    const noSar = { ...spendSar(onlyEgp, 800), funds: [...onlyEgp.funds, fund({ id: 'G', priority: 2 })] };
+    approx(planCover(noSar, ['G']).remainingEGP, 200 * 13);
+  });
+
+  it('Home quotes money without a job in its own currency, or the EGP total for several', () => {
+    const sarOnly: FinanceState = at({ ...emptyState(), accounts: [account('sar', 'SAR', 1000, 'SA')] }, 13);
+    const one = nba.nextActions(sarOnly, NOW).find((a) => a.id === 'assign')!;
+    assert.deepEqual([one.amount, one.currency], [1000, 'SAR']);
+    const both = nba.nextActions(base(), NOW).find((a) => a.id === 'assign')!;
+    assert.deepEqual([both.amount, both.currency], [13000 + 5000, 'EGP']);
+    assert.equal(reviewLogic.monthReview(base(), '2026-09', NOW).surplusEGP, 18000);
+  });
+
+  it('suggests a split of SAR money across funds, in SAR', () => {
+    const s: FinanceState = {
+      ...base(),
+      funds: [
+        fund({ id: 'A', priority: 1, monthlyContribution: 6500 }), // 500 SAR
+        fund({ id: 'B', priority: 2, monthlyContribution: 13000 }), // 1,000 SAR
+      ],
+    };
+    assert.deepEqual(sel.suggestAllocationIn(s, 'SAR', 1000, NOW), [
+      { fundId: 'A', amount: 500, currency: 'SAR' },
+      { fundId: 'B', amount: 500, currency: 'SAR' },
+    ]);
+    const after = apply(s, ops.allocateMany(s, sel.suggestAllocationIn(s, 'SAR', 1000, NOW), 'توزيع', makeCtx()));
+    assert.equal(sel.unassignedByCurrency(after).SAR, 0);
+  });
+
+  it('paying a sinking fund uses cash in the payment’s currency first, with no conversion', () => {
+    const s: FinanceState = {
+      ...base(),
+      funds: [fund({ id: 'S', type: 'sinking', targetAmount: 5000, frequency: 'yearly', nextDueDate: '2026-10-20' })],
+    };
+    const funded = allocate(allocate(s, 300, 'SAR', 'S'), 2000, 'EGP', 'S');
+    const pay = (amount: number) =>
+      apply(funded, ops.paySinkingFund(funded, { fundId: 'S', accountId: 'sar', categoryId: 'cat-essentials-bills', amount, date: '2026-10-15' }, makeCtx()));
+
+    const small = pay(100);
+    assert.deepEqual(sel.fundCashByCurrency(small, 'S'), { EGP: 2000, SAR: 200, USD: 0 });
+    // The fund paid for it, so SAR unassigned is untouched.
+    assert.equal(sel.unassignedByCurrency(small).SAR, sel.unassignedByCurrency(funded).SAR);
+
+    // More than its SAR cash: the rest comes out of the EGP cash at today's rate.
+    const big = pay(400);
+    const cash = sel.fundCashByCurrency(big, 'S');
+    assert.equal(cash.SAR, 0);
+    approx(cash.EGP, 2000 - 100 * 13);
+  });
+
+  it('editing a fund’s total cash takes from its own currency first, then the others', () => {
+    const funded = allocate({ ...base(), funds: [fund({ id: 'F', targetAmount: 100000 })], fundMovements: [{ id: 'm0', updatedAt: T0, fundId: 'F', amount: 1000, date: '2026-09-01' }] }, 100, 'SAR');
+    approx(fundAllocated(funded, 'F'), 2300);
+    const small = apply(funded, ops.editFund(funded, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 1500 }, makeCtx()));
+    assert.deepEqual(sel.fundCashByCurrency(small, 'F'), { EGP: 200, SAR: 100, USD: 0 });
+    const deep = apply(funded, ops.editFund(funded, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 1000 }, makeCtx()));
+    const cash = sel.fundCashByCurrency(deep, 'F');
+    approx(cash.EGP, 0);
+    approx(cash.SAR, 100 - 300 / 13);
+    approx(fundAllocated(deep, 'F'), 1000);
+  });
+
+  it('plan progress counts a SAR allocation as exactly what it was, and keeps history at its own rates', () => {
+    const planFor = (currency: 'SAR' | 'EGP'): ops.PlanInput => ({
+      month: '2026-10',
+      currency,
+      expectedIncome: 0,
+      lines: [],
+      fundContributions: [{ fundId: 'F', amount: 400 }],
+    });
+    const prepare = (currency: 'SAR' | 'EGP') => {
+      const funded = allocate(withFund(), 400, 'SAR');
+      return at(apply(funded, ops.savePlan(funded, planFor(currency), makeCtx())), 15);
+    };
+    assert.equal(planning.planProgress(prepare('SAR'), '2026-10')!.contributions[0].allocated, 400);
+    // In an EGP plan it is what 400 SAR was worth when allocated (13), not today's 15.
+    approx(planning.planProgress(prepare('EGP'), '2026-10')!.contributions[0].allocated, 400 * 13);
+    approx(reviewLogic.monthReview(prepare('SAR'), '2026-10', NOW).funds[0].allocated, 400);
   });
 });

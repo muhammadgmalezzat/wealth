@@ -13,9 +13,11 @@ import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { formatMoney } from '@/components/ui/formatMoney';
 import { Money } from '@/components/ui/Money';
 import { Segment } from '@/components/ui/Segment';
+import { CURRENCIES } from '@/constants/currencies';
 import { space } from '@/constants/theme';
 import {
   fundAllocated,
+  fundCashByCurrency,
   holdingValueEGP,
   linkableHoldings,
   sinkingMonthlySuggestion,
@@ -75,6 +77,13 @@ export function FundSheet({ fund, initialType = 'goal', onClose, onDeleted }: Fu
   const sinkingMonthly =
     type === 'sinking' && target !== null && nextDueDate
       ? sinkingMonthlySuggestion({ type, targetAmount: target, nextDueDate })
+      : null;
+  // A fund holding cash in several currencies says so (each in its own currency).
+  const cashByCurrency = fund ? fundCashByCurrency(state, fund.id) : null;
+  const heldCurrencies = cashByCurrency ? CURRENCIES.filter((c) => Math.abs(cashByCurrency[c]) > 0.005) : [];
+  const cashBreakdown =
+    cashByCurrency && heldCurrencies.length > 1
+      ? heldCurrencies.map((c) => formatMoney(cashByCurrency[c], c)).join(' + ')
       : null;
   const previewEGP =
     fund && cash !== null ? unassignedEGPWithFundCash(state, fund.id, cash) : unassignedEGP(state);
@@ -206,7 +215,9 @@ export function FundSheet({ fund, initialType = 'goal', onClose, onDeleted }: Fu
 
       {fund && (
         <>
-          <FormField label={`المبلغ المخصص نقداً (${currencySymbol(currency)})`}>
+          <FormField
+            label={`المبلغ المخصص نقداً (${currencySymbol(currency)})`}
+            helper={cashBreakdown ? `منهم: ${cashBreakdown}. التعديل هنا بقيمة اليوم؛ للإضافة أو السحب بعملة معينة استخدم الصندوق نفسه.` : undefined}>
             <FormInput value={cashText} onChangeText={setCashText} keyboardType="decimal-pad" />
           </FormField>
           <Card variant="subtle" style={styles.preview}>

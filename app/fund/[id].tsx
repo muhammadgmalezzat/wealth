@@ -21,9 +21,11 @@ import { ProgressBar } from '@/components/ui/ProgressBar';
 import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { StatusChip } from '@/components/ui/StatusChip';
+import { CURRENCIES } from '@/constants/currencies';
 import { colors, opacity, space } from '@/constants/theme';
 import {
   fundAllocated,
+  fundCashByCurrency,
   fundCurrent,
   fundDueDate,
   fundLinkedValue,
@@ -32,6 +34,7 @@ import {
   fundStatus,
   holdingValueEGP,
   linkableHoldings,
+  movementValueInFund,
 } from '@/store/selectors';
 import type { Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
@@ -91,9 +94,15 @@ export default function FundDetailScreen() {
   const linkedHoldings = state.holdings.filter((h) => fund.linkedHoldingIds.includes(h.id));
   const canLinkGold = linkableHoldings(state, fund.id).some((h) => h.type === 'gold' && !fund.linkedHoldingIds.includes(h.id));
 
+  const cash = fundCashByCurrency(state, fund.id);
+  const heldCurrencies = CURRENCIES.filter((c) => Math.abs(cash[c]) > 0.005);
+  const cashBreakdown = heldCurrencies.length > 1 ? heldCurrencies.map((c) => formatMoney(cash[c], c)).join(' + ') : null;
+
   const facts: { label: string; value: string }[] = [
     requiredMonthly !== null ? { label: 'مطلوب شهرياً', value: formatMoney(requiredMonthly, fund.currency) } : null,
     { label: 'نقداً في الصندوق', value: formatMoney(fundAllocated(state, fund.id), fund.currency) },
+    // Cash set aside in more than one currency: each in its own currency.
+    cashBreakdown ? { label: 'بالعملات', value: cashBreakdown } : null,
     linkedValue > 0 ? { label: 'قيمة الذهب المربوط', value: formatMoney(linkedValue, fund.currency) } : null,
     due ? { label: sinking ? 'الاستحقاق القادم' : 'الموعد', value: formatDateAr(due) } : null,
     sinking && fund.frequency ? { label: 'التكرار', value: FREQUENCY_LABELS[fund.frequency] } : null,
@@ -254,7 +263,8 @@ export default function FundDetailScreen() {
                   trailing={
                     <Money
                       amount={m.amount}
-                      currency={fund.currency}
+                      currency={m.currency ?? fund.currency}
+                      converted={m.currency && m.currency !== fund.currency ? { amount: movementValueInFund(state, m), currency: fund.currency } : undefined}
                       showSign
                       align="left"
                       tone={kind === 'allocation' ? 'positive' : kind === 'payment' ? 'muted' : 'default'}

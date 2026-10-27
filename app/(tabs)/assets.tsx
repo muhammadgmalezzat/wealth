@@ -177,7 +177,10 @@ export default function AssetsScreen() {
       <ListRow
         key={holding.id}
         title={holdingTitle(holding)}
-        subtitle={`${LOCATION_LABELS[holding.location ?? 'EG']} · القيمة الحالية`}
+        // A currency holding's truth is its quantity; the EGP figure on the left is its value now.
+        subtitle={`${LOCATION_LABELS[holding.location ?? 'EG']} · ${
+          holding.type === 'currency' ? formatMoney(holding.quantity, holding.currency) : 'القيمة الحالية'
+        }`}
         subtitleLines={1}
         icon={holding.type === 'gold' ? 'diamond' : 'payments'}
         iconTone={holding.type === 'gold' ? 'gold' : 'neutral'}

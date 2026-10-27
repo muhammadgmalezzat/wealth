@@ -17,7 +17,7 @@ import { planFor, spendImpact } from '@/store/planning';
 import { pickerCategories } from '@/store/selectors';
 import type { GoldKarat, Location, Transaction } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { fromEGP, toEGP } from '@/utils/currency';
+import { convertCurrency } from '@/utils/currency';
 import { monthOf, toDateKey } from '@/utils/dates';
 import { confirmAction, showMessage } from '@/utils/dialogs';
 import { currencySymbol } from '@/utils/formatters';
@@ -135,7 +135,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   const rates = state.settings.exchangeRates;
   const convertedToAmount =
     crossCurrency && amount !== null
-      ? round2(fromEGP(toEGP(amount, fromAccount.currency, rates), toAccount.currency, rates))
+      ? round2(convertCurrency(amount, fromAccount.currency, toAccount.currency, rates))
       : null;
   const toAmountValue = toAmountText ?? (convertedToAmount !== null ? String(convertedToAmount) : '');
 

@@ -11,7 +11,8 @@ import {
   fundsByPriority,
   fundStatus,
   suggestedEmergencyTarget,
-  unassignedEGP,
+  unassignedSummary,
+  type CurrencyAmount,
 } from './selectors';
 import type { CurrencyCode, FinanceState, Fund } from './types';
 
@@ -101,6 +102,12 @@ const allocateCta = (fund: Fund): NextAction['cta'] => ({
 
 type Draft = Omit<NextAction, 'priority' | 'dismissible'>;
 
+// What to quote for money in several currencies: its own amount when there is only one currency
+// (1000 SAR stays "1,000 ر.س"), otherwise the total in EGP at today's rate.
+function amountToShow(parts: CurrencyAmount[], totalEGP: number): { amount: number; currency: CurrencyCode } {
+  return parts.length === 1 ? { amount: parts[0].amount, currency: parts[0].currency } : { amount: totalEGP, currency: 'EGP' };
+}
+
 // Every applicable action, snoozed ones included, sorted by priority. Rules, in order:
 //  1 due 'confirm' items          2 fund money spent (unassigned < 0)   3 overspent plan lines
 //  4 last month not reviewed       5 no plan this month                  6 no / thin emergency fund
@@ -110,7 +117,7 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
   const today = toDateKey(now);
   const month = toMonthKey(now);
   const rates = state.settings.exchangeRates;
-  const unassigned = unassignedEGP(state);
+  const unassigned = unassignedSummary(state);
   const actions: NextAction[] = [];
   const add = (priority: number, draft: Draft) =>
     actions.push({ ...draft, priority, dismissible: !NON_DISMISSIBLE_ACTION_IDS.includes(draft.id) });
@@ -128,14 +135,14 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
   }
 
   // 2
-  if (unassigned < -EPSILON) {
+  if (unassigned.deficits.length > 0) {
+    const shown = amountToShow(unassigned.deficits, unassigned.deficitEGP);
     add(2, {
       id: 'cover',
       severity: 'urgent',
-      title: `صرفت ${formatMoney(-unassigned, 'EGP')} من فلوس مخصصة`,
+      title: `صرفت ${formatMoney(shown.amount, shown.currency)} من فلوس مخصصة`,
       subtitle: 'رجّع الفرق من صندوق عشان أرقام الصناديق تفضل حقيقية.',
-      amount: -unassigned,
-      currency: 'EGP',
+      ...shown,
       cta: { label: 'غطّي الفرق', route: 'cover' },
     });
   }
@@ -244,14 +251,14 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
   }
 
   // 9
-  if (unassigned > EPSILON) {
+  if (unassigned.surpluses.length > 0) {
+    const shown = amountToShow(unassigned.surpluses, unassigned.surplusEGP);
     add(9, {
       id: 'assign',
       severity: 'opportunity',
-      title: `عندك ${formatMoney(unassigned, 'EGP')} بدون وظيفة، وزّعها`,
+      title: `عندك ${formatMoney(shown.amount, shown.currency)} بدون وظيفة، وزّعها`,
       subtitle: 'حطها في صندوق أو هدف قبل ما تتصرف.',
-      amount: unassigned,
-      currency: 'EGP',
+      ...shown,
       cta: { label: 'وزّع أموالك', route: 'assign' },
     });
   }

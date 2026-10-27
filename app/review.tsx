@@ -310,9 +310,9 @@ export default function ReviewScreen() {
               )}
             </>
           )}
-          {review.unassignedEGP > EPSILON && (
+          {review.surplusEGP > EPSILON && (
             <Button
-              label={`وزّع الفايض (${formatMoney(review.unassignedEGP, 'EGP')})`}
+              label={`وزّع الفايض (${formatMoney(review.surplusEGP, 'EGP')})`}
               variant="secondary"
               block
               onPress={() => setAssigning(true)}
