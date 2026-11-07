@@ -74,12 +74,12 @@ export default function ReviewScreen() {
         <View style={styles.block}>
           <MetricGroup
             metrics={[
-              { label: 'دخل', value: <Money amount={review.incomeEGP} currency="EGP" align="center" /> },
-              { label: 'مصروف', value: <Money amount={review.expenseEGP} currency="EGP" align="center" /> },
+              { label: 'دخل', value: <Money amount={review.income} currency={review.currency} align="center" /> },
+              { label: 'مصروف', value: <Money amount={review.expense} currency={review.currency} align="center" /> },
               {
                 label: 'صافي',
                 value: (
-                  <Money amount={review.netEGP} currency="EGP" align="center" showSign tone={review.netEGP >= 0 ? 'positive' : 'default'} />
+                  <Money amount={review.net} currency={review.currency} align="center" showSign tone={review.net >= 0 ? 'positive' : 'default'} />
                 ),
               },
             ]}
@@ -98,11 +98,11 @@ export default function ReviewScreen() {
                 label: 'تغير صافي الثروة',
                 value: review.netWorthChange ? (
                   <Money
-                    amount={review.netWorthChange.amountEGP}
-                    currency="EGP"
+                    amount={review.netWorthChange.amount}
+                    currency={review.currency}
                     align="center"
                     showSign
-                    tone={review.netWorthChange.amountEGP < -EPSILON ? 'danger' : 'positive'}
+                    tone={review.netWorthChange.amount < -EPSILON ? 'danger' : 'positive'}
                   />
                 ) : (
                   <AppText variant="moneyRow" align="center" color="textSecondary">
@@ -204,8 +204,8 @@ export default function ReviewScreen() {
               <ListRow
                 key={c.categoryId}
                 title={categoryName(c.categoryId)}
-                subtitle={review.expenseEGP > 0 ? `${formatPercent(c.amountEGP / review.expenseEGP)} من المصروف` : undefined}
-                trailing={<Money amount={c.amountEGP} currency="EGP" />}
+                subtitle={review.expense > 0 ? `${formatPercent(c.amount / review.expense)} من المصروف` : undefined}
+                trailing={<Money amount={c.amount} currency={review.currency} />}
               />
             ))}
           </ListGroup>
@@ -216,7 +216,7 @@ export default function ReviewScreen() {
               title="مصاريف مرة واحدة"
               trailing={
                 <AppText variant="secondary" color="textSecondary">
-                  {formatMoney(review.oneTimeTotalEGP, 'EGP')}
+                  {formatMoney(review.oneTimeTotal, review.currency)}
                 </AppText>
               }
             />
@@ -226,7 +226,7 @@ export default function ReviewScreen() {
                   key={t.id}
                   title={categoryName(t.categoryId)}
                   subtitle={[t.note, formatDayLabel(t.date, now)].filter(Boolean).join(' · ')}
-                  trailing={<Money amount={t.amountEGP} currency="EGP" />}
+                  trailing={<Money amount={t.amount} currency={review.currency} />}
                 />
               ))}
             </ListGroup>

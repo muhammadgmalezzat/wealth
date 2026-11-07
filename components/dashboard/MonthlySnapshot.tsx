@@ -6,7 +6,7 @@ import { Money } from '@/components/ui/Money';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { opacity, space } from '@/constants/theme';
 import { monthFlows, monthSummary } from '@/store/selectors';
-import type { FinanceState } from '@/store/types';
+import type { CurrencyCode, FinanceState } from '@/store/types';
 import { toMonthKey } from '@/utils/dates';
 import { formatMonthLabel } from '@/utils/formatters';
 
@@ -19,10 +19,10 @@ interface MonthlySnapshotProps {
   linkToTransactions?: boolean;
 }
 
-const money = (amount: number, showSign = false) => (
+const money = (amount: number, currency: CurrencyCode, showSign = false) => (
   <Money
     amount={amount}
-    currency="EGP"
+    currency={currency}
     size="row"
     align="center"
     showSign={showSign}
@@ -30,26 +30,27 @@ const money = (amount: number, showSign = false) => (
   />
 );
 
-// "هذا الشهر" (EGP, snapshot rates). Transactions: income / expense / net in one MetricGroup —
+// "هذا الشهر" (reporting currency, snapshot rates). Transactions: income / expense / net in one MetricGroup —
 // expense is plain text, not red; net is green with "+" when ≥ 0. Home: where the money went —
 // income / spent, then saved to funds / invested (asset purchases), two cells per row.
 export function MonthlySnapshot({ state, now = new Date(), month, linkToTransactions = true }: MonthlySnapshotProps) {
   const current = toMonthKey(now);
   const shown = month ?? current;
+  const currency = state.settings.reportingCurrency;
 
   if (!linkToTransactions) {
-    const summary = monthSummary(state, shown);
+    const summary = monthSummary(state, shown, { to: currency });
     const metrics: Metric[] = [
-      { label: 'دخل', value: money(summary.incomeEGP) },
-      { label: 'مصروف', value: money(summary.expenseEGP) },
-      { label: 'صافي', value: money(summary.netCashFlow, true) },
+      { label: 'دخل', value: money(summary.income, currency) },
+      { label: 'مصروف', value: money(summary.expense, currency) },
+      { label: 'صافي', value: money(summary.netCashFlow, currency, true) },
     ];
     return (
       <MetricGroup metrics={metrics} accessibilityLabel={`ملخص ${shown === current ? 'هذا الشهر' : formatMonthLabel(shown)}`} />
     );
   }
 
-  const flows = monthFlows(state, shown);
+  const flows = monthFlows(state, shown, currency);
   const openTransactions = () => router.push('/transactions');
   return (
     <View>
@@ -61,14 +62,14 @@ export function MonthlySnapshot({ state, now = new Date(), month, linkToTransact
         style={({ pressed }) => [styles.rows, pressed && { opacity: opacity.pressed }]}>
         <MetricGroup
           metrics={[
-            { label: 'دخل', value: money(flows.incomeEGP) },
-            { label: 'مصروف', value: money(flows.expenseEGP) },
+            { label: 'دخل', value: money(flows.income, currency) },
+            { label: 'مصروف', value: money(flows.expense, currency) },
           ]}
         />
         <MetricGroup
           metrics={[
-            { label: 'اتحوّش للصناديق', value: money(flows.savedToFundsEGP) },
-            { label: 'استثمار', value: money(flows.investedEGP), tone: 'gold' },
+            { label: 'اتحوّش للصناديق', value: money(flows.savedToFunds, currency) },
+            { label: 'استثمار', value: money(flows.invested, currency), tone: 'gold' },
           ]}
         />
       </Pressable>

@@ -18,8 +18,8 @@ export function holdingTitle(holding: Holding): string {
 }
 
 // The value difference as plain text with a sign: "+ج.م 1,200" / "−ج.م 300". Never colored.
-export function signedDifference(amountEGP: number): string {
-  return formatMoney(amountEGP, 'EGP', true);
+export function signedDifference(amount: number, currency: string): string {
+  return formatMoney(amount, currency, true);
 }
 
 // Active accounts grouped by country (registry order first), then archived ones. Countries without

@@ -268,6 +268,14 @@ export interface LocationBreakdown {
 
 export type NetWorthBreakdown = Record<CountryCode, LocationBreakdown>;
 
+// The same four parts, computed now in whatever currency a screen asks for (the stored one is always EGP).
+export interface CountryBreakdown {
+  cash: number;
+  gold: number;
+  currencies: number;
+  liabilities: number;
+}
+
 export interface NetWorthSnapshot extends Synced {
   id: string;
   month: string; // 'YYYY-MM'

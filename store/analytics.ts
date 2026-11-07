@@ -1,4 +1,5 @@
 import { formatMoney } from '@/components/ui/formatMoney';
+import { isKnownCurrency } from '@/constants/currencyRegistry';
 import { convertCurrency, fromEGP, requireSnapshot, toEGP } from '@/utils/currency';
 import { addIn, roundIn, sumIn } from '@/utils/money';
 import type { RateTable } from '@/utils/rates';
@@ -15,14 +16,15 @@ import {
   fundsByPriority,
   fundStatus,
   goldPricePerGram,
-  holdingCostEGP,
-  holdingValueEGP,
+  holdingCost,
+  holdingValue,
   liquidByCurrency,
   movementAmountIn,
   movementValueInFund,
   netWorthBreakdown,
-  netWorthEGP,
+  netWorth,
   netWorthFigures,
+  toStoredBreakdown,
   transactionAmountIn,
   unassignedSummary,
 } from './selectors';
@@ -52,7 +54,8 @@ type State = FinanceState;
 const sum = (values: number[]) => values.reduce((total, v) => total + v, 0);
 const EPSILON = 0.005;
 
-export type DisplayCurrency = 'EGP' | 'SAR';
+// Any currency the registry knows; the reporting currency unless the screen picks another.
+export type DisplayCurrency = CurrencyCode;
 export type PeriodKind = 'month' | '3m' | '6m' | 'year' | 'sinceStart' | 'custom';
 
 export const BUCKET_LABELS: Record<ExpenseBucket, string> = {
@@ -314,7 +317,7 @@ export function parseDrillParams(
   const currency = one('currency');
   if (!from || !to || !isDateKey(from) || !isDateKey(to) || from > to) return null;
   if (type !== 'income' && type !== 'expense' && type !== 'asset_purchase') return null;
-  if (currency !== 'EGP' && currency !== 'SAR') return null;
+  if (!currency || !isKnownCurrency(currency)) return null;
   const bucket = one('bucket');
   const list = (key: string) => {
     const value = one(key);
@@ -642,7 +645,8 @@ export function netWorthSeries(
   const points: NetWorthPoint[] = [];
   let skipped = 0;
   const stored = state.netWorthSnapshots.filter((s) => s.month !== current);
-  const live = netWorthFigures(state);
+  // Snapshots keep EGP; the live month is valued the same way, then everything is shown through its own rates.
+  const live = netWorthFigures(state, 'EGP');
   const entries = [
     ...stored.map((s) => ({
       month: s.month,
@@ -652,7 +656,7 @@ export function netWorthSeries(
       totalEGP: s.netWorthEGP,
       rates: requireSnapshot(state.rateSnapshots, s.rateSnapshotId),
     })),
-    { month: current, estimated: false, live: true, breakdown: live.breakdown, totalEGP: live.netWorthEGP, rates: liveRates },
+    { month: current, estimated: false, live: true, breakdown: toStoredBreakdown(live.breakdown), totalEGP: live.netWorth, rates: liveRates },
   ].sort((a, b) => (a.month < b.month ? -1 : 1));
   const show = (egp: number, rates: RateTable) => roundIn(currency === 'EGP' ? egp : fromEGP(egp, currency, rates), currency);
   for (const e of entries) {
@@ -711,7 +715,6 @@ export interface MoneyMap {
 
 export function moneyMap(state: State, currency: DisplayCurrency): MoneyMap {
   const rates = state.settings.rates;
-  const show = (egp: number) => roundIn(currency === 'EGP' ? egp : fromEGP(egp, currency, rates), currency);
   const native = liquidByCurrency(state);
   const liquid: LiquidRow[] = currencyList(state)
     .filter((c) => state.accounts.some((a) => a.currency === c) || Math.abs(native[c]) > EPSILON)
@@ -722,36 +725,37 @@ export function moneyMap(state: State, currency: DisplayCurrency): MoneyMap {
       value: roundIn(convertCurrency(native[c], c, currency, rates), currency),
     }));
 
-  const breakdown = netWorthBreakdown(state);
+  // Every item is valued in the display currency and rounded there before it is summed (INV-7).
+  const breakdown = netWorthBreakdown(state, currency);
   const byLocation = Object.keys(breakdown).map((location) => {
     const b = breakdown[location];
     return {
       location,
-      cash: show(b.cashEGP),
-      gold: show(b.goldEGP),
-      currencies: show(b.currenciesEGP),
-      total: show(sumIn([b.cashEGP, b.goldEGP, b.currenciesEGP], 'EGP')),
+      cash: b.cash,
+      gold: b.gold,
+      currencies: b.currencies,
+      total: sumIn([b.cash, b.gold, b.currencies], currency),
     };
   });
 
-  const karats = new Map<GoldKarat, { grams: number; valueEGP: number; costEGP: number }>();
+  const karats = new Map<GoldKarat, { grams: number; value: number; cost: number }>();
   for (const h of state.holdings) {
     if (h.type !== 'gold') continue;
-    const row = karats.get(h.karat) ?? { grams: 0, valueEGP: 0, costEGP: 0 };
+    const row = karats.get(h.karat) ?? { grams: 0, value: 0, cost: 0 };
     row.grams += h.weightGrams;
-    row.valueEGP = addIn(row.valueEGP, holdingValueEGP(state, h), 'EGP');
-    row.costEGP = addIn(row.costEGP, holdingCostEGP(state, h), 'EGP');
+    row.value = addIn(row.value, holdingValue(state, h, currency), currency);
+    row.cost = addIn(row.cost, holdingCost(state, h, currency), currency);
     karats.set(h.karat, row);
   }
   const goldRows: GoldRow[] = ([24, 21, 18] as GoldKarat[])
     .filter((k) => karats.has(k))
     .map((karat) => {
       const r = karats.get(karat)!;
-      return { karat, grams: r.grams, value: show(r.valueEGP), cost: show(r.costEGP), pnl: show(roundIn(r.valueEGP - r.costEGP, 'EGP')) };
+      return { karat, grams: r.grams, value: r.value, cost: r.cost, pnl: roundIn(r.value - r.cost, currency) };
     });
-  const goldValueEGP = sumIn(state.holdings.filter((h) => h.type === 'gold').map((h) => holdingValueEGP(state, h)), 'EGP');
-  const goldCostEGP = sumIn(state.holdings.filter((h) => h.type === 'gold').map((h) => holdingCostEGP(state, h)), 'EGP');
-  const net = netWorthEGP(state);
+  const goldValue = sumIn(state.holdings.filter((h) => h.type === 'gold').map((h) => holdingValue(state, h, currency)), currency);
+  const goldCost = sumIn(state.holdings.filter((h) => h.type === 'gold').map((h) => holdingCost(state, h, currency)), currency);
+  const net = netWorth(state, currency);
   return {
     liquid,
     liquidTotal: sumIn(liquid.map((l) => l.value), currency),
@@ -759,12 +763,12 @@ export function moneyMap(state: State, currency: DisplayCurrency): MoneyMap {
     gold: {
       rows: goldRows,
       grams: sum(goldRows.map((r) => r.grams)),
-      value: show(goldValueEGP),
-      cost: show(goldCostEGP),
-      pnl: show(roundIn(goldValueEGP - goldCostEGP, 'EGP')),
+      value: goldValue,
+      cost: goldCost,
+      pnl: roundIn(goldValue - goldCost, currency),
     },
-    netWorth: show(net),
-    goldShare: net > EPSILON ? goldValueEGP / net : null,
+    netWorth: net,
+    goldShare: net > EPSILON ? goldValue / net : null,
   };
 }
 

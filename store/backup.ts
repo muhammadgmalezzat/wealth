@@ -4,7 +4,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
-import { netWorthEGP } from './selectors';
+import { netWorth } from './selectors';
 import type { FinanceState } from './types';
 
 // Backup files: pure (no React Native imports) so the format and crypto are testable in Node.
@@ -248,7 +248,9 @@ export interface BackupPreview {
   transactions: number;
   holdings: number;
   funds: number;
-  netWorthEGP: number;
+  // In the backup's own reporting currency.
+  netWorth: number;
+  currency: string;
   exportedAt: string;
 }
 
@@ -259,7 +261,8 @@ export function backupPreview(opened: OpenedBackup): BackupPreview {
     transactions: state.transactions.length,
     holdings: state.holdings.length,
     funds: state.funds.length,
-    netWorthEGP: netWorthEGP(state),
+    netWorth: netWorth(state),
+    currency: state.settings.reportingCurrency,
     exportedAt: opened.exportedAt,
   };
 }

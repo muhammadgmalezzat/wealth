@@ -83,15 +83,15 @@ import {
   fundStatus,
   goldTotals,
   groupTransactionsByDay,
-  holdingsTotalEGP,
-  liabilitiesTotalEGP,
+  holdingsTotal,
+  liabilitiesTotal,
   liquidByCurrency,
-  liquidTotalEGP,
+  liquidTotal,
   monthFlows,
   monthSummary,
   netWorthAsOf,
   netWorthByCountry,
-  netWorthEGP,
+  netWorth,
   openingBalanceForCurrentBalance,
   pickerCategories,
   planCover,
@@ -345,7 +345,7 @@ describe('migration', () => {
     const { state: v2 } = migratePersistedState({}, 1, MIGRATION_CTX);
     assert.equal(v2.accounts.length, 0);
     assert.equal(v2.categories.length, DEFAULT_CATEGORIES.length);
-    assert.equal(netWorthEGP(v2), 0);
+    assert.equal(netWorth(v2), 0);
   });
 
   it('leaves current-version data untouched', () => {
@@ -397,10 +397,10 @@ describe('netWorthEGP', () => {
       )
     );
 
-    approx(liquidTotalEGP(s), 5000 + 1000 * 12.5);
-    approx(holdingsTotalEGP(s), 10 * 6000 + 100 * 50);
-    approx(liabilitiesTotalEGP(s), 15000);
-    approx(netWorthEGP(s), 17500 + 65000 - 15000);
+    approx(liquidTotal(s), 5000 + 1000 * 12.5);
+    approx(holdingsTotal(s), 10 * 6000 + 100 * 50);
+    approx(liabilitiesTotal(s), 15000);
+    approx(netWorth(s), 17500 + 65000 - 15000);
   });
 });
 
@@ -510,8 +510,8 @@ describe('monthSummary', () => {
     s = apply(s, ops.updateRates(s, { ...RATES_V7, SAR_EGP: 20 }));
 
     const summary = monthSummary(s, '2026-10');
-    approx(summary.incomeEGP, 120000);
-    approx(summary.expenseEGP, 20000 + 1300 + 1000);
+    approx(summary.income, 120000);
+    approx(summary.expense, 20000 + 1300 + 1000);
     approx(summary.expenseByBucket.essentials, 20000);
     approx(summary.expenseByBucket.lifestyle, 1300);
     approx(summary.expenseByBucket.giving, 1000);
@@ -543,11 +543,11 @@ describe('transfers', () => {
 
   it('moves SAR out and EGP in, converting at current rates by default', () => {
     let s = twoAccounts();
-    const before = liquidTotalEGP(s);
+    const before = liquidTotal(s);
     s = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 400, date: '2026-10-05' }, makeCtx()));
     approx(accountBalance(s, 'sar'), 600);
     approx(accountBalance(s, 'egp'), 5000);
-    approx(liquidTotalEGP(s), before);
+    approx(liquidTotal(s), before);
     const [tx] = s.transactions;
     assert.equal(tx.type, 'transfer');
     approx(snapRate(s, tx, 'SAR'), 12.5);
@@ -759,8 +759,8 @@ describe('transaction lists', () => {
       ['2026-10-03', 2],
       ['2026-10-01', 2],
     ]);
-    approx(groups[0].netEGP, -10 * 13); // the transfer is neutral
-    approx(groups[1].netEGP, 1000 * 12 - 300);
+    approx(groups[0].net, -10 * 13); // the transfer is neutral
+    approx(groups[1].net, 1000 * 12 - 300);
     // Within a day, the later-created transaction comes first.
     assert.equal(groups[0].transactions[0].type, 'transfer');
   });
@@ -1102,7 +1102,7 @@ describe('opening data import', { skip: noSeed }, () => {
     const totals = goldTotals(imported());
     assert.equal(totals.totalGrams, 50);
     assert.deepEqual(totals.gramsByKarat, { 18: 0, 21: 30, 24: 20 });
-    approx(totals.totalCostEGP, 305900);
+    approx(totals.totalCost, 305900);
     assert.equal(imported().transactions.some((t) => t.type === 'asset_purchase'), false);
   });
 
@@ -1117,13 +1117,13 @@ describe('opening data import', { skip: noSeed }, () => {
     const s = imported();
     const r = seedRate();
     const aug = monthSummary(s, '2026-08');
-    approx(aug.incomeEGP, 2700 * r);
-    approx(aug.expenseEGP, 1595 * r);
+    approx(aug.income, 2700 * r);
+    approx(aug.expense, 1595 * r);
     approx(aug.expenseByBucket.essentials, 1505 * r);
     approx(aug.expenseByBucket.lifestyle, 90 * r);
     const sep = monthSummary(s, '2026-09');
-    approx(sep.incomeEGP, 3800 * r);
-    approx(sep.expenseEGP, 1105 * r);
+    approx(sep.income, 3800 * r);
+    approx(sep.expense, 1105 * r);
     approx(sep.expenseByBucket.essentials, 975 * r);
     approx(sep.expenseByBucket.lifestyle, 130 * r);
     approx(sep.savingsRate, (3800 - 1105) / 3800);
@@ -1139,7 +1139,7 @@ describe('opening data import', { skip: noSeed }, () => {
     const s = imported();
     const byLocation = netWorthByCountry(s);
     approx(byLocation.SA, 8000 * 12.5);
-    approx(byLocation.EG + byLocation.SA, netWorthEGP(s));
+    approx(byLocation.EG + byLocation.SA, netWorth(s));
   });
 });
 
@@ -1166,10 +1166,10 @@ describe('buyGold', () => {
     approx(holding.purchaseCost.amount, 60000);
     assert.equal(holding.purchaseDate, '2026-10-10');
     // Bought at the market price (10g × 6,000), so net worth is unchanged.
-    approx(netWorthEGP(after), netWorthEGP(s));
+    approx(netWorth(after), netWorth(s));
     // Not spending.
     const october = monthSummary(after, '2026-10');
-    assert.equal(october.expenseEGP, 0);
+    assert.equal(october.expense, 0);
     assert.equal(october.savingsRate, null);
     assert.equal(transactionsForMonth(after, '2026-10', 'asset_purchase').length, 1);
   });
@@ -1179,7 +1179,7 @@ describe('buyGold', () => {
     const after = apply(s, ops.buyGold(s, purchase({ accountId: 'sar', amount: 4000 }), makeCtx()));
     // Native: what was paid, in SAR; in EGP it is worth the purchase's rate.
     assert.deepEqual(after.holdings[0].purchaseCost, { amount: 4000, currency: 'SAR' });
-    approx(sel.holdingCostEGP(after, after.holdings[0]), 4000 * 12.5);
+    approx(sel.holdingCost(after, after.holdings[0]), 4000 * 12.5);
     approx(accountBalance(after, 'sar'), 1000);
   });
 
@@ -1247,7 +1247,7 @@ describe('cash-flow rules', () => {
     add('2026-08-04', 999);
     add('2026-08-05', 100);
     s = apply(s, ops.updateSettings(s, { trackingStartDate: '2026-08-05' }, makeCtx()));
-    approx(monthSummary(s, '2026-08').expenseEGP, 100);
+    approx(monthSummary(s, '2026-08').expense, 100);
     // Balances still include everything.
     approx(accountBalance(s, 'egp'), -1099);
   });
@@ -1256,8 +1256,8 @@ describe('cash-flow rules', () => {
     let s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)] };
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 1000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-09-02' }, makeCtx()));
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 5000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-home-setup', date: '2026-09-03', oneTime: true }, makeCtx()));
-    approx(monthSummary(s, '2026-09').expenseEGP, 6000);
-    approx(monthSummary(s, '2026-09', { excludeOneTime: true }).expenseEGP, 1000);
+    approx(monthSummary(s, '2026-09').expense, 6000);
+    approx(monthSummary(s, '2026-09', { excludeOneTime: true }).expense, 1000);
     approx(suggestedEmergencyTarget(s, 3, NOW), 3000);
   });
 });
@@ -1271,7 +1271,7 @@ describe('settings & gold prices', () => {
       { id: 'b', updatedAt: T0, type: 'gold', name: 'b', weightGrams: 1, karat: 21, purchaseCost: { amount: 0, currency: 'EGP' }, purchaseRateSnapshotId: S125.id, country: 'EG' },
       { id: 'c', updatedAt: T0, type: 'gold', name: 'c', weightGrams: 1, karat: 18, purchaseCost: { amount: 0, currency: 'EGP' }, purchaseRateSnapshotId: S125.id, country: 'SA' },
     ];
-    approx(holdingsTotalEGP(s), 6000 + 5300 + 4500);
+    approx(holdingsTotal(s), 6000 + 5300 + 4500);
     approx(netWorthByCountry(s).SA, 4500);
   });
 
@@ -1604,7 +1604,7 @@ describe('backup export / import', () => {
       [preview.accounts, preview.transactions, preview.holdings, preview.funds],
       [state.accounts.length, state.transactions.length, state.holdings.length, state.funds.length]
     );
-    approx(preview.netWorthEGP, netWorthEGP(state));
+    approx(preview.netWorth, netWorth(state));
     assert.equal(backupFileName(new Date(2026, 9, 3, 23, 59)), 'wealth-backup-2026-10-03.json');
   });
 
@@ -1824,7 +1824,7 @@ describe('plan currency conversion', () => {
     approx(snapRate(after, after.fundMovements[0], 'SAR'), 13.5);
     approx(planProgress(after, '2026-10')!.contributions[0].allocated, 100);
     approx(reviewLogic.monthReview(after, '2026-10', NOW).funds[0].allocated, 100);
-    assert.equal(monthFlows(after, '2026-10').savedToFundsEGP, 1350);
+    assert.equal(monthFlows(after, '2026-10').savedToFunds, 1350);
     // In its own currency a fund never depends on rates.
     assert.equal(fundAllocated(after, 'F'), 1350);
   });
@@ -2391,8 +2391,8 @@ describe('category management', () => {
     // Still selectable when editing a transaction that already uses it.
     assert.ok(pickerCategories(s.categories, 'expense', [id]).some((c) => c.id === id));
     const after = monthSummary(s, '2026-10');
-    assert.equal(after.expenseEGP, before.expenseEGP);
-    assert.equal(after.expenseEGP, 100 * 12.5);
+    assert.equal(after.expense, before.expense);
+    assert.equal(after.expense, 100 * 12.5);
     assert.deepEqual(after.expenseByBucket, before.expenseByBucket);
     // Not suggested in new plans.
     const suggestion = planning.planSuggestion(s, '2026-11', 'SAR', NOW);
@@ -2747,10 +2747,10 @@ describe('net worth snapshots', () => {
       holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCost: { amount: 1, currency: 'EGP' }, purchaseRateSnapshotId: S125.id, country: 'EG', purchaseDate: '2026-09-15', updatedAt: T0 }],
       liabilities: [{ id: 'l', name: 'loan', principal: 200, currency: 'EGP', startDate: '2026-10-01', country: 'EG', updatedAt: T0 }],
     };
-    assert.equal(netWorthAsOf(s, '2026-08-31').netWorthEGP, 1000);
-    assert.equal(netWorthAsOf(s, '2026-09-30').netWorthEGP, 1500 + 6000);
-    assert.equal(netWorthAsOf(s, '2026-09-30').holdingsEGP, 6000);
-    assert.equal(netWorthAsOf(s, '2026-10-31').netWorthEGP, 1500 + 6000 - 200);
+    assert.equal(netWorthAsOf(s, '2026-08-31').netWorth, 1000);
+    assert.equal(netWorthAsOf(s, '2026-09-30').netWorth, 1500 + 6000);
+    assert.equal(netWorthAsOf(s, '2026-09-30').holdings, 6000);
+    assert.equal(netWorthAsOf(s, '2026-10-31').netWorth, 1500 + 6000 - 200);
   });
 
   it('measures the change against last month (hidden without a snapshot)', () => {
@@ -2759,10 +2759,10 @@ describe('net worth snapshots', () => {
     const richer = { ...s, accounts: [{ ...s.accounts[0], openingBalance: 1500 }] };
     const change = snapshots.netWorthChange(richer, NOW)!;
     assert.equal(change.fromMonth, '2026-09');
-    approx(change.amountEGP, 500);
+    approx(change.amount, 500);
     approx(change.pct, 1 / 3);
     // Over September: Sept's end vs August's.
-    approx(snapshots.monthNetWorthChange(s, '2026-09', NOW)!.amountEGP, 500);
+    approx(snapshots.monthNetWorthChange(s, '2026-09', NOW)!.amount, 500);
     assert.equal(snapshots.monthNetWorthChange(s, '2026-08', NOW), null);
     // From zero there is no percentage.
     const fromZero: FinanceState = {
@@ -2885,12 +2885,12 @@ describe('monthly review', () => {
 
   it('summarises income, expenses, savings rate and net worth change', () => {
     const r = reviewLogic.monthReview(s(), SEP, NOW);
-    assert.equal(r.incomeEGP, 10000);
+    assert.equal(r.income, 10000);
     // The gold purchase is not an expense.
-    assert.equal(r.expenseEGP, 6700);
-    assert.equal(r.netEGP, 3300);
+    assert.equal(r.expense, 6700);
+    assert.equal(r.net, 3300);
     approx(r.savingsRate, 0.33);
-    approx(r.netWorthChange!.amountEGP, 3000);
+    approx(r.netWorthChange!.amount, 3000);
     approx(r.netWorthChange!.pct, 0.15);
   });
 
@@ -2909,12 +2909,12 @@ describe('monthly review', () => {
   it('lists the top regular categories and one-time expenses separately', () => {
     const r = reviewLogic.monthReview(s(), SEP, NOW);
     assert.deepEqual(r.topCategories, [
-      { categoryId: 'cat-essentials-rent', amountEGP: 3000 },
-      { categoryId: CATEGORY_IDS.groceries, amountEGP: 2000 },
-      { categoryId: 'cat-lifestyle-dining', amountEGP: 200 },
+      { categoryId: 'cat-essentials-rent', amount: 3000 },
+      { categoryId: CATEGORY_IDS.groceries, amount: 2000 },
+      { categoryId: 'cat-lifestyle-dining', amount: 200 },
     ]);
-    assert.deepEqual(r.oneTime, [{ id: 'sofa', categoryId: 'cat-essentials-home-setup', amountEGP: 1500, date: '2026-09-10', note: 'كنبة' }]);
-    assert.equal(r.oneTimeTotalEGP, 1500);
+    assert.deepEqual(r.oneTime, [{ id: 'sofa', categoryId: 'cat-essentials-home-setup', amount: 1500, date: '2026-09-10', note: 'كنبة' }]);
+    assert.equal(r.oneTimeTotal, 1500);
     // At most five.
     const many = { ...s(), transactions: Array.from({ length: 8 }, (_, i) => tx(`t${i}`, 'expense', DEFAULT_CATEGORIES.filter((c) => c.kind === 'expense')[i].id, 100 + i)) };
     assert.equal(reviewLogic.monthReview(many, SEP, NOW).topCategories.length, 5);
@@ -2948,10 +2948,10 @@ describe('monthly review', () => {
 
   it('monthFlows splits where the money went', () => {
     const flows = monthFlows(s(), SEP);
-    assert.equal(flows.incomeEGP, 10000);
-    assert.equal(flows.expenseEGP, 6700);
-    assert.equal(flows.savedToFundsEGP, 1000);
-    assert.equal(flows.investedEGP, 4000);
+    assert.equal(flows.income, 10000);
+    assert.equal(flows.expense, 6700);
+    assert.equal(flows.savedToFunds, 1000);
+    assert.equal(flows.invested, 4000);
   });
 
   it('formats percentages with the sign isolated', () => {
@@ -3337,8 +3337,8 @@ describe('settings / assets UI helpers', () => {
     const gold = { id: 'g', type: 'gold' as const, name: 'سبيكة 5 جم', weightGrams: 5, karat: 24 as const, purchaseCost: { amount: 1, currency: 'EGP' }, purchaseRateSnapshotId: S125.id, country: 'EG', updatedAt: T0 };
     assert.equal(assetsUi.holdingTitle(gold), 'سبيكة 5 جم — عيار 24');
     assert.equal(assetsUi.holdingTitle({ ...gold, name: ' ' }), '5 جم — عيار 24');
-    assert.ok(assetsUi.signedDifference(1200).includes('+'));
-    assert.ok(assetsUi.signedDifference(-300).includes('−'));
+    assert.ok(assetsUi.signedDifference(1200, 'EGP').includes('+'));
+    assert.ok(assetsUi.signedDifference(-300, 'EGP').includes('−'));
     const accs = [
       account('a', 'EGP', 1),
       account('b', 'SAR', 1, 'SA'),
@@ -3626,11 +3626,11 @@ describe('live prices: applying', () => {
       planning.planProgress(s, '2026-10')!.lines.map((l) => l.spent)
     );
     assert.deepEqual(planning.planProgress(updated, '2026-10')!.lines.map((l) => l.spent), [40, 20]);
-    assert.equal(monthSummary(updated, '2026-10').expenseEGP, monthSummary(s, '2026-10').expenseEGP);
+    assert.equal(monthSummary(updated, '2026-10').expense, monthSummary(s, '2026-10').expense);
     assert.deepEqual(updated.transactions, s.transactions);
     // Balances and gold follow the new prices.
-    approx(netWorthEGP(s), 960 * 12.5 + 4750 + 10 * 6000);
-    approx(netWorthEGP(updated), 960 * 14 + 4750 + 10 * 5000);
+    approx(netWorth(s), 960 * 12.5 + 4750 + 10 * 6000);
+    approx(netWorth(updated), 960 * 14 + 4750 + 10 * 5000);
   });
 
   it('skips the "update prices" action after a successful auto fetch in the last 24 hours', () => {
@@ -3675,11 +3675,11 @@ describe('native amounts never drift with the rates', () => {
     const after = at(before, 15);
     assert.equal(accountBalance(before, 'sar'), 1000);
     assert.equal(accountBalance(after, 'sar'), 1000);
-    assert.equal(sel.accountBalanceEGP(before, before.accounts[0]), 13000);
-    assert.equal(sel.accountBalanceEGP(after, after.accounts[0]), 15000);
+    assert.equal(sel.accountValue(before, before.accounts[0]), 13000);
+    assert.equal(sel.accountValue(after, after.accounts[0]), 15000);
     assert.deepEqual(liquidByCurrency(after), { EGP: 5000, SAR: 1000, USD: 0 });
-    assert.equal(netWorthEGP(before), 18000);
-    assert.equal(netWorthEGP(after), 20000);
+    assert.equal(netWorth(before), 18000);
+    assert.equal(netWorth(after), 20000);
   });
 
   it('balances built from SAR income, expenses and same-currency transfers stay exact', () => {
@@ -3716,8 +3716,8 @@ describe('native amounts never drift with the rates', () => {
     const before = at(s, 13);
     const after = at(s, 15);
     assert.equal(holding.quantity, 1000);
-    assert.equal(sel.holdingValueEGP(before, holding), 13000);
-    assert.equal(sel.holdingValueEGP(after, holding), 15000);
+    assert.equal(sel.holdingValue(before, holding), 13000);
+    assert.equal(sel.holdingValue(after, holding), 15000);
     // In a SAR fund it is exactly its quantity (no round trip through EGP); in an EGP fund it follows the rate.
     assert.equal(fundCurrent(before, 'FS'), 1000);
     assert.equal(fundCurrent(after, 'FS'), 1000);
@@ -4397,7 +4397,7 @@ describe('analytics', () => {
       assert.equal(jul.total, 120000); // total only
       assert.deepEqual([aug.cash, aug.gold, aug.currencies, aug.total], [125000, 0, 0, 125000]);
       assert.deepEqual([sep.cash, sep.gold, sep.currencies, sep.total], [136000, 5000, 0, 131000]);
-      assert.equal(oct.total, netWorthEGP(state()));
+      assert.equal(oct.total, netWorth(state()));
       assert.equal(result.estimatedCount, 1);
     });
 
@@ -4421,7 +4421,7 @@ describe('analytics', () => {
       const result = series(state(), 'all', 'SAR');
       approx(result.points[1].total, 125000 / 12.5);
       assert.equal(result.points[2].total, roundTo(131000 / 13, 2));
-      approx(result.points[3].total, netWorthEGP(state()) / 12.5);
+      approx(result.points[3].total, netWorth(state()) / 12.5);
       // A snapshot that kept no rates falls back to today's.
       approx(result.points[0].total, 120000 / 12.5);
       // Changing today's rate leaves the recorded points alone.
@@ -4481,9 +4481,9 @@ describe('analytics', () => {
       // Aug 4,000 and Sep 4,500 (the 4,000 sofa is one-time); July is before tracking.
       assert.equal(r.monthsObserved, 2);
       assert.equal(r.avgEssentials, 4250);
-      approx(r.liquid.months, liquidTotalEGP(s) / 4250);
+      approx(r.liquid.months, liquidTotal(s) / 4250);
       approx(r.unassigned.months, Math.max(0, unassignedEGP(s)) / 4250);
-      approx(r.liquid.amount, liquidTotalEGP(s));
+      approx(r.liquid.amount, liquidTotal(s));
     });
 
     it('per currency: native money against the essentials spent in that currency', () => {
@@ -4503,7 +4503,7 @@ describe('analytics', () => {
       const s = ledger();
       const r = analytics.runway(s, 'SAR', NOW);
       approx(r.avgEssentials, 4250 / 12.5);
-      approx(r.liquid.amount, liquidTotalEGP(s) / 12.5);
+      approx(r.liquid.amount, liquidTotal(s) / 12.5);
       const moved = analytics.runway(at(s, 25), 'SAR', NOW);
       approx(moved.avgEssentials, 4250 / 12.5); // history unchanged
     });
@@ -4687,7 +4687,8 @@ describe('analytics', () => {
       assert.deepEqual([parsed.query.period.from, parsed.query.period.to], ['2026-10-01', '2026-10-31']);
       assert.equal(analytics.parseDrillParams({}), null);
       assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), type: 'transfer' }), null);
-      assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), currency: 'USD' }), null);
+      assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), currency: 'XYZ' }), null);
+      assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), currency: 'USD' })?.query.currency, 'USD');
       assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), from: '2026-12-01' }), null);
       assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, filter), from: 'x' }), null);
     });
@@ -5399,7 +5400,7 @@ describe('v7 → v8: countries, and every v7 number is unchanged', () => {
     // 90,500 in Saudi (cash 57,500 + gold 18,000 + USD 15,000) and 150,000 in Egypt net of the 45,000 loan.
     const byCountry = sel.netWorthByCountry(v8);
     assert.deepEqual(byCountry, { EG: 150000, SA: 90500 });
-    approx(Object.values(byCountry).reduce((a, b) => a + b, 0), sel.netWorthEGP(v8));
+    approx(Object.values(byCountry).reduce((a, b) => a + b, 0), sel.netWorth(v8));
   });
 
   it('net-worth snapshots keep their numbers; the old liabilities total moves into Egypt', () => {
@@ -5546,7 +5547,7 @@ describe('v7 → v8: rates become a USD table, records point at immutable snapsh
     assert.equal(bought.transactions[0].rateSnapshotId, snapshotId(rateTable(13)));
     assert.deepEqual(bought.holdings[0].purchaseCost, { amount: 1000, currency: 'SAR' });
     assert.equal(bought.holdings[0].purchaseRateSnapshotId, snapshotId(rateTable(13)));
-    approx(sel.holdingCostEGP(bought, bought.holdings[0]), 13000);
+    approx(sel.holdingCost(bought, bought.holdings[0]), 13000);
     const moved = apply(s0, ops.allocateToFund(s0, 'F', 100, undefined, ctx));
     assert.equal(moved.fundMovements[0].rateSnapshotId, snapshotId(rateTable(13)));
     assert.ok(moved.rateSnapshots.some((x) => x.id === snapshotId(rateTable(13))));
@@ -5650,8 +5651,8 @@ describe('rounding: writes are rounded to the currency, sums are exact', () => {
     const s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)], transactions };
     assert.equal(accountBalance(s, 'egp'), 10);
     assert.notEqual(transactions.reduce((a, t) => a + t.amount, 0), 10);
-    assert.equal(sel.monthSummary(s, '2026-10').incomeEGP, 10);
-    assert.equal(sel.liquidTotalEGP(s), 10);
+    assert.equal(sel.monthSummary(s, '2026-10').income, 10);
+    assert.equal(sel.liquidTotal(s), 10);
   });
 
   it('income minus expenses has no float tail (0.6 − 0.1 − 0.2 is 0.3, not 0.30000000000000004)', () => {
@@ -5662,7 +5663,7 @@ describe('rounding: writes are rounded to the currency, sums are exact', () => {
     const s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)], transactions: [tx('a', 'income', 0.6), tx('b', 'expense', 0.1), tx('c', 'expense', 0.2)] };
     assert.equal(sel.monthSummary(s, '2026-10').netCashFlow, 0.3);
     assert.equal(accountBalance(s, 'egp'), 0.3);
-    assert.equal(sel.monthSummary(s, '2026-10').expenseEGP, 0.3);
+    assert.equal(sel.monthSummary(s, '2026-10').expense, 0.3);
   });
 
   it('a value in another currency is rounded to THAT currency, and the rows add up to the total shown', () => {
@@ -5673,11 +5674,11 @@ describe('rounding: writes are rounded to the currency, sums are exact', () => {
     });
     const s: FinanceState = { ...emptyState(), accounts: [account('sar', 'SAR', 1)], transactions: [tx('a'), tx('b'), tx('c')] };
     assert.equal(sel.transactionAmountIn(s, s.transactions[0] as never, 'EGP'), 0.13);
-    assert.equal(sel.monthSummary(s, '2026-10').expenseEGP, 0.39);
+    assert.equal(sel.monthSummary(s, '2026-10').expense, 0.39);
     assert.equal(analytics.periodTotals(s, { period: analytics.resolvePeriod(s, 'month', NOW), currency: 'EGP', includeOneTime: true }).expense, 0.39);
     // A balance valued in EGP: 333.33 SAR × 12.5 = 4166.625 → 4166.63.
     const v: FinanceState = { ...emptyState(), accounts: [account('sar', 'SAR', 333.33)] };
-    assert.equal(sel.liquidTotalEGP(v), 4166.63);
+    assert.equal(sel.liquidTotal(v), 4166.63);
   });
 
   it('data from a newer registry (an unknown currency) still reads, with 2 decimals', () => {
@@ -5825,7 +5826,7 @@ describe('holdings cost is native; reporting and plan currency are preferences',
       assert.deepEqual(h.purchaseCost, { amount: before.purchaseCostEGP, currency: 'EGP' });
       assert.ok(snapshotById(v8.rateSnapshots, h.purchaseRateSnapshotId), 'snapshot resolves');
       assert.equal('purchaseCostEGP' in h, false);
-      assert.equal(sel.holdingCostEGP(v8, h), before.purchaseCostEGP);
+      assert.equal(sel.holdingCost(v8, h), before.purchaseCostEGP);
     }
   });
 
@@ -5840,7 +5841,7 @@ describe('holdings cost is native; reporting and plan currency are preferences',
     const bought = apply(s0, ops.buyGold(s0, { accountId: 'sar', amount: 1000, date: '2026-10-10', holding: { name: 'g', weightGrams: 1, karat: 24 } }, makeCtx()));
     const later = withSar(bought, 14);
     assert.deepEqual(later.holdings[0].purchaseCost, { amount: 1000, currency: 'SAR' });
-    assert.equal(sel.holdingCostEGP(later, later.holdings[0]), 13000);
+    assert.equal(sel.holdingCost(later, later.holdings[0]), 13000);
   });
 
   it('editing a holding keeps its purchase rates unless its cost moves to another currency', () => {
@@ -5878,5 +5879,107 @@ describe('holdings cost is native; reporting and plan currency are preferences',
     assert.equal(planning.emptyPlan(s0, '2026-11', undefined, NOW).currency, 'USD');
     assert.equal(planning.planSuggestion(s0, '2026-11', undefined, NOW).currency, 'USD');
     assert.equal(planning.emptyPlan(s0, '2026-11', 'EGP', NOW).currency, 'EGP');
+  });
+});
+
+describe('reporting currency: a projection of the same data (INV-1)', () => {
+  const rich = (): FinanceState => applyV8Steps(richV7(), MIGRATION_CTX);
+  const CODES = ['EGP', 'SAR', 'USD'] as const;
+
+  it('switching it changes only settings.reportingCurrency: no stored amount, record or rate moves', () => {
+    const s0 = rich();
+    let s = s0;
+    for (const code of ['SAR', 'USD', 'EGP', 'USD', 'SAR'] as const) {
+      s = apply(s, ops.setCurrencyPreferences(s, { reportingCurrency: code }, makeCtx()));
+      assert.equal(s.settings.reportingCurrency, code);
+      assert.deepEqual({ ...s, settings: { ...s.settings, reportingCurrency: s0.settings.reportingCurrency } }, s0);
+    }
+    // Reading every total in every currency does not touch the state either.
+    const frozen = JSON.stringify(s);
+    for (const c of CODES) {
+      sel.netWorth(s, c);
+      sel.monthSummary(s, '2026-10', { to: c });
+      analytics.moneyMap(s, c);
+    }
+    assert.equal(JSON.stringify(s), frozen);
+  });
+
+  it('with EGP every total is what it always was; the default is the reporting currency', () => {
+    const s = rich();
+    assert.equal(s.settings.reportingCurrency, 'EGP');
+    assert.equal(sel.netWorth(s), sel.netWorth(s, 'EGP'));
+    assert.equal(sel.liquidTotal(s), sel.liquidTotal(s, 'EGP'));
+    assert.equal(sel.holdingsTotal(s), sel.holdingsTotal(s, 'EGP'));
+    assert.deepEqual(sel.monthSummary(s, '2026-10'), sel.monthSummary(s, '2026-10', { to: 'EGP' }));
+    const sar = apply(s, ops.setCurrencyPreferences(s, { reportingCurrency: 'SAR' }, makeCtx()));
+    // Only the currency of the default moved.
+    assert.equal(sel.netWorth(sar), sel.netWorth(s, 'SAR'));
+    assert.deepEqual(sel.monthSummary(sar, '2026-10'), sel.monthSummary(s, '2026-10', { to: 'SAR' }));
+  });
+
+  it('the parts add up to the total in every currency (each item rounded in it, then summed)', () => {
+    const s = rich();
+    for (const c of CODES) {
+      const total = sel.netWorth(s, c);
+      approx(sel.liquidTotal(s, c) + sel.holdingsTotal(s, c) - sel.liabilitiesTotal(s, c), total);
+      approx(Object.values(sel.netWorthByCountry(s, c)).reduce((a, b) => a + b, 0), total);
+      const m = analytics.moneyMap(s, c);
+      approx(m.netWorth, total);
+      approx(m.byLocation.reduce((a, l) => a + l.total, 0) - sel.liabilitiesTotal(s, c), total);
+    }
+  });
+
+  it('a total in another currency is the same wealth at today\'s rates', () => {
+    const s = rich();
+    const egp = sel.netWorth(s, 'EGP');
+    // 12.5 EGP per SAR and 50 per USD in the fixture rates: within a few minor units of rounding per item.
+    const rows = s.accounts.length + s.holdings.length + s.liabilities.length;
+    assert.ok(Math.abs(sel.netWorth(s, 'SAR') - egp / 12.5) <= 0.005 * rows);
+    assert.ok(Math.abs(sel.netWorth(s, 'USD') - egp / 50) <= 0.005 * rows);
+  });
+
+  it('1,000 SAR less 100 SAR is 900 SAR; the native balance is untouched and only the projection differs', () => {
+    const base = { ...emptyState(), accounts: [account('sar', 'SAR', 1000)] };
+    const s = apply(base, ops.addTransaction(base, { type: 'expense', amount: 100, currency: 'SAR', accountId: 'sar', categoryId: CATEGORY_IDS.groceries, date: '2026-10-05' }, makeCtx()));
+    assert.equal(accountBalance(s, 'sar'), 900);
+    assert.equal(sel.netWorth(s, 'SAR'), 900);
+    assert.equal(sel.netWorth(s, 'EGP'), 11250);
+    assert.equal(sel.netWorth(s, 'USD'), 225);
+    assert.equal(sel.monthSummary(s, '2026-10', { to: 'SAR' }).expense, 100);
+    assert.equal(sel.monthSummary(s, '2026-10', { to: 'EGP' }).expense, 1250);
+  });
+
+  it('a gold holding is valued in the reporting currency; its cost follows its purchase rates', () => {
+    const s0 = withSar(emptyState(), 13);
+    const s1 = apply(s0, ops.addHolding(s0, { type: 'gold', name: 'g', weightGrams: 10, karat: 24, purchaseCost: { amount: 6000, currency: 'SAR' }, country: 'EG' }, makeCtx()));
+    const h = s1.holdings[0];
+    assert.equal(sel.holdingValue(s1, h, 'EGP'), 60000);
+    assert.equal(sel.holdingValue(s1, h, 'SAR'), 4615.38);
+    assert.equal(sel.holdingCost(s1, h, 'SAR'), 6000);
+    assert.equal(sel.holdingCost(s1, h, 'EGP'), 78000);
+    // Later rates move the value, never the SAR cost.
+    const later = withSar(s1, 14);
+    assert.equal(sel.holdingCost(later, later.holdings[0], 'SAR'), 6000);
+    assert.equal(sel.holdingCost(later, later.holdings[0], 'EGP'), 78000);
+  });
+
+  it('net worth change and the review read in the reporting currency, through the snapshots\' own rates', () => {
+    const s = rich();
+    const now = new Date(2026, 9, 15, 12);
+    const inEgp = snapshots.netWorthChange(s, now, 'EGP');
+    const inSar = snapshots.netWorthChange(s, now, 'SAR');
+    assert.ok(inEgp && inSar);
+    assert.equal(inEgp.fromMonth, inSar.fromMonth);
+    const sarState = apply(s, ops.setCurrencyPreferences(s, { reportingCurrency: 'SAR' }, makeCtx()));
+    assert.equal(reviewLogic.monthReview(sarState, '2026-09', now).currency, 'SAR');
+    assert.deepEqual(reviewLogic.monthReview(sarState, '2026-09', now), reviewLogic.monthReview(s, '2026-09', now, 'SAR'));
+    assert.equal(reviewLogic.monthReview(s, '2026-09', now).currency, 'EGP');
+  });
+
+  it('the analytics screen accepts any registry currency and nothing else', () => {
+    const s = rich();
+    for (const c of CODES) assert.doesNotThrow(() => analytics.moneyMap(s, c));
+    const q: analytics.AnalyticsQuery = { period: analytics.resolvePeriod(s, 'sinceStart', NOW), currency: 'USD', includeOneTime: true };
+    assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, { type: 'expense' }) })?.query.currency, 'USD');
   });
 });

@@ -32,7 +32,7 @@ import {
   fundProgress,
   fundRequiredMonthly,
   fundStatus,
-  holdingValueEGP,
+  holdingValue,
   linkableHoldings,
   movementValueInFund,
 } from '@/store/selectors';
@@ -231,7 +231,7 @@ export default function FundDetailScreen() {
                   iconTone="gold"
                   trailing={
                     <AppText variant="moneyRow" color="goldText" align="left" style={styles.tabular}>
-                      {formatMoney(holdingValueEGP(state, h), 'EGP')}
+                      {formatMoney(holdingValue(state, h, 'EGP'), 'EGP')}
                     </AppText>
                   }
                 />

@@ -25,15 +25,15 @@ import { StatusChip } from '@/components/ui/StatusChip';
 import { colors, opacity, space } from '@/constants/theme';
 import {
   accountBalance,
-  accountBalanceEGP,
+  accountValue,
   goldTotals,
-  holdingPnlEGP,
-  holdingsTotalEGP,
-  holdingValueEGP,
-  liabilitiesTotalEGP,
+  holdingPnl,
+  holdingsTotal,
+  holdingValue,
+  liabilitiesTotal,
   liabilityRemaining,
-  liquidTotalEGP,
-  totalAssetsEGP,
+  liquidTotal,
+  totalAssets,
 } from '@/store/selectors';
 import { countryName } from '@/constants/countries';
 import { COUNTRY_OPTIONS, DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
@@ -93,7 +93,8 @@ export default function AssetsScreen() {
   const groups = groupAccounts(accounts);
   const gold = holdings.filter((h) => h.type === 'gold');
   const otherHoldings = holdings.filter((h) => h.type !== 'gold');
-  const totals = goldTotals(state);
+  const reporting = state.settings.reportingCurrency;
+  const totals = goldTotals(state, reporting);
   const fundOf = (holdingIdToFind: string) => state.funds.find((f) => f.linkedHoldingIds.includes(holdingIdToFind))?.name;
 
   // Helpers
@@ -160,7 +161,7 @@ export default function AssetsScreen() {
           amount={accountBalance(state, account.id)}
           currency={account.currency}
           align="left"
-          converted={account.currency !== 'EGP' ? { amount: accountBalanceEGP(state, account), currency: 'EGP' } : undefined}
+          converted={account.currency !== reporting ? { amount: accountValue(state, account, reporting), currency: reporting } : undefined}
         />
       }
       onPress={() => setEditingAccountId(account.id)}
@@ -181,14 +182,14 @@ export default function AssetsScreen() {
         subtitleLines={1}
         icon={holding.type === 'gold' ? 'diamond' : 'payments'}
         iconTone={holding.type === 'gold' ? 'gold' : 'neutral'}
-        trailing={<Money amount={holdingValueEGP(state, holding)} currency="EGP" align="left" />}
+        trailing={<Money amount={holdingValue(state, holding, reporting)} currency={reporting} align="left" />}
         accessory={
           hasCost || fundName ? (
             <View style={styles.holdingMeta}>
               {hasCost && (
                 <AppText variant="caption" color="textSecondary" style={styles.tabular}>
                   تكلفة الشراء {formatMoney(holding.purchaseCost.amount, holding.purchaseCost.currency)} · فرق القيمة{' '}
-                  {signedDifference(holdingPnlEGP(state, holding))}
+                  {signedDifference(holdingPnl(state, holding, reporting), reporting)}
                 </AppText>
               )}
               {fundName && <StatusChip label={`مربوط بـ ${fundName}`} tone="gold" icon="link" />}
@@ -211,17 +212,17 @@ export default function AssetsScreen() {
         <AppText variant="secondary" color="textSecondary">
           إجمالي الأصول
         </AppText>
-        <Money amount={totalAssetsEGP(state)} currency="EGP" size="lg" />
+        <Money amount={totalAssets(state, reporting)} currency={reporting} size="lg" />
         <MetricGroup
           metrics={[
-            { label: 'سيولة', value: <Money amount={liquidTotalEGP(state)} currency="EGP" align="center" /> },
+            { label: 'سيولة', value: <Money amount={liquidTotal(state, reporting)} currency={reporting} align="center" /> },
             {
               label: 'ذهب واستثمارات',
               tone: 'gold',
-              value: <Money amount={holdingsTotalEGP(state)} currency="EGP" align="center" />,
+              value: <Money amount={holdingsTotal(state, reporting)} currency={reporting} align="center" />,
             },
             ...(state.liabilities.length > 0
-              ? [{ label: 'التزامات', value: <Money amount={liabilitiesTotalEGP(state)} currency="EGP" align="center" /> }]
+              ? [{ label: 'التزامات', value: <Money amount={liabilitiesTotal(state, reporting)} currency={reporting} align="center" /> }]
               : []),
           ]}
         />

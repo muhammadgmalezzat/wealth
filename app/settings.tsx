@@ -277,6 +277,13 @@ export default function SettingsScreen() {
       <View>
         <SectionHeader title="التخطيط" />
         <Card>
+          <FormField label="عملة العرض" helper="العملة اللي بتظهر بيها الإجماليات (صافي الثروة، الأصول، ملخص الشهر، المراجعة). بتغيّر العرض بس، مفيش أي مبلغ متخزّن بيتغيّر.">
+            <Segment
+              options={settings.enabledCurrencies.map((code) => ({ label: currencyNameAr(code), value: code }))}
+              value={settings.reportingCurrency}
+              onChange={(code) => runAction('تعذّر الحفظ', () => state.setCurrencyPreferences({ reportingCurrency: code }))}
+            />
+          </FormField>
           <FormField label="عملة الخطة الشهرية" helper="العملة اللي بتبدأ بيها أي خطة جديدة. كل خطة بتحتفظ بعملتها.">
             <Segment
               options={settings.enabledCurrencies.map((code) => ({ label: currencyNameAr(code), value: code }))}

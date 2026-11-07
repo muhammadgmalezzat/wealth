@@ -5,6 +5,7 @@ import { monthOf, monthsUntil, shiftMonth, toMonthKey } from '@/utils/dates';
 import { daysLeftInMonth } from './shared';
 import type {
   Account,
+  CountryBreakdown,
   AssetPurchaseTransaction,
   Category,
   CountryCode,
@@ -17,7 +18,6 @@ import type {
   Holding,
   IncomeExpenseTransaction,
   Liability,
-  LocationBreakdown,
   NetWorthBreakdown,
   SinkingFrequency,
   Transaction,
@@ -74,13 +74,21 @@ export function openingBalanceForCurrentBalance(
   return roundIn(currentBalance - accountNetFlow(state, accountId), currency);
 }
 
-export function accountBalanceEGP(state: LiquidState, account: Account): number {
-  return roundIn(toEGP(accountBalance(state, account.id), account.currency, state.settings.rates), 'EGP');
+// A current amount in `from` valued in `to` at today's rates, rounded to `to`'s decimals (INV-7: every
+// item is rounded before it is summed). The same currency comes back untouched.
+const valueNow = (state: Pick<State, 'settings'>, amount: number, from: CurrencyCode, to: CurrencyCode): number =>
+  roundIn(convertCurrency(amount, from, to, state.settings.rates), to);
+
+// The currency totals are shown in unless a screen asks for another: a projection, never a stored amount.
+export const reportingCurrency = (state: Pick<State, 'settings'>): CurrencyCode => state.settings.reportingCurrency;
+
+export function accountValue(state: LiquidState, account: Account, to: CurrencyCode = reportingCurrency(state)): number {
+  return valueNow(state, accountBalance(state, account.id), account.currency, to);
 }
 
 // Archived accounts still hold money, so they count.
-export function liquidTotalEGP(state: LiquidState): number {
-  return sumIn(state.accounts.map((a) => accountBalanceEGP(state, a)), 'EGP');
+export function liquidTotal(state: LiquidState, to: CurrencyCode = reportingCurrency(state)): number {
+  return sumIn(state.accounts.map((a) => accountValue(state, a, to)), to);
 }
 
 // --- Holdings ---------------------------------------------------------------
@@ -92,29 +100,34 @@ export function goldPricePerGram(settings: State['settings'], karat: GoldKarat):
   return settings.goldPrice24kEGP * 0.75;
 }
 
-export function holdingValueEGP(state: Pick<State, 'settings'>, holding: Holding): number {
+// Gold is priced in EGP (the market input), so its value is converted from there.
+export function holdingValue(state: Pick<State, 'settings'>, holding: Holding, to: CurrencyCode = reportingCurrency(state)): number {
   if (holding.type === 'gold') {
-    return roundIn(holding.weightGrams * goldPricePerGram(state.settings, holding.karat), 'EGP');
+    return valueNow(state, holding.weightGrams * goldPricePerGram(state.settings, holding.karat), 'EGP', to);
   }
-  return roundIn(toEGP(holding.quantity, holding.currency, state.settings.rates), 'EGP');
+  return valueNow(state, holding.quantity, holding.currency, to);
 }
 
-// What the holding cost, in EGP at the rates of its purchase (the cost itself is native).
-export function holdingCostEGP(state: Pick<State, 'rateSnapshots'>, holding: Holding): number {
+// What the holding cost, in `to` at the rates of its purchase (the cost itself is native).
+export function holdingCost(
+  state: Pick<State, 'rateSnapshots' | 'settings'>,
+  holding: Holding,
+  to: CurrencyCode = reportingCurrency(state)
+): number {
   const { amount, currency } = holding.purchaseCost;
-  return roundIn(projectAmount(state.rateSnapshots, holding.purchaseRateSnapshotId, amount, currency, 'EGP'), 'EGP');
+  return roundIn(projectAmount(state.rateSnapshots, holding.purchaseRateSnapshotId, amount, currency, to), to);
 }
 
-export function holdingPnlEGP(state: State, holding: Holding): number {
-  return roundIn(holdingValueEGP(state, holding) - holdingCostEGP(state, holding), 'EGP');
+export function holdingPnl(state: State, holding: Holding, to: CurrencyCode = reportingCurrency(state)): number {
+  return roundIn(holdingValue(state, holding, to) - holdingCost(state, holding, to), to);
 }
 
-export function holdingsTotalEGP(state: State): number {
-  return sumIn(state.holdings.map((h) => holdingValueEGP(state, h)), 'EGP');
+export function holdingsTotal(state: State, to: CurrencyCode = reportingCurrency(state)): number {
+  return sumIn(state.holdings.map((h) => holdingValue(state, h, to)), to);
 }
 
-export function totalAssetsEGP(state: State): number {
-  return sumIn([liquidTotalEGP(state), holdingsTotalEGP(state)], 'EGP');
+export function totalAssets(state: State, to: CurrencyCode = reportingCurrency(state)): number {
+  return sumIn([liquidTotal(state, to), holdingsTotal(state, to)], to);
 }
 
 // --- Liabilities ------------------------------------------------------------
@@ -132,18 +145,18 @@ export function liabilityRemaining(state: State, liability: Liability): number {
   return roundIn(Math.max(0, liability.principal - paid), liability.currency);
 }
 
-export function liabilitiesTotalEGP(state: State): number {
-  return sumIn(
-    state.liabilities.map((l) => roundIn(toEGP(liabilityRemaining(state, l), l.currency, state.settings.rates), 'EGP')),
-    'EGP'
-  );
+const liabilityValue = (state: State, liability: Liability, to: CurrencyCode): number =>
+  valueNow(state, liabilityRemaining(state, liability), liability.currency, to);
+
+export function liabilitiesTotal(state: State, to: CurrencyCode = reportingCurrency(state)): number {
+  return sumIn(state.liabilities.map((l) => liabilityValue(state, l, to)), to);
 }
 
-export function netWorthEGP(state: State): number {
-  return sumIn([liquidTotalEGP(state), holdingsTotalEGP(state), -liabilitiesTotalEGP(state)], 'EGP');
+export function netWorth(state: State, to: CurrencyCode = reportingCurrency(state)): number {
+  return sumIn([liquidTotal(state, to), holdingsTotal(state, to), -liabilitiesTotal(state, to)], to);
 }
 
-const emptyBreakdown = (): LocationBreakdown => ({ cashEGP: 0, goldEGP: 0, currenciesEGP: 0, liabilitiesEGP: 0 });
+const emptyBreakdown = (): CountryBreakdown => ({ cash: 0, gold: 0, currencies: 0, liabilities: 0 });
 
 // Every country in the registry plus any other country the data uses (registry order first), so lists
 // show the same rows whether or not a country has money in it right now.
@@ -155,48 +168,58 @@ export function countriesInUse(
   return [...new Set([...countryCodes(registry), ...used])];
 }
 
-// Cash, gold, currency holdings and liabilities per country (EGP at current rates).
-export function netWorthBreakdown(state: State): NetWorthBreakdown {
-  const result: NetWorthBreakdown = {};
+// Cash, gold, currency holdings and liabilities per country, in `to` at current rates.
+export function netWorthBreakdown(state: State, to: CurrencyCode = reportingCurrency(state)): Record<CountryCode, CountryBreakdown> {
+  const result: Record<CountryCode, CountryBreakdown> = {};
   for (const country of countriesInUse(state)) result[country] = emptyBreakdown();
   for (const account of state.accounts) {
     const where = result[account.country];
-    where.cashEGP = addIn(where.cashEGP, accountBalanceEGP(state, account), 'EGP');
+    where.cash = addIn(where.cash, accountValue(state, account, to), to);
   }
   for (const holding of state.holdings) {
     const where = result[holding.country];
-    const value = holdingValueEGP(state, holding);
-    if (holding.type === 'gold') where.goldEGP = addIn(where.goldEGP, value, 'EGP');
-    else where.currenciesEGP = addIn(where.currenciesEGP, value, 'EGP');
+    const value = holdingValue(state, holding, to);
+    if (holding.type === 'gold') where.gold = addIn(where.gold, value, to);
+    else where.currencies = addIn(where.currencies, value, to);
   }
   for (const liability of state.liabilities) {
     const where = result[liability.country];
-    const owed = roundIn(toEGP(liabilityRemaining(state, liability), liability.currency, state.settings.rates), 'EGP');
-    where.liabilitiesEGP = addIn(where.liabilitiesEGP, owed, 'EGP');
+    where.liabilities = addIn(where.liabilities, liabilityValue(state, liability, to), to);
   }
   return result;
 }
 
+// The stored shape of a breakdown (EGP, as net worth snapshots keep it).
+export const toStoredBreakdown = (b: Record<CountryCode, CountryBreakdown>): NetWorthBreakdown =>
+  Object.fromEntries(
+    Object.entries(b).map(([country, p]) => [
+      country,
+      { cashEGP: p.cash, goldEGP: p.gold, currenciesEGP: p.currencies, liabilitiesEGP: p.liabilities },
+    ])
+  );
+
+// The figures of a moment in `to`. A stored net worth snapshot keeps them in EGP (its fields are named for
+// it); screens show them in the reporting currency.
 export interface NetWorthFigures {
-  netWorthEGP: number;
-  liquidEGP: number;
-  holdingsEGP: number;
-  breakdown: NetWorthBreakdown;
+  netWorth: number;
+  liquid: number;
+  holdings: number;
+  breakdown: Record<CountryCode, CountryBreakdown>;
 }
 
-export function netWorthFigures(state: State): NetWorthFigures {
+export function netWorthFigures(state: State, to: CurrencyCode = reportingCurrency(state)): NetWorthFigures {
   return {
-    netWorthEGP: netWorthEGP(state),
-    liquidEGP: liquidTotalEGP(state),
-    holdingsEGP: holdingsTotalEGP(state),
-    breakdown: netWorthBreakdown(state),
+    netWorth: netWorth(state, to),
+    liquid: liquidTotal(state, to),
+    holdings: holdingsTotal(state, to),
+    breakdown: netWorthBreakdown(state, to),
   };
 }
 
 // Best-effort net worth at the end of `date` ('YYYY-MM-DD'), at CURRENT rates and prices (there
 // is no price history): transactions dated after it are left out, as are accounts opened,
 // holdings bought and liabilities started after it. Missing dates count as "always there".
-export function netWorthAsOf(state: State, date: string): NetWorthFigures {
+export function netWorthAsOf(state: State, date: string, to: CurrencyCode = reportingCurrency(state)): NetWorthFigures {
   const onOrBefore = (d: string | undefined) => !d || d.slice(0, 10) <= date;
   const past: State = {
     ...state,
@@ -205,15 +228,15 @@ export function netWorthAsOf(state: State, date: string): NetWorthFigures {
     holdings: state.holdings.filter((h) => onOrBefore(h.purchaseDate)),
     liabilities: state.liabilities.filter((l) => onOrBefore(l.startDate)),
   };
-  return netWorthFigures(past);
+  return netWorthFigures(past, to);
 }
 
 // Net worth split by country (a liability is subtracted from the country it is owed in), so the
-// countries always add up to netWorthEGP.
-export function netWorthByCountry(state: State): Record<CountryCode, number> {
+// countries always add up to netWorth.
+export function netWorthByCountry(state: State, to: CurrencyCode = reportingCurrency(state)): Record<CountryCode, number> {
   const result: Record<CountryCode, number> = {};
-  for (const [country, b] of Object.entries(netWorthBreakdown(state))) {
-    result[country] = sumIn([b.cashEGP, b.goldEGP, b.currenciesEGP, -b.liabilitiesEGP], 'EGP');
+  for (const [country, b] of Object.entries(netWorthBreakdown(state, to))) {
+    result[country] = sumIn([b.cash, b.gold, b.currencies, -b.liabilities], to);
   }
   return result;
 }
@@ -230,16 +253,16 @@ export function liquidByCurrency(state: LiquidByCurrencyState): Record<CurrencyC
 export interface GoldTotals {
   totalGrams: number;
   gramsByKarat: Record<GoldKarat, number>;
-  totalCostEGP: number;
+  totalCost: number;
 }
 
-export function goldTotals(state: Pick<State, 'holdings' | 'rateSnapshots'>): GoldTotals {
-  const totals: GoldTotals = { totalGrams: 0, gramsByKarat: { 18: 0, 21: 0, 24: 0 }, totalCostEGP: 0 };
+export function goldTotals(state: Pick<State, 'holdings' | 'rateSnapshots' | 'settings'>, to: CurrencyCode = reportingCurrency(state)): GoldTotals {
+  const totals: GoldTotals = { totalGrams: 0, gramsByKarat: { 18: 0, 21: 0, 24: 0 }, totalCost: 0 };
   for (const h of state.holdings) {
     if (h.type !== 'gold') continue;
     totals.totalGrams += h.weightGrams;
     totals.gramsByKarat[h.karat] += h.weightGrams;
-    totals.totalCostEGP = addIn(totals.totalCostEGP, holdingCostEGP(state, h), 'EGP');
+    totals.totalCost = addIn(totals.totalCost, holdingCost(state, h, to), to);
   }
   return totals;
 }
@@ -325,7 +348,7 @@ export function fundLinkedValue(state: State, fundId: string): number {
         roundIn(
           h.type === 'currency'
             ? convertCurrency(h.quantity, h.currency, fund.currency, rates)
-            : fromEGP(holdingValueEGP(state, h), fund.currency, rates),
+            : fromEGP(holdingValue(state, h, 'EGP'), fund.currency, rates),
           fund.currency
         )
       ),
@@ -768,27 +791,36 @@ export function transactionAmountIn(
   return roundIn(projectAmount(state.rateSnapshots, tx.rateSnapshotId, tx.amount, tx.currency, currency), currency);
 }
 
-// Signed EGP effect on net cash flow at the transaction's own rates; transfers and asset purchases
+// Signed effect on net cash flow, in `to` at the transaction's own rates; transfers and asset purchases
 // (money changing form, not leaving) are neutral.
-export function transactionNetEGP(state: Pick<State, 'rateSnapshots'>, tx: Transaction): number {
+export function transactionNet(
+  state: Pick<State, 'rateSnapshots' | 'settings'>,
+  tx: Transaction,
+  to: CurrencyCode = reportingCurrency(state)
+): number {
   if (!isIncomeExpense(tx)) return 0;
-  const amountEGP = transactionAmountIn(state, tx, 'EGP');
-  return tx.type === 'income' ? amountEGP : -amountEGP;
+  const amount = transactionAmountIn(state, tx, to);
+  return tx.type === 'income' ? amount : -amount;
 }
 
 export interface DayGroup {
   date: string;
-  netEGP: number;
+  // In the currency asked for.
+  net: number;
   transactions: Transaction[];
 }
 
 // Groups by calendar day, newest day first and newest transaction first within a day.
-export function groupTransactionsByDay(state: Pick<State, 'rateSnapshots'>, transactions: Transaction[]): DayGroup[] {
+export function groupTransactionsByDay(
+  state: Pick<State, 'rateSnapshots' | 'settings'>,
+  transactions: Transaction[],
+  to: CurrencyCode = reportingCurrency(state)
+): DayGroup[] {
   const groups = new Map<string, DayGroup>();
   for (const tx of [...transactions].sort(compareNewestFirst)) {
     const day = tx.date.slice(0, 10);
-    const group = groups.get(day) ?? { date: day, netEGP: 0, transactions: [] };
-    group.netEGP += transactionNetEGP(state, tx);
+    const group = groups.get(day) ?? { date: day, net: 0, transactions: [] };
+    group.net += transactionNet(state, tx, to);
     group.transactions.push(tx);
     groups.set(day, group);
   }
@@ -797,9 +829,10 @@ export function groupTransactionsByDay(state: Pick<State, 'rateSnapshots'>, tran
 
 // --- Monthly cash flow ------------------------------------------------------
 
+// Amounts are in the currency asked for (the reporting currency by default), each transaction at its own rates.
 export interface MonthSummary {
-  incomeEGP: number;
-  expenseEGP: number;
+  income: number;
+  expense: number;
   expenseByBucket: Record<ExpenseBucket, number>;
   netCashFlow: number;
   // net / income; null when there is no income.
@@ -807,6 +840,8 @@ export interface MonthSummary {
 }
 
 export interface MonthSummaryOptions {
+  // The currency of the amounts; the reporting currency when omitted.
+  to?: CurrencyCode;
   // Leave out one-time expenses (used for averages such as the emergency target).
   excludeOneTime?: boolean;
 }
@@ -814,10 +849,11 @@ export interface MonthSummaryOptions {
 // Income and expenses only: transfers move money between own accounts and asset purchases
 // turn cash into holdings, so neither counts. Transactions before trackingStartDate are ignored.
 export function monthSummary(state: State, month: string, options: MonthSummaryOptions = {}): MonthSummary {
+  const to = options.to ?? reportingCurrency(state);
   const categoryBucket = new Map(state.categories.map((c) => [c.id, c.bucket]));
   const summary: MonthSummary = {
-    incomeEGP: 0,
-    expenseEGP: 0,
+    income: 0,
+    expense: 0,
     expenseByBucket: { essentials: 0, lifestyle: 0, giving: 0 },
     netCashFlow: 0,
     savingsRate: null,
@@ -826,45 +862,45 @@ export function monthSummary(state: State, month: string, options: MonthSummaryO
   for (const tx of state.transactions.filter(isIncomeExpense)) {
     if (monthOf(tx.date) !== month || tx.date < state.settings.trackingStartDate) continue;
     if (options.excludeOneTime && tx.oneTime) continue;
-    const amountEGP = transactionAmountIn(state, tx, 'EGP');
+    const amount = transactionAmountIn(state, tx, to);
     if (tx.type === 'income') {
-      summary.incomeEGP = addIn(summary.incomeEGP, amountEGP, 'EGP');
+      summary.income = addIn(summary.income, amount, to);
     } else {
-      summary.expenseEGP = addIn(summary.expenseEGP, amountEGP, 'EGP');
+      summary.expense = addIn(summary.expense, amount, to);
       const bucket = categoryBucket.get(tx.categoryId);
-      if (bucket && bucket !== 'income') summary.expenseByBucket[bucket] = addIn(summary.expenseByBucket[bucket], amountEGP, 'EGP');
+      if (bucket && bucket !== 'income') summary.expenseByBucket[bucket] = addIn(summary.expenseByBucket[bucket], amount, to);
     }
   }
 
-  summary.netCashFlow = roundIn(summary.incomeEGP - summary.expenseEGP, 'EGP');
-  summary.savingsRate = summary.incomeEGP > 0 ? summary.netCashFlow / summary.incomeEGP : null;
+  summary.netCashFlow = roundIn(summary.income - summary.expense, to);
+  summary.savingsRate = summary.income > 0 ? summary.netCashFlow / summary.income : null;
   return summary;
 }
 
 export interface MonthFlows {
-  incomeEGP: number;
-  expenseEGP: number;
+  income: number;
+  expense: number;
   // Net fund movements of the month (allocations minus withdrawals), each at its own rates.
-  savedToFundsEGP: number;
+  savedToFunds: number;
   // Asset purchases (cash turned into holdings), at their snapshot rates.
-  investedEGP: number;
+  invested: number;
 }
 
 // Where the month's money went: monthSummary's income and expenses plus what was put into funds
 // and invested. Like monthSummary, ignores dates before trackingStartDate.
-export function monthFlows(state: State, month: string): MonthFlows {
-  const { incomeEGP, expenseEGP } = monthSummary(state, month);
+export function monthFlows(state: State, month: string, to: CurrencyCode = reportingCurrency(state)): MonthFlows {
+  const { income, expense } = monthSummary(state, month, { to });
   const start = state.settings.trackingStartDate;
   const inMonth = (date: string) => monthOf(date) === month && date >= start;
   return {
-    incomeEGP,
-    expenseEGP,
-    savedToFundsEGP: sumIn(state.fundMovements.filter((m) => inMonth(m.date)).map((m) => movementAmountIn(state, m, 'EGP')), 'EGP'),
-    investedEGP: sumIn(
+    income,
+    expense,
+    savedToFunds: sumIn(state.fundMovements.filter((m) => inMonth(m.date)).map((m) => movementAmountIn(state, m, to)), to),
+    invested: sumIn(
       state.transactions
         .filter((tx): tx is AssetPurchaseTransaction => tx.type === 'asset_purchase' && inMonth(tx.date))
-        .map((tx) => transactionAmountIn(state, tx, 'EGP')),
-      'EGP'
+        .map((tx) => transactionAmountIn(state, tx, to)),
+      to
     ),
   };
 }
@@ -881,7 +917,7 @@ export function suggestedEmergencyTarget(
   const current = toMonthKey(now);
   const lastThree = [1, 2, 3].map((n) => shiftMonth(current, -n));
   const recorded = lastThree
-    .map((m) => monthSummary(state, m, { excludeOneTime: true }).expenseByBucket.essentials)
+    .map((m) => monthSummary(state, m, { excludeOneTime: true, to: 'EGP' }).expenseByBucket.essentials)
     .filter((essentials) => essentials > 0);
   if (recorded.length === 0) return null;
   return roundIn((sumIn(recorded, 'EGP') / recorded.length) * months, 'EGP');
@@ -894,7 +930,7 @@ export function stateSummary(state: State) {
     accounts: state.accounts.length,
     holdings: state.holdings.length,
     funds: state.funds.length,
-    netWorthEGP: Math.round(netWorthEGP(state) * 100) / 100,
+    netWorthEGP: Math.round(netWorth(state, 'EGP') * 100) / 100,
     unassignedEGP: Math.round(unassignedEGP(state) * 100) / 100,
   };
 }

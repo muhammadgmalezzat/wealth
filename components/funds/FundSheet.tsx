@@ -18,7 +18,7 @@ import {
   currencyList,
   fundAllocated,
   fundCashByCurrency,
-  holdingValueEGP,
+  holdingValue,
   linkableHoldings,
   sinkingMonthlySuggestion,
   suggestedEmergencyTarget,
@@ -204,7 +204,7 @@ export function FundSheet({ fund, initialType = 'goal', onClose, onDeleted }: Fu
             {goldOptions.map((h) => (
               <Chip
                 key={h.id}
-                label={`${h.name} · ${formatNumber(holdingValueEGP(state, h), 0)} ج.م`}
+                label={`${h.name} · ${formatNumber(holdingValue(state, h, 'EGP'), 0)} ج.م`}
                 selected={linked.includes(h.id)}
                 onPress={() => toggleLinked(h.id)}
               />

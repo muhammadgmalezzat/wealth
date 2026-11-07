@@ -18,10 +18,10 @@ export function reportV8(state: FinanceState, now: Date): OracleReport {
     liquidByCurrency: { ...sel.liquidByCurrency(state) },
     unassignedByCurrency: { ...sel.unassignedByCurrency(state) },
     totals: {
-      liquidEGP: sel.liquidTotalEGP(state),
-      holdingsEGP: sel.holdingsTotalEGP(state),
-      liabilitiesEGP: sel.liabilitiesTotalEGP(state),
-      netWorthEGP: sel.netWorthEGP(state),
+      liquidEGP: sel.liquidTotal(state, 'EGP'),
+      holdingsEGP: sel.holdingsTotal(state, 'EGP'),
+      liabilitiesEGP: sel.liabilitiesTotal(state, 'EGP'),
+      netWorthEGP: sel.netWorth(state, 'EGP'),
       EG: 0,
       SA: 0,
       ...sel.netWorthByCountry(state),
@@ -37,7 +37,7 @@ export function reportV8(state: FinanceState, now: Date): OracleReport {
   };
 
   for (const a of state.accounts) report.accounts[a.id] = { currency: a.currency, balance: sel.accountBalance(state, a.id) };
-  for (const h of state.holdings) report.holdings[h.id] = { valueEGP: sel.holdingValueEGP(state, h), costEGP: sel.holdingCostEGP(state, h) };
+  for (const h of state.holdings) report.holdings[h.id] = { valueEGP: sel.holdingValue(state, h, 'EGP'), costEGP: sel.holdingCost(state, h, 'EGP') };
 
   for (const tx of state.transactions) {
     if (tx.type === 'transfer') continue;
@@ -45,16 +45,16 @@ export function reportV8(state: FinanceState, now: Date): OracleReport {
   }
 
   for (const month of months(state)) {
-    const s = sel.monthSummary(state, month);
-    const f = sel.monthFlows(state, month);
+    const s = sel.monthSummary(state, month, { to: 'EGP' });
+    const f = sel.monthFlows(state, month, 'EGP');
     report.months[month] = {
-      incomeEGP: s.incomeEGP,
-      expenseEGP: s.expenseEGP,
+      incomeEGP: s.income,
+      expenseEGP: s.expense,
       essentials: s.expenseByBucket.essentials,
       lifestyle: s.expenseByBucket.lifestyle,
       giving: s.expenseByBucket.giving,
-      savedToFundsEGP: f.savedToFundsEGP,
-      investedEGP: f.investedEGP,
+      savedToFundsEGP: f.savedToFunds,
+      investedEGP: f.invested,
     };
   }
 

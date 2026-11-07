@@ -112,7 +112,7 @@ export function RestoreSheet({ file, initialOpened, onClose }: RestoreSheetProps
             <Row label="المعاملات" value={String(preview.transactions)} />
             <Row label="الاستثمارات" value={String(preview.holdings)} />
             <Row label="الصناديق" value={String(preview.funds)} />
-            <Row label="صافي الثروة" value={formatMoney(preview.netWorthEGP, 'EGP')} />
+            <Row label="صافي الثروة" value={formatMoney(preview.netWorth, preview.currency)} />
           </ListGroup>
           {opened && opened.schemaVersion < 4 && (
             <AppText variant="caption" color="textSecondary">
