@@ -262,17 +262,50 @@ function stepPreferences(s: Draft): Draft {
 
 // v7 had one `transfer` with `amount` out and `toAmount` in, whatever the currencies. Now a transfer moves
 // the same currency (arrives = amount) and an `exchange` has sent and received amounts. Nothing is invented:
-// an exchange's received amount IS the stored toAmount, so every account balance stays what it was. A v7
-// "same-currency" transfer whose two amounts differ (never offered by the v7 UI) can't be a plain transfer
-// without changing a balance, so it becomes an exchange record with the stored amounts too.
+// an exchange's received amount IS the stored toAmount, so every account balance stays what it was.
+// A v7 transfer between two accounts of the SAME currency whose two amounts differ (never offered by the v7 UI)
+// is not an exchange. It becomes a plain transfer plus what explains the difference, so balances stay identical:
+//  - sent > received: a transfer of the received amount and a fee of the difference on the source account
+//    (spending, category رسوم);
+//  - received > sent: a transfer of the sent amount and an income "تسوية" of the difference on the target.
+const ADJUSTMENT_NAME = 'تسوية';
+const DEFAULTS_UPDATED_AT = '2026-01-01T00:00:00.000Z';
+
 function stepLedger(s: Draft): Draft {
   const currencyOf = new Map<string, string>(s.accounts.map((a: Draft) => [a.id, a.currency]));
-  const transactions = s.transactions.map((tx: Draft) => {
-    if (tx.type !== 'transfer' || !('toAmount' in tx)) return tx;
+  const adjustmentCategory = s.categories.find(
+    (c: Draft) => c.id === CATEGORY_IDS.adjustment || (c.kind === 'income' && String(c.name).trim() === ADJUSTMENT_NAME)
+  );
+  const adjustmentId: string = adjustmentCategory?.id ?? CATEGORY_IDS.adjustment;
+  let needsAdjustmentCategory = false;
+  const transactions = s.transactions.flatMap((tx: Draft): Draft[] => {
+    if (tx.type !== 'transfer' || !('toAmount' in tx)) return [tx];
     const { toAmount, amount, ...rest } = tx;
-    const sameCurrency = currencyOf.get(tx.fromAccountId) === currencyOf.get(tx.toAccountId);
-    if (sameCurrency && toAmount === amount) return { ...rest, amount, fees: [] };
-    return { ...rest, type: 'exchange', sentAmount: amount, receivedAmount: toAmount, fees: [] };
+    const from = currencyOf.get(tx.fromAccountId);
+    if (from !== currencyOf.get(tx.toAccountId)) {
+      return [{ ...rest, type: 'exchange', sentAmount: amount, receivedAmount: toAmount, fees: [] }];
+    }
+    if (toAmount === amount) return [{ ...rest, amount, fees: [] }];
+    if (amount > toAmount) {
+      return [{ ...rest, amount: toAmount, fees: [{ accountId: tx.fromAccountId, amount: money(amount - toAmount, from ?? '') }] }];
+    }
+    needsAdjustmentCategory = !adjustmentCategory;
+    return [
+      { ...rest, amount, fees: [] },
+      {
+        id: `${tx.id}-adjustment`,
+        type: 'income',
+        amount: money(toAmount - amount, from ?? ''),
+        currency: from,
+        accountId: tx.toAccountId,
+        categoryId: adjustmentId,
+        date: tx.date,
+        note: 'تسوية تحويل قديم',
+        rateSnapshotId: tx.rateSnapshotId,
+        createdAt: tx.createdAt,
+        updatedAt: tx.updatedAt,
+      },
+    ];
   });
   // A recurring transfer between two currencies is an exchange rule: its toAmount is what arrives, and it is
   // confirmed every time (an unknown executed rate is never recorded by itself).
@@ -288,12 +321,15 @@ function stepLedger(s: Draft): Draft {
   const hasFees = s.categories.some(
     (c: Draft) => c.id === CATEGORY_IDS.fees || (c.kind === 'expense' && String(c.name).trim() === 'رسوم')
   );
-  const categories = hasFees
-    ? s.categories
-    : [
-        ...s.categories,
-        { updatedAt: '2026-01-01T00:00:00.000Z', id: CATEGORY_IDS.fees, name: 'رسوم', kind: 'expense', bucket: 'essentials', isDefault: true },
-      ];
+  const categories = [
+    ...s.categories,
+    ...(hasFees
+      ? []
+      : [{ updatedAt: DEFAULTS_UPDATED_AT, id: CATEGORY_IDS.fees, name: 'رسوم', kind: 'expense', bucket: 'essentials', isDefault: true }]),
+    ...(needsAdjustmentCategory
+      ? [{ updatedAt: DEFAULTS_UPDATED_AT, id: CATEGORY_IDS.adjustment, name: ADJUSTMENT_NAME, kind: 'income', bucket: 'income', isDefault: false }]
+      : []),
+  ];
   return { ...s, transactions, recurringRules, categories };
 }
 

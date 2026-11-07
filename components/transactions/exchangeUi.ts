@@ -21,7 +21,8 @@ export function rateDeviation(implied: number, market: number): number | null {
 
 export function isFarFromMarket(implied: number, market: number): boolean {
   const deviation = rateDeviation(implied, market);
-  return deviation !== null && Math.abs(deviation) > RATE_WARNING_PCT;
+  // A tiny tolerance so exactly 5% (13.125 vs 12.5) is not pushed over by float noise.
+  return deviation !== null && Math.abs(deviation) - RATE_WARNING_PCT > 1e-9;
 }
 
 // 12.4 · 0.0803 · 1,250.5: five significant digits, no trailing zeros.

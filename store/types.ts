@@ -71,6 +71,9 @@ export interface IncomeExpenseTransaction extends TransactionBase {
   liabilityId?: string;
   // A one-off expense (e.g. furnishing): excluded from monthly averages.
   oneTime?: boolean;
+  // Only on the VIRTUAL expense rows that selectors make from the fees of a transfer or exchange (never
+  // stored): the id of that transfer or exchange.
+  feeOfId?: string;
 }
 
 // A charge of a transfer or exchange (bank, wallet or exchange-house fee). It leaves `accountId` (the source or

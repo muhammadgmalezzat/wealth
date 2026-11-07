@@ -1,10 +1,10 @@
 import { convertCurrency } from '@/utils/currency';
 import { addIn, roundIn, sumIn } from '@/utils/money';
 import { fromDateKey, monthOf, shiftMonth, toDateKey } from '@/utils/dates';
-import { FIXED_CATEGORY_IDS } from './defaultCategories';
+import { feeCategoryId, FIXED_CATEGORY_IDS } from './defaultCategories';
 import type { PlanInput } from './operations';
 import { isLive, monthlyEquivalent } from './recurring';
-import { fundsByPriority, fundSuggestedMonthly, movementAmountIn, transactionAmountIn } from './selectors';
+import { fundsByPriority, fundSuggestedMonthly, incomeExpenseRows, movementAmountIn, transactionAmountIn } from './selectors';
 import { daysInMonth, daysLeftInMonth } from './shared';
 import type {
   CurrencyCode,
@@ -45,9 +45,10 @@ function convert(state: Pick<State, 'settings'>, amount: number, from: CurrencyC
   return convertCurrency(amount, from, to, state.settings.rates);
 }
 
+// Expenses of the month: the recorded ones plus the fees of transfers and exchanges (spending in the fees category).
 function monthExpenses(state: State, month: string, { excludeOneTime = false } = {}): IncomeExpenseTransaction[] {
-  return state.transactions.filter(
-    (tx): tx is IncomeExpenseTransaction =>
+  return incomeExpenseRows(state).filter(
+    (tx) =>
       tx.type === 'expense' &&
       monthOf(tx.date) === month &&
       tx.date >= state.settings.trackingStartDate &&
@@ -340,6 +341,23 @@ export interface SpendImpact {
   // In the plan currency; negative when the line would be overspent.
   remainingAfter: number;
   overBy: number;
+}
+
+// How the fees of a transfer or exchange being entered would land on the fees line of the plan: every fee in its
+// account's currency, at current rates. null without a fee, a plan or a fees line.
+export function feeSpendImpact(
+  state: State,
+  month: string,
+  fees: { amount: number; currency: CurrencyCode }[]
+): SpendImpact | null {
+  const categoryId = feeCategoryId(state.categories);
+  const planned = planFor(state, month);
+  if (!categoryId || !planned || fees.length === 0) return null;
+  const total = sumIn(
+    fees.map((fee) => roundIn(convert(state, fee.amount, fee.currency, planned.currency), planned.currency)),
+    planned.currency
+  );
+  return spendImpact(state, month, categoryId, total);
 }
 
 // How a new expense would land on its category's line. `amount` is in `amountCurrency`

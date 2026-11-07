@@ -66,6 +66,7 @@ import {
 import * as nba from '@/store/nextActions';
 import * as reviewLogic from '@/store/review';
 import * as analyticsUi from '@/components/analytics/analyticsUi';
+import * as exchangeUi from '@/components/transactions/exchangeUi';
 import * as sankeyLayout from '@/components/analytics/sankeyLayout';
 import * as theme from '@/constants/theme';
 import * as analytics from '@/store/analytics';
@@ -6135,13 +6136,45 @@ describe('v7 → v8 step 7: transfers and exchanges (C9)', () => {
     assert.ok(!('toAmount' in same));
   });
 
-  it('a v7 same-currency transfer whose two amounts differ keeps both (so no balance moves)', () => {
+  const oddball = (toAmount: number) => {
     const v7 = richV7();
-    v7.transactions = v7.transactions.map((t) => (t.id === 't-same' && t.type === 'transfer' ? { ...t, toAmount: 499 } : t));
+    v7.transactions = v7.transactions.map((t) => (t.id === 't-same' && t.type === 'transfer' ? { ...t, toAmount } : t));
+    return v7;
+  };
+
+  it('a same-currency transfer that arrived with less is a transfer of what arrived plus a fee on the source; balances identical', () => {
+    const v7 = oddball(499.5); // sent 500, 499.5 arrived
     const v8 = applyV8Steps(v7, ctx);
-    const odd = v8.transactions.find((t) => t.id === 't-same')!;
-    assert.deepEqual(odd.type === 'exchange' && [odd.sentAmount, odd.receivedAmount], [500, 499]);
+    const tx = v8.transactions.find((t) => t.id === 't-same')!;
+    assert.deepEqual(tx.type === 'transfer' && [tx.amount, tx.fees], [499.5, [{ accountId: 'a-sar-sa', amount: 0.5 }]]);
+    assert.ok(!v8.transactions.some((t) => t.id === 't-same-adjustment'));
     for (const [id, expected] of Object.entries(balancesV7(v7))) assert.equal(accountBalance(v8, id), expected.balance, id);
+    // The difference is spending in the fees category, at the record's own rates.
+    const fee = sel.feeExpenses(v8).find((x) => x.feeOfId === 't-same')!;
+    assert.deepEqual([fee.amount, fee.currency, fee.categoryId, fee.accountId], [0.5, 'SAR', 'cat-essentials-fees', 'a-sar-sa']);
+    assert.deepEqual(applyV8Steps(v8, ctx), v8); // idempotent
+  });
+
+  it('a same-currency transfer that arrived with more is a transfer of what was sent plus a "تسوية" income on the target; balances identical', () => {
+    const v7 = oddball(502);
+    const v8 = applyV8Steps(v7, ctx);
+    const tx = v8.transactions.find((t) => t.id === 't-same')!;
+    assert.deepEqual(tx.type === 'transfer' && [tx.amount, tx.fees], [500, []]);
+    const adjustment = v8.transactions.find((t) => t.id === 't-same-adjustment')!;
+    assert.ok(adjustment && adjustment.type === 'income');
+    if (adjustment.type !== 'income') return;
+    assert.deepEqual([adjustment.amount, adjustment.currency, adjustment.accountId, adjustment.date], [2, 'SAR', 'a-sar-eg', '2026-10-09']);
+    const category = v8.categories.find((c) => c.id === adjustment.categoryId)!;
+    assert.deepEqual([category.name, category.kind, category.bucket], ['تسوية', 'income', 'income']);
+    for (const [id, expected] of Object.entries(balancesV7(v7))) assert.equal(accountBalance(v8, id), expected.balance, id);
+    assert.deepEqual(applyV8Steps(v8, ctx), v8); // idempotent: no second adjustment, no second category
+    assert.equal(v8.categories.filter((c) => c.name === 'تسوية').length, 1);
+    // A category the user already made with that name serves instead of a new one.
+    const mine = oddball(502);
+    mine.categories = [...mine.categories, { id: 'cat-mine', name: 'تسوية', kind: 'income', bucket: 'income', isDefault: false, updatedAt: T0 }];
+    const kept = applyV8Steps(mine, ctx);
+    assert.equal((kept.transactions.find((t) => t.id === 't-same-adjustment') as { categoryId: string }).categoryId, 'cat-mine');
+    assert.ok(!kept.categories.some((c) => c.id === 'cat-income-adjustment'));
   });
 
   it('a recurring cross-currency transfer becomes an exchange rule, confirmed every time', () => {
@@ -6188,5 +6221,128 @@ describe('v7 → v8 step 7: transfers and exchanges (C9)', () => {
     assert.deepEqual(after.accounts, before.accounts);
     assert.deepEqual(after.recurringRules, before.recurringRules);
     assert.deepEqual(after.categories.filter((c) => c.id !== 'cat-essentials-fees'), before.categories.filter((c) => c.id !== 'cat-essentials-fees'));
+  });
+});
+
+describe('fees are spending (C4, C6)', () => {
+  const at13 = () => withSar({ ...emptyState(), accounts: [account('sar', 'SAR', 10000, 'SA'), account('egp', 'EGP', 50000), account('sar2', 'SAR', 0, 'SA')] }, 13);
+  const exchangeWithFees = (s: FinanceState, fees: { accountId: string; amount: number }[], date = '2026-10-05') =>
+    apply(s, ops.addExchange(s, { fromAccountId: 'sar', toAccountId: 'egp', sentAmount: 1000, receivedAmount: 12400, fees, date }, makeCtx()));
+  const OCT = (s: FinanceState, to: 'EGP' | 'SAR' = 'EGP') => sel.monthSummary(s, '2026-10', { to });
+
+  it('a fee is an expense in the fees category, valued at the record own rates even after the rates move', () => {
+    const s = exchangeWithFees(at13(), [{ accountId: 'sar', amount: 5 }, { accountId: 'egp', amount: 30 }]);
+    // 5 SAR at 13 = 65 EGP, plus 30 EGP.
+    assert.equal(OCT(s).expense, 95);
+    assert.equal(OCT(s).income, 0);
+    assert.equal(OCT(s).expenseByBucket.essentials, 95);
+    assert.equal(OCT(s, 'SAR').expense, roundTo(5 + 30 / 13, 2));
+    const later = withSar(s, 20);
+    assert.equal(OCT(later).expense, 95);
+    // The exchange itself is not spending, so without fees nothing is spent.
+    assert.equal(OCT(exchangeWithFees(at13(), [])).expense, 0);
+  });
+
+  it('a transfer fee is spending; the transfer is not; dates before tracking started are ignored', () => {
+    const s0 = at13();
+    const t = apply(s0, ops.addTransfer(s0, { fromAccountId: 'sar', toAccountId: 'sar2', amount: 500, fees: [{ accountId: 'sar2', amount: 2 }], date: '2026-10-06' }, makeCtx()));
+    assert.equal(OCT(t, 'SAR').expense, 2);
+    const early = apply(s0, ops.addTransfer(s0, { fromAccountId: 'sar', toAccountId: 'sar2', amount: 500, fees: [{ accountId: 'sar2', amount: 2 }], date: '2025-01-06' }, makeCtx()));
+    assert.equal(sel.monthSummary(early, '2025-01', { to: 'SAR' }).expense, 0);
+  });
+
+  it('deleting the exchange removes its spending with it; editing re-values the fee', () => {
+    const s = exchangeWithFees(at13(), [{ accountId: 'sar', amount: 5 }]);
+    const tx = s.transactions[0];
+    assert.equal(OCT(s).expense, 65);
+    if (tx.type !== 'exchange') throw new Error('expected an exchange');
+    const edited = apply(s, ops.updateTransaction(s, { ...tx, fees: [{ accountId: 'sar', amount: 8 }] }, makeCtx()));
+    assert.equal(OCT(edited).expense, 104);
+    assert.equal(OCT(apply(s, ops.deleteTransaction(s, tx.id, makeCtx()))).expense, 0);
+  });
+
+  it('per-day net includes the fees; a transfer without fees stays neutral', () => {
+    const s = exchangeWithFees(at13(), [{ accountId: 'sar', amount: 5 }]);
+    const days = sel.groupTransactionsByDay(s, s.transactions, 'EGP');
+    assert.equal(days[0].net, -65);
+    assert.equal(sel.transactionNet(s, s.transactions[0], 'EGP'), -65);
+    const plain = exchangeWithFees(at13(), []);
+    assert.equal(sel.groupTransactionsByDay(plain, plain.transactions, 'EGP')[0].net, 0);
+  });
+
+  it('a plan line for رسوم tracks them; without one they are unplanned spending', () => {
+    const s0 = exchangeWithFees(at13(), [{ accountId: 'sar', amount: 5 }]);
+    const plan = (lines: { categoryId: string; limit: number; kind: 'fixed' | 'flexible' }[]) =>
+      apply(s0, ops.savePlan(s0, { month: '2026-10', currency: 'EGP', expectedIncome: 1000, lines, fundContributions: [] }, makeCtx()));
+    const tracked = planning.planProgress(plan([{ categoryId: 'cat-essentials-fees', limit: 200, kind: 'flexible' }]), '2026-10')!;
+    const line = tracked.lines.find((l) => l.categoryId === 'cat-essentials-fees')!;
+    assert.deepEqual([line.spent, line.remaining], [65, 135]);
+    assert.equal(tracked.unplannedSpent, 0);
+    const untracked = planning.planProgress(plan([]), '2026-10')!;
+    assert.equal(untracked.unplannedSpent, 65);
+  });
+
+  it('entering fees shows their impact on the رسوم line; no fee, no plan or no line shows nothing', () => {
+    const s0 = at13();
+    const withPlan = apply(s0, ops.savePlan(s0, { month: '2026-10', currency: 'EGP', expectedIncome: 1000, lines: [{ categoryId: 'cat-essentials-fees', limit: 100, kind: 'flexible' }], fundContributions: [] }, makeCtx()));
+    // 5 SAR (65 EGP at 13) + 50 EGP = 115 against a line of 100.
+    const impact = planning.feeSpendImpact(withPlan, '2026-10', [{ amount: 5, currency: 'SAR' }, { amount: 50, currency: 'EGP' }])!;
+    assert.deepEqual([impact.remainingAfter, impact.overBy], [-15, 15]);
+    assert.equal(planning.feeSpendImpact(withPlan, '2026-10', []), null);
+    assert.equal(planning.feeSpendImpact(s0, '2026-10', [{ amount: 5, currency: 'SAR' }]), null);
+    assert.equal(planning.feeSpendImpact(withPlan, '2026-09', [{ amount: 5, currency: 'SAR' }]), null);
+  });
+
+  it('analytics counts fees as spending; the drill-down for the category opens the parent record once', () => {
+    const s = exchangeWithFees(at13(), [{ accountId: 'sar', amount: 5 }, { accountId: 'egp', amount: 30 }]);
+    const q = (currency: 'EGP' | 'SAR'): analytics.AnalyticsQuery => ({ period: analytics.resolvePeriod(s, 'month', NOW), currency, includeOneTime: true });
+    assert.equal(analytics.periodTotals(s, q('EGP')).expense, 95);
+    assert.equal(analytics.periodTotals(s, q('EGP')).byBucket.essentials, 95);
+    const drill = analytics.drillTransactions(s, q('EGP'), { type: 'expense', categoryIds: ['cat-essentials-fees'] });
+    assert.deepEqual(drill.transactions.map((x) => x.type), ['exchange']);
+    assert.equal(drill.transactions[0].id, s.transactions[0].id);
+    assert.equal(drill.total, 95);
+    assert.equal(analytics.drillTransactions(s, q('EGP'), { type: 'expense', categoryIds: ['cat-essentials-rent'] }).transactions.length, 0);
+    assert.equal(analytics.drillTransactions(s, q('SAR'), { type: 'income' }).transactions.length, 0);
+  });
+
+  it('the monthly review lists fees among the top categories', () => {
+    const s = exchangeWithFees(at13(), [{ accountId: 'sar', amount: 5 }]);
+    const review = reviewLogic.monthReview(s, '2026-10', NOW, 'EGP');
+    assert.deepEqual([review.expense, review.topCategories[0]], [65, { categoryId: 'cat-essentials-fees', amount: 65 }]);
+  });
+
+  it('balances and spending agree: a fee lowers the account once and counts once', () => {
+    const s0 = at13();
+    const s = exchangeWithFees(s0, [{ accountId: 'sar', amount: 5 }]);
+    assert.equal(accountBalance(s, 'sar'), 10000 - 1000 - 5);
+    assert.equal(accountBalance(s, 'egp'), 50000 + 12400);
+    assert.equal(sel.netWorth(withSar(s, 13), 'EGP') - sel.netWorth(s0, 'EGP'), 12400 - 1005 * 13);
+  });
+});
+
+describe('exchange form helpers: the implied rate and the market suggestion', () => {
+  it('the rate is received ÷ sent, only for positive amounts', () => {
+    assert.equal(exchangeUi.impliedRate(1000, 12400), 12.4);
+    assert.equal(exchangeUi.impliedRate(null, 12400), null);
+    assert.equal(exchangeUi.impliedRate(1000, null), null);
+    assert.equal(exchangeUi.impliedRate(0, 5), null);
+    assert.equal(exchangeUi.impliedRate(5, -1), null);
+  });
+
+  it('more than 5% from the market rate (either way) is a soft warning, exactly 5% is not', () => {
+    assert.equal(exchangeUi.isFarFromMarket(12.4, 12.5), false); // 0.8% lower
+    assert.equal(exchangeUi.isFarFromMarket(13.15, 12.5), true); // 5.2% higher
+    assert.equal(exchangeUi.isFarFromMarket(11.8, 12.5), true); // 5.6% lower
+    assert.equal(exchangeUi.isFarFromMarket(13.125, 12.5), false); // 5% higher
+    assert.equal(exchangeUi.isFarFromMarket(5, 0), false); // no market rate, nothing to compare with
+    assert.ok(Math.abs((exchangeUi.rateDeviation(12.4, 12.5) ?? 0) + 0.008) < 1e-9);
+  });
+
+  it('rates read with five significant digits', () => {
+    assert.equal(exchangeUi.formatRate(12.4), '12.4');
+    assert.equal(exchangeUi.formatRate(0.0803), '0.0803');
+    assert.equal(exchangeUi.formatRate(1250.5555), '1250.6');
+    assert.equal(exchangeUi.rateLine('SAR', 'EGP', 12.4), '1 ر.س = 12.4 ج.م');
   });
 });

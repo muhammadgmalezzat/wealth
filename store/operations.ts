@@ -9,7 +9,7 @@ import { priceSourceOf, type PriceFetchResult } from '@/utils/prices/fetchPrices
 import { planIdFor } from './migrations';
 import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
-import { CATEGORY_IDS } from './defaultCategories';
+import { feeCategoryId } from './defaultCategories';
 import { snapshotForNow } from './rateSnapshots';
 import { syncSnapshots } from './snapshots';
 import {
@@ -340,12 +340,7 @@ function validateIncomeExpense(state: State, tx: IncomeExpenseTransaction) {
   }
 }
 
-// The default category of a fee: the default "رسوم" category, or one the user made with that name.
-export function feeCategoryId(categories: Pick<Category, 'id' | 'name' | 'kind'>[]): string | undefined {
-  return (
-    categories.find((c) => c.id === CATEGORY_IDS.fees) ?? categories.find((c) => c.kind === 'expense' && c.name.trim() === 'رسوم')
-  )?.id;
-}
+export { feeCategoryId };
 
 // Each fee is charged to the source or the target of the move, in that account's currency; its category (the
 // fees category by default) is an expense one.

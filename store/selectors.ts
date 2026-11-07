@@ -2,6 +2,7 @@ import { COUNTRY_REGISTRY, countryCodes, type CountryRegistry } from '@/constant
 import { convertCurrency, fromEGP, projectAmount, toEGP } from '@/utils/currency';
 import { addIn, decimalsFor, roundIn, sumIn, sumTo } from '@/utils/money';
 import { monthOf, monthsUntil, shiftMonth, toMonthKey } from '@/utils/dates';
+import { CATEGORY_IDS, feeCategoryId } from './defaultCategories';
 import { daysLeftInMonth } from './shared';
 import type {
   Account,
@@ -32,6 +33,44 @@ type State = FinanceState;
 
 const isIncomeExpense = (tx: Transaction): tx is IncomeExpenseTransaction =>
   tx.type === 'income' || tx.type === 'expense';
+
+// --- Fees as spending ---------------------------------------------------------
+
+type FeeState = Pick<State, 'transactions' | 'accounts' | 'categories'>;
+
+// The fees of every transfer and exchange as VIRTUAL expenses (never stored): in the currency of the account
+// they are charged to, in their category (the fees category by default), dated and valued at the record's own
+// rates. `feeOfId` is the record they belong to.
+export function feeExpenses(state: FeeState): IncomeExpenseTransaction[] {
+  const rows: IncomeExpenseTransaction[] = [];
+  for (const tx of state.transactions) {
+    if (tx.type !== 'transfer' && tx.type !== 'exchange') continue;
+    tx.fees.forEach((fee, index) => {
+      const account = state.accounts.find((a) => a.id === fee.accountId);
+      rows.push({
+        id: `${tx.id}#fee${index}`,
+        feeOfId: tx.id,
+        type: 'expense',
+        amount: fee.amount,
+        currency: account?.currency ?? '',
+        accountId: fee.accountId,
+        categoryId: fee.categoryId ?? feeCategoryId(state.categories) ?? CATEGORY_IDS.fees,
+        date: tx.date,
+        ...(tx.note ? { note: tx.note } : {}),
+        rateSnapshotId: tx.rateSnapshotId,
+        createdAt: tx.createdAt,
+        updatedAt: tx.updatedAt,
+      });
+    });
+  }
+  return rows;
+}
+
+// Every income and expense: the recorded ones plus the fees of transfers and exchanges (as expenses). What
+// spending, income and plan figures are made of.
+export function incomeExpenseRows(state: FeeState): IncomeExpenseTransaction[] {
+  return [...state.transactions.filter(isIncomeExpense), ...feeExpenses(state)];
+}
 
 // --- Accounts ---------------------------------------------------------------
 
@@ -799,13 +838,19 @@ export function transactionAmountIn(
   return roundIn(projectAmount(state.rateSnapshots, tx.rateSnapshotId, tx.amount, tx.currency, currency), currency);
 }
 
-// Signed effect on net cash flow, in `to` at the transaction's own rates; transfers and asset purchases
-// (money changing form, not leaving) are neutral.
+// Signed effect on net cash flow, in `to` at the transaction's own rates; the move itself of a transfer or
+// exchange and asset purchases (money changing form, not leaving) are neutral, but their fees are spending.
 export function transactionNet(
-  state: Pick<State, 'rateSnapshots' | 'settings'>,
+  state: Pick<State, 'rateSnapshots' | 'settings' | 'accounts'>,
   tx: Transaction,
   to: CurrencyCode = reportingCurrency(state)
 ): number {
+  if (tx.type === 'transfer' || tx.type === 'exchange') {
+    return -sumIn(
+      feeExpenses({ transactions: [tx], accounts: state.accounts, categories: [] }).map((fee) => transactionAmountIn(state, fee, to)),
+      to
+    );
+  }
   if (!isIncomeExpense(tx)) return 0;
   const amount = transactionAmountIn(state, tx, to);
   return tx.type === 'income' ? amount : -amount;
@@ -820,7 +865,7 @@ export interface DayGroup {
 
 // Groups by calendar day, newest day first and newest transaction first within a day.
 export function groupTransactionsByDay(
-  state: Pick<State, 'rateSnapshots' | 'settings'>,
+  state: Pick<State, 'rateSnapshots' | 'settings' | 'accounts'>,
   transactions: Transaction[],
   to: CurrencyCode = reportingCurrency(state)
 ): DayGroup[] {
@@ -867,7 +912,7 @@ export function monthSummary(state: State, month: string, options: MonthSummaryO
     savingsRate: null,
   };
 
-  for (const tx of state.transactions.filter(isIncomeExpense)) {
+  for (const tx of incomeExpenseRows(state)) {
     if (monthOf(tx.date) !== month || tx.date < state.settings.trackingStartDate) continue;
     if (options.excludeOneTime && tx.oneTime) continue;
     const amount = transactionAmountIn(state, tx, to);

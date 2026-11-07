@@ -5,6 +5,7 @@ import { planFor, planProgress, previousPlanMonth, type LineProgress } from './p
 import {
   fundProgress,
   fundsByPriority,
+  incomeExpenseRows,
   monthSummary,
   movementAmountIn,
   reportingCurrency,
@@ -87,9 +88,10 @@ export interface MonthReview {
   reviewed: boolean;
 }
 
+// The month's expenses, fees of transfers and exchanges included (they are spending).
 function monthExpenses(state: State, month: string): IncomeExpenseTransaction[] {
-  return state.transactions.filter(
-    (tx): tx is IncomeExpenseTransaction =>
+  return incomeExpenseRows(state).filter(
+    (tx) =>
       tx.type === 'expense' && monthOf(tx.date) === month && tx.date >= state.settings.trackingStartDate
   );
 }

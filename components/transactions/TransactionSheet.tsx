@@ -13,7 +13,8 @@ import { Segment } from '@/components/ui/Segment';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { colors, space } from '@/constants/theme';
 import type { NewRecurringRule } from '@/store/operations';
-import { planFor, spendImpact } from '@/store/planning';
+import { feeCategoryId } from '@/store/defaultCategories';
+import { feeSpendImpact, planFor, spendImpact } from '@/store/planning';
 import { pickerCategories } from '@/store/selectors';
 import { DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
 import type { CountryCode, GoldKarat, Transaction } from '@/store/types';
@@ -139,12 +140,20 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
 
   const amount = parseAmount(amountText);
 
-  // Live budget hint for new expenses (never blocks saving).
-  const impact =
-    !transaction && type === 'expense' && categoryId && amount !== null && flowAccount
+  // Live budget hint for new expenses, and for the fees of a new transfer or exchange (never blocks saving).
+  const typedFees = fees.flatMap((fee) => {
+    const feeAmount = parseAmount(fee.amountText);
+    const feeCurrency = (fee.side === 'from' ? fromAccount : toAccount)?.currency;
+    return feeAmount !== null && feeCurrency ? [{ amount: feeAmount, currency: feeCurrency }] : [];
+  });
+  const impact = transaction
+    ? null
+    : type === 'expense' && categoryId && amount !== null && flowAccount
       ? spendImpact(state, monthOf(date), categoryId, amount, flowAccount.currency)
-      : null;
-  const impactCategory = state.categories.find((c) => c.id === categoryId)?.name;
+      : isTransfer
+        ? feeSpendImpact(state, monthOf(date), typedFees)
+        : null;
+  const impactCategory = state.categories.find((c) => c.id === (isTransfer ? feeCategoryId(state.categories) : categoryId))?.name;
   const impactCurrency = planFor(state, monthOf(date))?.currency ?? 'EGP';
   const rates = state.settings.rates;
   // Market values are suggestions only (D3): shown beside the received amount, never saved by themselves.

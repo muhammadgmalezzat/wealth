@@ -14,6 +14,7 @@ import {
   fundLinkedValue,
   fundProgress,
   fundsByPriority,
+  feeExpenses,
   fundStatus,
   goldPricePerGram,
   holdingCost,
@@ -170,7 +171,8 @@ function bucketLookup(state: State) {
 function scan(state: State, period: Pick<Period, 'from' | 'to'>, currency: DisplayCurrency, includeOneTime: boolean): Rec[] {
   const bucketFor = bucketLookup(state);
   const result: Rec[] = [];
-  for (const tx of state.transactions) {
+  // Fees of transfers and exchanges are spending too (virtual expense rows).
+  for (const tx of [...state.transactions, ...feeExpenses(state)]) {
     if (tx.type === 'transfer' || tx.type === 'exchange' || !inPeriod(tx.date, period)) continue;
     const base = { id: tx.id, date: tx.date, month: monthOf(tx.date), amount: transactionAmountIn(state, tx, currency) };
     if (tx.type === 'asset_purchase') {
@@ -272,7 +274,7 @@ export interface DrillResult {
 
 export function drillTransactions(state: State, query: AnalyticsQuery, filter: DrillFilter): DrillResult {
   const bucketFor = bucketLookup(state);
-  const transactions = state.transactions
+  const matched = [...state.transactions, ...feeExpenses(state)]
     .filter((tx) => {
       if (tx.type === 'transfer' || tx.type === 'exchange' || tx.type !== filter.type || !inPeriod(tx.date, query.period)) return false;
       if (tx.type === 'asset_purchase') return true;
@@ -286,7 +288,19 @@ export function drillTransactions(state: State, query: AnalyticsQuery, filter: D
       return true;
     })
     .sort((a, b) => (a.date !== b.date ? (a.date < b.date ? 1 : -1) : a.createdAt < b.createdAt ? 1 : -1));
-  return { transactions, total: sumIn(transactions.map((tx) => transactionAmountIn(state, tx as never, query.currency)), query.currency) };
+  // The total counts every matching row. A fee has no row of its own: the list shows (and opens) the transfer or
+  // exchange it belongs to, once however many of its fees match.
+  const total = sumIn(matched.map((tx) => transactionAmountIn(state, tx as never, query.currency)), query.currency);
+  const seen = new Set<string>();
+  const transactions: Transaction[] = [];
+  for (const tx of matched) {
+    const row = tx.type === 'expense' && tx.feeOfId ? state.transactions.find((t) => t.id === tx.feeOfId) : tx;
+    if (row && !seen.has(row.id)) {
+      seen.add(row.id);
+      transactions.push(row);
+    }
+  }
+  return { transactions, total };
 }
 
 // Route params for the drill-down screen, and back (anything invalid → null).
@@ -807,7 +821,7 @@ export function runway(state: State, currency: DisplayCurrency, now: Date): Runw
   const perMonth = new Map<string, number>();
   const nativeTotals: Record<CurrencyCode, number> = Object.fromEntries(currencyList(state).map((c) => [c, 0]));
   const monthsWithEssentials = new Set<string>();
-  for (const tx of state.transactions) {
+  for (const tx of [...state.transactions, ...feeExpenses(state)]) {
     if (tx.type !== 'expense' || tx.oneTime) continue;
     const month = monthOf(tx.date);
     if (!window.includes(month) || tx.date < state.settings.trackingStartDate) continue;
