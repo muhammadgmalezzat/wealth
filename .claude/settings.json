@@ -1,29 +1,35 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx tsx *)",
-      "Bash(cd \"P:/personal projects/wealth\" && mkdir -p docs/architecture && ls docs)",
-      "Bash(awk '{print $5, $6, $7, $8}')",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git branch *)",
       "Bash(git check-ignore *)",
-      "Bash(NODE_PATH=\"P:/personal projects/wealth/node_modules\" npx tsx \"C:/Users/YOGA/AppData/Local/Temp/claude/17054bdf5a30f31e/79f8d63b-0193-4abf-a426-61f08ad9ea9e/scratchpad/oldBehavior.ts\")",
-      "Bash(node C:/Users/YOGA/.claude/skills/browser-automation/browser.mjs http://localhost:8099/ --timeout 400000 --script \"C:/Users/YOGA/AppData/Local/Temp/claude/17054bdf5a30f31e/79f8d63b-0193-4abf-a426-61f08ad9ea9e/scratchpad/hydrationQa.mjs\")",
-      "PowerShell($c = Get-NetTCPConnection -LocalPort 8099 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force }; \"stopped\"; Set-Location \"P:\\\\personal projects\\\\wealth\"; Select-String -Path docs/TECHNICAL.md -Pattern \"legacyAware|hasHydrated|274|^## 7|^## 15|store/migrations.ts  |migrations.ts   \" -Encoding utf8 | ForEach-Object { \"$\\($_.LineNumber\\): $\\($_.Line.Substring\\(0,[Math]::Min\\(150,$_.Line.Length\\)\\)\\)\" }; Select-String -Path docs/USER_GUIDE.md -Pattern \"^## |^### \" -Encoding utf8 | Select-Object -Last 12 | ForEach-Object { \"$\\($_.LineNumber\\): $\\($_.Line\\)\" })",
-      "Bash(grep -v \"^$\")",
-      "Bash(npm audit *)",
-      "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\).on\\('end',\\(\\)=>{const j=JSON.parse\\(s\\);console.log\\(JSON.stringify\\(j.metadata.vulnerabilities\\)\\);}\\)\")",
-      "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\).on\\('end',\\(\\)=>{const j=JSON.parse\\(s\\);console.log\\('prod',JSON.stringify\\(j.metadata.vulnerabilities\\)\\);}\\)\")",
-      "Bash(node -e ' *)",
-      "Bash(node -e \"const p=require\\('./node_modules/expo-router/package.json'\\);console.log\\(p.version, p.dependencies['query-string']\\)\")",
-      "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\).on\\('end',\\(\\)=>{const j=JSON.parse\\(s\\);const r=j.report||j;console.log\\(Object.keys\\(j\\)\\);const a=j.actions||[];console.log\\('added',j.added,'changed',j.changed,'removed',j.removed\\);console.log\\(JSON.stringify\\(j.audit?.metadata?.vulnerabilities||''\\)\\);}\\)\")",
-      "Bash(node __TRACKED_VAR__/bundlePkgs.cjs __TRACKED_VAR__/export7/_expo/static/js/android/entry-9327ae0487675df62f801f231b425436.hbc.map)",
-      "Bash(npm explain *)",
       "Bash(git add *)",
-      "Bash(grep -n \"deny\\\\|git commit\\\\|\\\\\"ask\\\\\"\" \"C:/Users/YOGA/.claude/settings.json\" 2>/dev/null | head; ls \"C:/Users/YOGA/.claude/\" | head -20; grep -n \"deny\\\\|git commit\" .claude/settings.local.json 2>/dev/null | head -5)",
-      "Read(//c/Users/YOGA/.claude/**)"
+      "Bash(git commit:*)",
+      "Bash(npx tsx *)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(npm audit *)",
+      "Bash(npm explain *)",
+      "Bash(npm ls *)",
+      "Bash(npx expo lint*)",
+      "Bash(npx expo-doctor*)",
+      "Bash(npx expo export *)"
     ],
-    "ask": [
-    "Bash(git commit:*)"
-  ],
+    "ask": [],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(eas update:*)",
+      "Bash(eas build:*)",
+      "Bash(npx eas-cli:*)",
+      "Bash(npm audit fix:*)"
+    ],
     "additionalDirectories": [
       "P:\\personal projects\\wealth\\docs"
     ]
