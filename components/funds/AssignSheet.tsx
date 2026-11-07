@@ -8,7 +8,7 @@ import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { formatMoney } from '@/components/ui/formatMoney';
 import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { Segment } from '@/components/ui/Segment';
-import { CURRENCY_NAMES_AR } from '@/constants/currencies';
+import { currencyNameAr } from '@/constants/currencies';
 import { space } from '@/constants/theme';
 import {
   fundsByPriority,
@@ -76,7 +76,7 @@ export function AssignSheet({ onClose }: AssignSheetProps) {
       {options.length > 1 && (
         <View style={styles.currency}>
           <Segment<CurrencyCode>
-            options={options.map((c) => ({ label: CURRENCY_NAMES_AR[c], value: c }))}
+            options={options.map((c) => ({ label: currencyNameAr(c), value: c }))}
             value={currency}
             onChange={changeCurrency}
           />

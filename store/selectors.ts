@@ -203,7 +203,7 @@ export function netWorthByCountry(state: State): Record<CountryCode, number> {
 
 // Account balances summed per currency, in that currency (no conversion).
 export function liquidByCurrency(state: LiquidState): Record<CurrencyCode, number> {
-  const result: Record<CurrencyCode, number> = { EGP: 0, SAR: 0, USD: 0 };
+  const result = zeroByCurrency(state);
   for (const account of state.accounts) result[account.currency] += accountBalance(state, account.id);
   return result;
 }
@@ -231,8 +231,24 @@ function findFund(state: State, fundId: string): Fund | undefined {
   return state.funds.find((f) => f.id === fundId);
 }
 
-const CURRENCY_ORDER: readonly CurrencyCode[] = ['EGP', 'SAR', 'USD'];
-const zeroByCurrency = (): Record<CurrencyCode, number> => ({ EGP: 0, SAR: 0, USD: 0 });
+type CurrencyListState = Pick<State, 'settings' | 'accounts'> & Partial<Pick<State, 'funds' | 'holdings' | 'fundMovements'>>;
+
+// Every currency the data uses: the enabled ones first (settings order), then any other currency an
+// account, fund, currency holding or fund movement is in. What per-currency lists and loops run over.
+export function currencyList(state: CurrencyListState): CurrencyCode[] {
+  return [
+    ...new Set<CurrencyCode>([
+      ...state.settings.enabledCurrencies,
+      ...state.accounts.map((a) => a.currency),
+      ...(state.funds ?? []).map((f) => f.currency),
+      ...(state.holdings ?? []).flatMap((h) => (h.type === 'currency' ? [h.currency] : [])),
+      ...(state.fundMovements ?? []).flatMap((m) => (m.currency ? [m.currency] : [])),
+    ]),
+  ];
+}
+
+const zeroByCurrency = (state: CurrencyListState): Record<CurrencyCode, number> =>
+  Object.fromEntries(currencyList(state).map((c) => [c, 0]));
 // Float noise isn't money.
 const MONEY_EPSILON = 0.005;
 
@@ -248,7 +264,7 @@ export function movementCurrency(
 // Cash set aside for the fund, per currency, each in its own currency: nothing is converted, so
 // 1000 SAR stays 1000 SAR whatever the rates do.
 export function fundCashByCurrency(state: State, fundId: string): Record<CurrencyCode, number> {
-  const result = zeroByCurrency();
+  const result = zeroByCurrency(state);
   const fund = findFund(state, fundId);
   if (!fund) return result;
   for (const m of state.fundMovements) {
@@ -268,7 +284,7 @@ export function fundAllocated(state: State, fundId: string): number {
   const fund = findFund(state, fundId);
   if (!fund) return 0;
   const cash = fundCashByCurrency(state, fundId);
-  return sum(CURRENCY_ORDER.map((c) => convertCurrency(cash[c], c, fund.currency, state.settings.rates)));
+  return sum(currencyList(state).map((c) => convertCurrency(cash[c], c, fund.currency, state.settings.rates)));
 }
 
 // Market value of the fund's linked holdings, in the fund's currency: a currency holding is its
@@ -453,7 +469,7 @@ export interface UnassignedSummary {
 export function unassignedByCurrency(state: State): Record<CurrencyCode, number> {
   const rates = state.settings.rates;
   const pool = liquidByCurrency(state);
-  const need = zeroByCurrency();
+  const need = zeroByCurrency(state);
   for (const m of state.fundMovements) {
     const fund = findFund(state, m.fundId);
     if (!fund) continue;
@@ -461,7 +477,7 @@ export function unassignedByCurrency(state: State): Record<CurrencyCode, number>
     else need[fund.currency] += m.amount;
   }
   // 1. Each currency's currency-less movements take from the same currency's money first.
-  for (const c of CURRENCY_ORDER) {
+  for (const c of currencyList(state)) {
     if (need[c] <= 0) {
       // A net release (withdrawals beyond the allocations) gives the money back to its currency.
       pool[c] -= need[c];
@@ -473,8 +489,8 @@ export function unassignedByCurrency(state: State): Record<CurrencyCode, number>
     need[c] -= take;
   }
   // 2. What is still uncovered takes from the other currencies' leftovers at today's rate.
-  for (const c of CURRENCY_ORDER) {
-    for (const d of CURRENCY_ORDER) {
+  for (const c of currencyList(state)) {
+    for (const d of currencyList(state)) {
       if (d === c || need[c] <= MONEY_EPSILON) continue;
       const available = Math.max(0, pool[d]);
       if (available <= 0) continue;
@@ -489,7 +505,7 @@ export function unassignedByCurrency(state: State): Record<CurrencyCode, number>
     }
   }
   // 3. Anything left over is short in its own currency.
-  for (const c of CURRENCY_ORDER) pool[c] -= Math.max(0, need[c]);
+  for (const c of currencyList(state)) pool[c] -= Math.max(0, need[c]);
   return pool;
 }
 
@@ -497,7 +513,7 @@ export function unassignedSummary(state: State): UnassignedSummary {
   const rates = state.settings.rates;
   const byCurrency = unassignedByCurrency(state);
   const summary: UnassignedSummary = { byCurrency, surpluses: [], deficits: [], totalEGP: 0, surplusEGP: 0, deficitEGP: 0 };
-  for (const currency of CURRENCY_ORDER) {
+  for (const currency of currencyList(state)) {
     const amount = byCurrency[currency];
     const egp = toEGP(amount, currency, rates);
     summary.totalEGP += egp;
@@ -570,7 +586,7 @@ export function withdrawalPlan(
   if (!fund) return { withdrawals: [], shortfall: amount };
   const rates = state.settings.rates;
   const cash = fundCashByCurrency(state, fundId);
-  const order = [currency, fund.currency, ...CURRENCY_ORDER].filter((c, i, all) => all.indexOf(c) === i);
+  const order = [currency, fund.currency, ...currencyList(state)].filter((c, i, all) => all.indexOf(c) === i);
   const withdrawals: FundAmount[] = [];
   let left = amount;
   for (const c of order) {
@@ -654,7 +670,7 @@ export function planCover(state: State, fundIds: string[], only?: CurrencyCode):
     .sort((a, b) => b.priority - a.priority);
   const withdrawals: FundAmount[] = [];
   let remainingEGP = 0;
-  for (const currency of CURRENCY_ORDER) {
+  for (const currency of currencyList(state)) {
     if (only && currency !== only) continue;
     let deficit = Math.max(0, -unassigned[currency]);
     for (const fund of chosen) {

@@ -1,26 +1,25 @@
+import { CURRENCY_REGISTRY, type CurrencyRegistry } from '@/constants/currencyRegistry';
 import type { CurrencyCode } from '@/store/types';
 import { fromDateKey, shiftDate, toDateKey } from '@/utils/dates';
 
-const CURRENCY_SYMBOLS: Record<CurrencyCode, string> = {
-  EGP: 'ج.م',
-  SAR: 'ر.س',
-  USD: '$',
-};
-
-export function currencySymbol(currency: CurrencyCode): string {
-  return CURRENCY_SYMBOLS[currency];
+// The symbol from the registry; an unknown code shows as itself.
+export function currencySymbol(currency: CurrencyCode, registry: CurrencyRegistry = CURRENCY_REGISTRY): string {
+  return registry[currency]?.symbol ?? currency;
 }
 
 export function formatCurrency(
   amount: number,
-  currency: CurrencyCode
+  currency: CurrencyCode,
+  registry: CurrencyRegistry = CURRENCY_REGISTRY
 ): string {
-  const symbol = CURRENCY_SYMBOLS[currency];
+  const symbol = currencySymbol(currency, registry);
+  // As many decimals as the currency has (JPY 0, EGP 2, KWD 3); 2 for a code the registry doesn't know.
+  const decimals = registry[currency]?.decimals ?? 2;
   // Float noise like -0.0000001 would otherwise print as "-0".
-  const value = Math.abs(amount) < 0.005 ? 0 : amount;
+  const value = Math.abs(amount) < 0.5 * 10 ** -decimals ? 0 : amount;
   const formatted = value.toLocaleString('en-US', {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
+    maximumFractionDigits: decimals,
   });
   return `${symbol} ${formatted}`;
 }

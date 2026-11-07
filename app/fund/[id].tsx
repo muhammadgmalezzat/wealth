@@ -21,9 +21,9 @@ import { ProgressBar } from '@/components/ui/ProgressBar';
 import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { StatusChip } from '@/components/ui/StatusChip';
-import { CURRENCIES } from '@/constants/currencies';
 import { colors, opacity, space } from '@/constants/theme';
 import {
+  currencyList,
   fundAllocated,
   fundCashByCurrency,
   fundCurrent,
@@ -95,7 +95,7 @@ export default function FundDetailScreen() {
   const canLinkGold = linkableHoldings(state, fund.id).some((h) => h.type === 'gold' && !fund.linkedHoldingIds.includes(h.id));
 
   const cash = fundCashByCurrency(state, fund.id);
-  const heldCurrencies = CURRENCIES.filter((c) => Math.abs(cash[c]) > 0.005);
+  const heldCurrencies = currencyList(state).filter((c) => Math.abs(cash[c]) > 0.005);
   const cashBreakdown = heldCurrencies.length > 1 ? heldCurrencies.map((c) => formatMoney(cash[c], c)).join(' + ') : null;
 
   const facts: { label: string; value: string }[] = [

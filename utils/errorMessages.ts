@@ -67,6 +67,7 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   INVALID_MODE: () => 'طريقة التسجيل غير صالحة',
   CURRENCY_MISMATCH: (d) => `العملة يجب أن تطابق عملة ${entity(d)}`,
   UNKNOWN_COUNTRY: () => 'البلد غير معروف',
+  UNKNOWN_CURRENCY: () => 'العملة غير معروفة',
   CATEGORY_KIND_MISMATCH: () => 'نوع التصنيف لا يطابق نوع المعاملة',
   CATEGORY_BUCKET_MISMATCH: () => 'تصنيفات الدخل فقط تستخدم بند الدخل',
   LIABILITY_PAYMENT_NOT_EXPENSE: () => 'سداد الالتزامات يكون بمصروف فقط',

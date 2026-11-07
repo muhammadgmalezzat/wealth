@@ -105,7 +105,8 @@ import {
 import type { FinanceState, Fund, RecurringRule, Transaction } from '@/store/types';
 import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
-import { formatDayLabel, formatPercent, moreThingsPhrase, timeAgoPhrase } from '@/utils/formatters';
+import { currencyNameAr } from '@/constants/currencies';
+import { formatCurrency, formatDayLabel, formatPercent, moreThingsPhrase, timeAgoPhrase } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import * as priceCalc from '@/utils/prices/calc';
 import * as prices from '@/utils/prices/fetchPrices';
@@ -164,6 +165,7 @@ function emptyState(): FinanceState {
     rateSnapshots: [S125],
     settings: {
       rates: RATES,
+      enabledCurrencies: ['EGP', 'SAR', 'USD'],
       goldPrice24kEGP: 6000,
       goldPrice21kEGP: 6000 * (21 / 24),
       goldPriceUpdatedAt: '2026-10-01T00:00:00.000Z',
@@ -177,7 +179,7 @@ function emptyState(): FinanceState {
 
 // A data-v7 state (what the frozen migration chain reads): v7 settings, no rate snapshots.
 function emptyStateV7() {
-  const { rateSnapshots: _snapshots, settings: { rates: _rates, ...settings }, ...rest } = emptyState();
+  const { rateSnapshots: _snapshots, settings: { rates: _rates, enabledCurrencies: _enabled, ...settings }, ...rest } = emptyState();
   return { ...rest, settings: { ...settings, exchangeRates: RATES_V7 } };
 }
 
@@ -193,7 +195,7 @@ const approx = (actual: number | null, expected: number) => {
 
 const account = (
   id: string,
-  currency: 'EGP' | 'SAR' | 'USD',
+  currency: string,
   openingBalance: number,
   country: string = 'EG'
 ) => ({
@@ -208,7 +210,7 @@ const account = (
 });
 
 // A data-v7 account (the shape the frozen migrations read: `location`, not `country`).
-const accountV7 = (id: string, currency: 'EGP' | 'SAR' | 'USD', openingBalance: number, location: string = 'EG') => {
+const accountV7 = (id: string, currency: string, openingBalance: number, location: string = 'EG') => {
   const { country: _country, ...rest } = account(id, currency, openingBalance);
   return { ...rest, location };
 };
@@ -3791,7 +3793,7 @@ describe('native amounts never drift with the rates', () => {
     assert.deepEqual(sel.fundCashByCurrency(after, 'F'), { EGP: 2000, SAR: 250, USD: 0 });
     assert.deepEqual(sel.unassignedByCurrency(after), { EGP: 3000, SAR: 750, USD: 0 });
     // A bad currency is rejected.
-    assert.throws(() => ops.allocateToFund(funded, 'F', 1, undefined, ctx, 'XYZ' as 'SAR'), { code: 'CURRENCY_MISMATCH' });
+    assert.throws(() => ops.allocateToFund(funded, 'F', 1, undefined, ctx, 'XYZ' as 'SAR'), { code: 'UNKNOWN_CURRENCY' });
   });
 
   it('a shortfall in SAR is covered with SAR cash, never with another currency', () => {
@@ -5538,5 +5540,55 @@ describe('v7 → v8: rates become a USD table, records point at immutable snapsh
     assert.throws(() => sel.transactionAmountIn(s, s.transactions[0] as never, 'EGP'), RateMissingError);
     // Same currency needs no rate at all.
     assert.equal(sel.transactionAmountIn(s, s.transactions[0] as never, 'SAR'), 200);
+  });
+});
+
+// --- v8: currencies are data ---------------------------------------------------------------
+
+describe('currencies are data: registry, enabled list, decimals', () => {
+  const REGISTRY = {
+    ...CURRENCY_REGISTRY,
+    KWD: { code: 'KWD', symbol: 'د.ك', nameAr: 'دينار كويتي', nameEn: 'Kuwaiti Dinar', decimals: 3 },
+    JPY: { code: 'JPY', symbol: '¥', nameAr: 'ين', nameEn: 'Japanese Yen', decimals: 0 },
+  };
+
+  it('formats with the currency\'s own decimals (JPY 0, EGP 2, KWD 3); an unknown code shows as itself', () => {
+    assert.equal(formatCurrency(1234.567, 'JPY', REGISTRY), '¥ 1,235');
+    assert.equal(formatCurrency(1234.567, 'EGP', REGISTRY), 'ج.م 1,234.57');
+    assert.equal(formatCurrency(1234.5678, 'KWD', REGISTRY), 'د.ك 1,234.568');
+    assert.equal(formatCurrency(0.0004, 'KWD', REGISTRY), 'د.ك 0');
+    assert.equal(formatCurrency(5, 'XYZ'), 'XYZ 5');
+    assert.equal(currencyNameAr('XYZ'), 'XYZ');
+    assert.equal(currencyNameAr('SAR'), 'ريال');
+  });
+
+  it('currencyList is the enabled currencies first, then any other currency the data is in', () => {
+    const s: FinanceState = {
+      ...emptyState(),
+      accounts: [account('k', 'KWD', 10), account('e', 'EGP', 1)],
+      funds: [fund({ id: 'F', currency: 'JPY' })],
+    };
+    assert.deepEqual(sel.currencyList(s), ['EGP', 'SAR', 'USD', 'KWD', 'JPY']);
+    assert.deepEqual(sel.currencyList({ ...s, settings: { ...s.settings, enabledCurrencies: ['USD'] } }), ['USD', 'KWD', 'EGP', 'JPY']);
+    // Per-currency totals cover every currency in the list, with no hard-coded three.
+    assert.deepEqual(sel.liquidByCurrency(s), { EGP: 1, SAR: 0, USD: 0, KWD: 10, JPY: 0 });
+  });
+
+  it('a new account, fund, holding, liability or plan needs a currency the registry knows', () => {
+    const ctx = makeCtx();
+    const s = emptyState();
+    const account = { name: 'x', type: 'cash' as const, currency: 'XYZ', openingBalance: 0, country: 'EG' };
+    assert.throws(() => ops.addAccount(s, account, ctx), { code: 'UNKNOWN_CURRENCY' });
+    assert.throws(() => ops.addFund(s, { name: 'f', type: 'goal', targetAmount: 1, currency: 'XYZ', priority: 1 }, ctx), { code: 'UNKNOWN_CURRENCY' });
+    assert.throws(() => ops.addLiability(s, { name: 'l', principal: 1, currency: 'XYZ', startDate: '2026-01-01', country: 'EG' }, ctx), { code: 'UNKNOWN_CURRENCY' });
+    assert.throws(() => ops.addHolding(s, { type: 'currency', name: 'h', currency: 'XYZ', quantity: 1, purchaseCostEGP: 0, country: 'EG' }, ctx), { code: 'UNKNOWN_CURRENCY' });
+    assert.throws(() => ops.savePlan(s, { month: '2026-10', currency: 'XYZ', expectedIncome: 0, lines: [], fundContributions: [] }, ctx), { code: 'UNKNOWN_CURRENCY' });
+    assert.equal(errorMessage(new FinanceValidationError('UNKNOWN_CURRENCY')), 'العملة غير معروفة');
+  });
+
+  it('the v7 → v8 migration enables the three currencies v7 offered, and every v7 number is unchanged', () => {
+    const v8 = migratePersistedState(richV7(), 7, MIGRATION_CTX).state;
+    assert.deepEqual(v8.settings.enabledCurrencies, ['EGP', 'SAR', 'USD']);
+    assert.deepEqual(diffReports(oracleReport(richV7(), ORACLE_NOW), reportV8(v8, ORACLE_NOW), 1e-6), []);
   });
 });

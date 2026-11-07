@@ -13,9 +13,9 @@ import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { formatMoney } from '@/components/ui/formatMoney';
 import { Money } from '@/components/ui/Money';
 import { Segment } from '@/components/ui/Segment';
-import { CURRENCIES } from '@/constants/currencies';
 import { space } from '@/constants/theme';
 import {
+  currencyList,
   fundAllocated,
   fundCashByCurrency,
   holdingValueEGP,
@@ -80,7 +80,7 @@ export function FundSheet({ fund, initialType = 'goal', onClose, onDeleted }: Fu
       : null;
   // A fund holding cash in several currencies says so (each in its own currency).
   const cashByCurrency = fund ? fundCashByCurrency(state, fund.id) : null;
-  const heldCurrencies = cashByCurrency ? CURRENCIES.filter((c) => Math.abs(cashByCurrency[c]) > 0.005) : [];
+  const heldCurrencies = cashByCurrency ? currencyList(state).filter((c) => Math.abs(cashByCurrency[c]) > 0.005) : [];
   const cashBreakdown =
     cashByCurrency && heldCurrencies.length > 1
       ? heldCurrencies.map((c) => formatMoney(cashByCurrency[c], c)).join(' + ')

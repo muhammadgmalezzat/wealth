@@ -10,7 +10,7 @@ import { MetricGroup } from '@/components/ui/MetricGroup';
 import { Money } from '@/components/ui/Money';
 import { ProgressBar } from '@/components/ui/ProgressBar';
 import { countryName } from '@/constants/countries';
-import { CURRENCY_NAMES_AR } from '@/constants/currencies';
+import { currencyNameAr } from '@/constants/currencies';
 import { opacity, space } from '@/constants/theme';
 import type { DisplayCurrency, FundProjection, Insight, MoneyMap, Runway } from '@/store/analytics';
 import type { CurrencyCode } from '@/store/types';
@@ -29,7 +29,7 @@ export function MoneyMapSection({ map, currency }: { map: MoneyMap; currency: Di
         {map.liquid.map((row) => (
           <ListRow
             key={row.currency}
-            title={`سيولة · ${CURRENCY_NAMES_AR[row.currency]}`}
+            title={`سيولة · ${currencyNameAr(row.currency)}`}
             subtitle={row.currency === currency ? undefined : `≈ ${formatMoney(row.value, currency)}`}
             subtitleLines={1}
             trailing={<Money amount={row.native} currency={row.currency} size="row" align="left" />}
@@ -88,7 +88,7 @@ export function MoneyMapSection({ map, currency }: { map: MoneyMap; currency: Di
 // How many months the money lasts at the average essentials of the last completed months.
 export function RunwaySection({ runway, currency }: { runway: Runway; currency: DisplayCurrency }) {
   if (runway.monthsObserved === 0) return <EmptyNote>{NOT_ENOUGH_DATA} من الأساسيات</EmptyNote>;
-  const named = (c: CurrencyCode) => CURRENCY_NAMES_AR[c];
+  const named = (c: CurrencyCode) => currencyNameAr(c);
   return (
     <View style={styles.wrap}>
       <MetricGroup
@@ -135,7 +135,7 @@ export function FundsSection({ funds }: { funds: FundProjection[] }) {
   return (
     <View style={styles.wrap}>
       {funds.map((f) => {
-        const cash = (['EGP', 'SAR', 'USD'] as CurrencyCode[])
+        const cash = Object.keys(f.cashByCurrency)
           .filter((c) => Math.abs(f.cashByCurrency[c]) > 0.005)
           .map((c) => formatMoney(f.cashByCurrency[c], c));
         const holds = [...cash, ...(f.linkedValue > 0.005 ? [`ذهب ${formatMoney(f.linkedValue, f.currency)}`] : [])];

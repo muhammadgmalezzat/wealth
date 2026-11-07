@@ -7,9 +7,9 @@ import { FormField } from '@/components/ui/FormField';
 import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { formatMoney } from '@/components/ui/formatMoney';
 import { Segment } from '@/components/ui/Segment';
-import { CURRENCIES, CURRENCY_NAMES_AR } from '@/constants/currencies';
+import { currencyNameAr } from '@/constants/currencies';
 import { space } from '@/constants/theme';
-import { fundCashByCurrency, unassignedByCurrency } from '@/store/selectors';
+import { currencyList, fundCashByCurrency, unassignedByCurrency } from '@/store/selectors';
 import type { CurrencyCode, Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { convertCurrency } from '@/utils/currency';
@@ -37,9 +37,9 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
   const [note, setNote] = useState('');
 
   const cash = fundCashByCurrency(state, fund.id);
-  const held = CURRENCIES.filter((c) => cash[c] > 0.005);
+  const held = currencyList(state).filter((c) => cash[c] > 0.005);
   // Withdrawing is only possible in a currency the fund holds.
-  const options: readonly CurrencyCode[] = mode === 'allocate' ? CURRENCIES : held.length > 0 ? held : [fund.currency];
+  const options: readonly CurrencyCode[] = mode === 'allocate' ? currencyList(state) : held.length > 0 ? held : [fund.currency];
   const currency = options.includes(picked) ? picked : options[0];
 
   const available =
@@ -72,7 +72,7 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
       {options.length > 1 && (
         <View style={styles.currency}>
           <Segment<CurrencyCode>
-            options={options.map((c) => ({ label: CURRENCY_NAMES_AR[c], value: c }))}
+            options={options.map((c) => ({ label: currencyNameAr(c), value: c }))}
             value={currency}
             onChange={setPicked}
           />

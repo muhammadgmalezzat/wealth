@@ -8,7 +8,7 @@ import { formatMoney } from '@/components/ui/formatMoney';
 import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { Money } from '@/components/ui/Money';
 import { Segment } from '@/components/ui/Segment';
-import { CURRENCY_NAMES_AR } from '@/constants/currencies';
+import { currencyNameAr } from '@/constants/currencies';
 import { colors, space, weight } from '@/constants/theme';
 import {
   defaultCoverFundId,
@@ -67,7 +67,7 @@ export function CoverSheet({ onClose }: CoverSheetProps) {
       {options.length > 1 && (
         <View style={styles.currency}>
           <Segment<CurrencyCode>
-            options={options.map((c) => ({ label: CURRENCY_NAMES_AR[c], value: c }))}
+            options={options.map((c) => ({ label: currencyNameAr(c), value: c }))}
             value={currency}
             onChange={changeCurrency}
           />
@@ -85,7 +85,7 @@ export function CoverSheet({ onClose }: CoverSheetProps) {
       </AppText>
       {candidates.length === 0 ? (
         <AppText variant="secondary" color="textSecondary">
-          مفيش صناديق فيها فلوس نقدية بـ{CURRENCY_NAMES_AR[currency]}.
+          مفيش صناديق فيها فلوس نقدية بـ{currencyNameAr(currency)}.
         </AppText>
       ) : (
         <ListGroup>

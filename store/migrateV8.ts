@@ -125,6 +125,8 @@ export function migrateV7toV8(v7: FinanceStateV7, _ctx: MigrationContext): Finan
   const netWorthSnapshots = migrateNetWorth(v7, book, exchangeRates);
   const settings = {
     ...settingsRest,
+    // v7 offered exactly these three; the user changes the list in Settings (later).
+    enabledCurrencies: ['EGP', 'SAR', 'USD'],
     rates: {
       ...tableFromEgpRates(egpPer(exchangeRates)),
       updatedAt: exchangeRates.lastUpdated,

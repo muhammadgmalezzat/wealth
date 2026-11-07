@@ -5,6 +5,7 @@ import { addMonthsToDate, daysBetween, isDateKey, monthOf, shiftDate, shiftMonth
 import { formatMonthLabel, formatPercent } from '@/utils/formatters';
 import { CATEGORY_IDS } from './defaultCategories';
 import {
+  currencyList,
   fundCashByCurrency,
   fundCurrent,
   fundDueDate,
@@ -707,7 +708,7 @@ export function moneyMap(state: State, currency: DisplayCurrency): MoneyMap {
   const rates = state.settings.rates;
   const show = (egp: number) => (currency === 'EGP' ? egp : fromEGP(egp, currency, rates));
   const native = liquidByCurrency(state);
-  const liquid: LiquidRow[] = (['EGP', 'SAR', 'USD'] as CurrencyCode[])
+  const liquid: LiquidRow[] = currencyList(state)
     .filter((c) => state.accounts.some((a) => a.currency === c) || Math.abs(native[c]) > EPSILON)
     .map((c) => ({
       currency: c,
@@ -795,7 +796,7 @@ export function runway(state: State, currency: DisplayCurrency, now: Date): Runw
   const window = Array.from({ length: RUNWAY_WINDOW }, (_, i) => shiftMonth(current, -(i + 1))).filter((m) => m >= startMonth);
   const bucketFor = bucketLookup(state);
   const perMonth = new Map<string, number>();
-  const nativeTotals: Record<CurrencyCode, number> = { EGP: 0, SAR: 0, USD: 0 };
+  const nativeTotals: Record<CurrencyCode, number> = Object.fromEntries(currencyList(state).map((c) => [c, 0]));
   const monthsWithEssentials = new Set<string>();
   for (const tx of state.transactions) {
     if (tx.type !== 'expense' || tx.oneTime) continue;
@@ -813,11 +814,12 @@ export function runway(state: State, currency: DisplayCurrency, now: Date): Runw
   const rates = state.settings.rates;
   const unassigned = unassignedSummary(state);
   const liquidNative = liquidByCurrency(state);
-  const liquidAmount = sum((['EGP', 'SAR', 'USD'] as CurrencyCode[]).map((c) => convertCurrency(liquidNative[c], c, currency, rates)));
+  const codes = currencyList(state);
+  const liquidAmount = sum(codes.map((c) => convertCurrency(liquidNative[c], c, currency, rates)));
   const unassignedAmount = sum(
-    (['EGP', 'SAR', 'USD'] as CurrencyCode[]).map((c) => convertCurrency(unassigned.byCurrency[c], c, currency, rates))
+    codes.map((c) => convertCurrency(unassigned.byCurrency[c], c, currency, rates))
   );
-  const perCurrency: RunwayCurrencyRow[] = (['EGP', 'SAR', 'USD'] as CurrencyCode[])
+  const perCurrency: RunwayCurrencyRow[] = codes
     .filter((c) => Math.abs(liquidNative[c]) > EPSILON || nativeTotals[c] > EPSILON)
     .map((c) => {
       const avgNative = monthsObserved > 0 ? nativeTotals[c] / monthsObserved : 0;

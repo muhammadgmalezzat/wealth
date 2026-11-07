@@ -7,9 +7,9 @@ import { AppText } from '@/components/ui/AppText';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Money } from '@/components/ui/Money';
-import { CURRENCIES, CURRENCY_NAMES_AR } from '@/constants/currencies';
+import { currencyNameAr } from '@/constants/currencies';
 import { colors, space } from '@/constants/theme';
-import { unassignedSummary } from '@/store/selectors';
+import { currencyList, unassignedSummary } from '@/store/selectors';
 import type { FinanceState } from '@/store/types';
 
 const EPSILON = 0.005;
@@ -22,7 +22,7 @@ const EPSILON = 0.005;
 export function UnassignedPanel({ state }: { state: FinanceState }) {
   const [sheet, setSheet] = useState<'assign' | 'cover' | null>(null);
   const summary = unassignedSummary(state);
-  const rows = CURRENCIES.filter((c) => Math.abs(summary.byCurrency[c]) > EPSILON);
+  const rows = currencyList(state).filter((c) => Math.abs(summary.byCurrency[c]) > EPSILON);
   const short = summary.deficits.length > 0;
   const spare = summary.surpluses.length > 0;
 
@@ -49,7 +49,7 @@ export function UnassignedPanel({ state }: { state: FinanceState }) {
           {rows.map((currency) => (
             <View key={currency} style={styles.row}>
               <AppText variant="body" style={styles.flex}>
-                {CURRENCY_NAMES_AR[currency]}
+                {currencyNameAr(currency)}
               </AppText>
               <Money
                 amount={summary.byCurrency[currency]}

@@ -6,7 +6,8 @@ export type { CurrentRates, RateSnapshot };
 // field name says EGP. Dates are local calendar dates ('YYYY-MM-DD'); createdAt is an ISO timestamp.
 // Deliberately no interest/APR fields anywhere.
 
-export type CurrencyCode = 'EGP' | 'SAR' | 'USD';
+// An ISO 4217 code from the currency registry (constants/currencyRegistry.ts).
+export type CurrencyCode = string;
 
 // Every synced entity carries the time it was last created or changed (ISO), so a future
 // server sync can resolve conflicts. Store operations set it; never edit it by hand.
@@ -298,6 +299,9 @@ export interface LastUsedSelection {
 export interface Settings {
   // The CURRENT rate table (USD base): what current valuations use. Records keep their own snapshot.
   rates: CurrentRates;
+  // The currencies offered in pickers and kept in rate tables (settings order). Any currency the data
+  // already uses is listed too, whether or not it is here.
+  enabledCurrencies: CurrencyCode[];
   goldPrice24kEGP: number;
   // Market price of 21k, stored separately (it isn't exactly 24k × 21/24). 18k derives from 24k.
   goldPrice21kEGP: number;

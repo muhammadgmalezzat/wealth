@@ -1,4 +1,5 @@
 import { isKnownCountry } from '@/constants/countries';
+import { isKnownCurrency } from '@/constants/currencyRegistry';
 import { convertCurrency, projectAmount, rateToEGP } from '@/utils/currency';
 import { withEgpRates } from '@/utils/rates';
 import { addMonthsToDate, isDateKey, isMonthKey, shiftDate, toDateKey } from '@/utils/dates';
@@ -185,6 +186,7 @@ function accountInUse(state: State, accountId: string): boolean {
 function validateAccount(account: NewAccount) {
   assertName(account.name, 'account');
   assertCountry(account.country);
+  assertCurrency(account.currency);
   assertNumber(account.openingBalance, 'openingBalance');
 }
 
@@ -553,6 +555,7 @@ function normalizeFundShape<T extends NewFund>(fund: T): T {
 // `fundId` is the fund being validated (undefined when adding), so it may keep its own links.
 function validateFund(state: State, fund: NewFund, fundId?: string) {
   assertName(fund.name, 'fund');
+  assertCurrency(fund.currency);
   assertPositive(fund.targetAmount, 'targetAmount');
   assertNumber(fund.priority, 'priority');
   if (fund.monthlyContribution !== undefined) {
@@ -641,7 +644,7 @@ function newMovement(
 }
 
 function assertCurrency(currency: CurrencyCode | undefined) {
-  if (currency !== undefined && !CURRENCY_CODES.includes(currency)) fail('CURRENCY_MISMATCH');
+  if (currency !== undefined && !isKnownCurrency(currency)) fail('UNKNOWN_CURRENCY');
 }
 
 // Whether the new movements leave more money short (in EGP, per currency) than before.
@@ -867,6 +870,7 @@ function validateHolding(holding: NewHolding) {
     if (![18, 21, 24].includes(holding.karat)) fail('INVALID_KARAT');
   } else {
     assertPositive(holding.quantity, 'quantity');
+    assertCurrency(holding.currency);
   }
 }
 
@@ -913,6 +917,7 @@ export function deleteHolding(state: State, id: string, ctx: OpContext): Patch {
 function validateLiability(liability: NewLiability) {
   assertName(liability.name, 'liability');
   assertCountry(liability.country);
+  assertCurrency(liability.currency);
   assertPositive(liability.principal, 'principal');
   if (liability.monthlyPayment !== undefined) assertPositive(liability.monthlyPayment, 'monthlyPayment');
   assertDate(liability.startDate, 'startDate');
@@ -1183,11 +1188,10 @@ export function skipOccurrence(state: State, ruleId: string, occurrenceDate: str
 
 export type PlanInput = Omit<MonthlyPlan, 'id' | 'createdAt' | 'updatedAt'>;
 
-const CURRENCY_CODES: CurrencyCode[] = ['EGP', 'SAR', 'USD'];
 
 function validatePlan(state: State, plan: PlanInput) {
   if (!isMonthKey(plan.month)) fail('INVALID_MONTH');
-  if (!CURRENCY_CODES.includes(plan.currency)) fail('CURRENCY_MISMATCH', { entity: 'monthlyPlan' });
+  assertCurrency(plan.currency);
   assertNonNegative(plan.expectedIncome, 'expectedIncome');
   const seenCategories = new Set<string>();
   for (const line of plan.lines) {

@@ -1,4 +1,5 @@
 import { fromDateKey, shiftDate, toDateKey } from '@/utils/dates';
+import { currencyList } from './selectors';
 import type { CurrencyCode, FinanceState, RecurringRule } from './types';
 
 // Recurring schedule engine. Pure functions only.
@@ -110,7 +111,11 @@ export interface Upcoming {
 
 // Unhandled occurrences of active rules in the next `days` days (after today, up to today +
 // days), soonest first, with totals per currency.
-export function upcoming(state: State, days: number, today: string): Upcoming {
+export function upcoming(
+  state: State & Pick<FinanceState, 'settings' | 'accounts'>,
+  days: number,
+  today: string
+): Upcoming {
   const until = shiftDate(today, days);
   const from = shiftDate(today, 1);
   const items: Occurrence[] = [];
@@ -122,8 +127,9 @@ export function upcoming(state: State, days: number, today: string): Upcoming {
     }
   }
   items.sort(byDateThenName);
-  const income: CurrencyTotals = { EGP: 0, SAR: 0, USD: 0 };
-  const expense: CurrencyTotals = { EGP: 0, SAR: 0, USD: 0 };
+  const zero = (): CurrencyTotals => Object.fromEntries(currencyList(state).map((c) => [c, 0]));
+  const income = zero();
+  const expense = zero();
   for (const { rule } of items) {
     if (rule.kind === 'income') income[rule.currency] += rule.amount;
     if (rule.kind === 'expense') expense[rule.currency] += rule.amount;
