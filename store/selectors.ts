@@ -1,9 +1,11 @@
+import { COUNTRY_REGISTRY, countryCodes, type CountryRegistry } from '@/constants/countries';
 import { convertCurrency, fromEGP, historicalAmountIn, toEGP } from '@/utils/currency';
 import { monthOf, monthsUntil, shiftMonth, toMonthKey } from '@/utils/dates';
 import { daysLeftInMonth } from './shared';
 import type {
   Account,
   Category,
+  CountryCode,
   CurrencyCode,
   ExpenseBucket,
   FinanceState,
@@ -13,7 +15,6 @@ import type {
   Holding,
   IncomeExpenseTransaction,
   Liability,
-  Location,
   LocationBreakdown,
   NetWorthBreakdown,
   SinkingFrequency,
@@ -130,15 +131,30 @@ export function netWorthEGP(state: State): number {
   return liquidTotalEGP(state) + holdingsTotalEGP(state) - liabilitiesTotalEGP(state);
 }
 
-// Cash, gold and currency holdings per location (EGP at current rates), plus liabilities.
+const emptyBreakdown = (): LocationBreakdown => ({ cashEGP: 0, goldEGP: 0, currenciesEGP: 0, liabilitiesEGP: 0 });
+
+// Every country in the registry plus any other country the data uses (registry order first), so lists
+// show the same rows whether or not a country has money in it right now.
+export function countriesInUse(
+  state: Pick<State, 'accounts' | 'holdings' | 'liabilities'>,
+  registry: CountryRegistry = COUNTRY_REGISTRY
+): CountryCode[] {
+  const used = [...state.accounts, ...state.holdings, ...state.liabilities].map((e) => e.country);
+  return [...new Set([...countryCodes(registry), ...used])];
+}
+
+// Cash, gold, currency holdings and liabilities per country (EGP at current rates).
 export function netWorthBreakdown(state: State): NetWorthBreakdown {
-  const empty = (): LocationBreakdown => ({ cashEGP: 0, goldEGP: 0, currenciesEGP: 0 });
-  const result: NetWorthBreakdown = { EG: empty(), SA: empty(), liabilitiesEGP: liabilitiesTotalEGP(state) };
-  for (const account of state.accounts) result[account.location].cashEGP += accountBalanceEGP(state, account);
+  const result: NetWorthBreakdown = {};
+  for (const country of countriesInUse(state)) result[country] = emptyBreakdown();
+  for (const account of state.accounts) result[account.country].cashEGP += accountBalanceEGP(state, account);
   for (const holding of state.holdings) {
-    const where = result[holding.location ?? 'EG'];
+    const where = result[holding.country];
     if (holding.type === 'gold') where.goldEGP += holdingValueEGP(state, holding);
     else where.currenciesEGP += holdingValueEGP(state, holding);
+  }
+  for (const liability of state.liabilities) {
+    result[liability.country].liabilitiesEGP += toEGP(liabilityRemaining(state, liability), liability.currency, state.settings.exchangeRates);
   }
   return result;
 }
@@ -174,13 +190,13 @@ export function netWorthAsOf(state: State, date: string): NetWorthFigures {
   return netWorthFigures(past);
 }
 
-// Net worth split by where things are. Holdings without a location count as Egypt, and so
-// do liabilities (they have no location), so EG + SA always equals netWorthEGP.
-export function netWorthByLocation(state: State): Record<Location, number> {
-  const result: Record<Location, number> = { EG: 0, SA: 0 };
-  for (const account of state.accounts) result[account.location] += accountBalanceEGP(state, account);
-  for (const holding of state.holdings) result[holding.location ?? 'EG'] += holdingValueEGP(state, holding);
-  result.EG -= liabilitiesTotalEGP(state);
+// Net worth split by country (a liability is subtracted from the country it is owed in), so the
+// countries always add up to netWorthEGP.
+export function netWorthByCountry(state: State): Record<CountryCode, number> {
+  const result: Record<CountryCode, number> = {};
+  for (const [country, b] of Object.entries(netWorthBreakdown(state))) {
+    result[country] = b.cashEGP + b.goldEGP + b.currenciesEGP - b.liabilitiesEGP;
+  }
   return result;
 }
 

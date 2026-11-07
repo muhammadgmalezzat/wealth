@@ -2,7 +2,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
-import { ACCOUNT_TYPE_ICONS, groupAccounts, holdingTitle, LOCATION_LABELS, signedDifference } from '@/components/assets/assetsUi';
+import { ACCOUNT_TYPE_ICONS, groupAccounts, holdingTitle, signedDifference } from '@/components/assets/assetsUi';
 import { EditAccountSheet } from '@/components/assets/EditAccountSheet';
 import { HoldingSheet } from '@/components/assets/HoldingSheet';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
@@ -35,7 +35,9 @@ import {
   liquidTotalEGP,
   totalAssetsEGP,
 } from '@/store/selectors';
-import type { Account, CurrencyCode, GoldKarat, Holding, Location } from '@/store/types';
+import { countryName } from '@/constants/countries';
+import { COUNTRY_OPTIONS, DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
+import type { Account, CountryCode, CurrencyCode, GoldKarat, Holding } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toEGP } from '@/utils/currency';
 import { showMessage } from '@/utils/dialogs';
@@ -57,7 +59,7 @@ interface FormState {
   weightGrams: string;
   karat: KaratOption;
   purchasePrice: string;
-  location: Location;
+  country: CountryCode;
 }
 
 const INITIAL_FORM: FormState = {
@@ -68,7 +70,7 @@ const INITIAL_FORM: FormState = {
   weightGrams: '',
   karat: '24',
   purchasePrice: '',
-  location: 'EG',
+  country: DEFAULT_COUNTRY,
 };
 
 // ---------------------------------------------------------------------------
@@ -121,7 +123,7 @@ export default function AssetsScreen() {
               name,
               weightGrams: num(form.weightGrams) ?? 0,
               karat: Number(form.karat) as GoldKarat,
-              location: form.location,
+              country: form.country,
               // Entered in the selected currency; holdings store cost in EGP.
               purchaseCostEGP: toEGP(
                 num(form.purchasePrice) ?? 0,
@@ -136,7 +138,7 @@ export default function AssetsScreen() {
               type,
               currency: form.currency,
               openingBalance: num(form.amount) ?? 0,
-              location: form.location,
+              country: form.country,
             })
           );
     if (saved) {
@@ -154,7 +156,7 @@ export default function AssetsScreen() {
     <ListRow
       key={account.id}
       title={account.name}
-      subtitle={`${LOCATION_LABELS[account.location]} · ${currencySymbol(account.currency)}`}
+      subtitle={`${countryName(account.country)} · ${currencySymbol(account.currency)}`}
       subtitleLines={1}
       icon={ACCOUNT_TYPE_ICONS[account.type]}
       archived={account.archived}
@@ -178,7 +180,7 @@ export default function AssetsScreen() {
         key={holding.id}
         title={holdingTitle(holding)}
         // A currency holding's truth is its quantity; the EGP figure on the left is its value now.
-        subtitle={`${LOCATION_LABELS[holding.location ?? 'EG']} · ${
+        subtitle={`${countryName(holding.country)} · ${
           holding.type === 'currency' ? formatMoney(holding.quantity, holding.currency) : 'القيمة الحالية'
         }`}
         subtitleLines={1}
@@ -239,16 +241,14 @@ export default function AssetsScreen() {
           </AppText>
         ) : (
           <View style={styles.groups}>
-            {(['EG', 'SA'] as Location[]).map((loc) =>
-              groups[loc].length === 0 ? null : (
-                <View key={loc} style={styles.group}>
-                  <AppText variant="caption" color="textSecondary">
-                    {LOCATION_LABELS[loc]}
-                  </AppText>
-                  <ListGroup>{groups[loc].map(accountRow)}</ListGroup>
-                </View>
-              )
-            )}
+            {groups.byCountry.map(({ country, accounts: inCountry }) => (
+              <View key={country} style={styles.group}>
+                <AppText variant="caption" color="textSecondary">
+                  {countryName(country)}
+                </AppText>
+                <ListGroup>{inCountry.map(accountRow)}</ListGroup>
+              </View>
+            ))}
             {groups.archived.length > 0 && (
               <View style={styles.group}>
                 <Pressable
@@ -363,14 +363,7 @@ export default function AssetsScreen() {
         )}
 
         <FormField label="المكان">
-          <Segment<Location>
-            options={[
-              { label: 'مصر', value: 'EG' },
-              { label: 'السعودية', value: 'SA' },
-            ]}
-            value={form.location}
-            onChange={(v) => set('location', v)}
-          />
+          <Segment<CountryCode> options={COUNTRY_OPTIONS} value={form.country} onChange={(v) => set('country', v)} />
         </FormField>
 
         <FormField label="العملة">

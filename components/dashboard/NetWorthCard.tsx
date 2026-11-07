@@ -1,11 +1,13 @@
 import { router } from 'expo-router';
+import { Fragment } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { AppText } from '@/components/ui/AppText';
 import { Card } from '@/components/ui/Card';
 import { Money } from '@/components/ui/Money';
+import { countryName } from '@/constants/countries';
 import { colors, opacity, radius, space } from '@/constants/theme';
-import { holdingsTotalEGP, liquidTotalEGP, netWorthByLocation, netWorthEGP } from '@/store/selectors';
+import { holdingsTotalEGP, liquidTotalEGP, netWorthByCountry, netWorthEGP } from '@/store/selectors';
 import { netWorthChange } from '@/store/snapshots';
 import type { FinanceState } from '@/store/types';
 import { formatMonthLabel, formatPercent } from '@/utils/formatters';
@@ -13,7 +15,7 @@ import { formatMonthLabel, formatPercent } from '@/utils/formatters';
 // "صافي الثروة" (tap → الأصول): total, the change since last month's snapshot (hidden without one), the
 // Egypt / Saudi split, and liquid vs gold & investments (all EGP).
 export function NetWorthCard({ state, now = new Date() }: { state: FinanceState; now?: Date }) {
-  const byLocation = netWorthByLocation(state);
+  const byCountry = netWorthByCountry(state);
   const change = netWorthChange(state, now);
   const tone = change && change.amountEGP < -0.005 ? 'danger' : 'positive';
   return (
@@ -37,9 +39,12 @@ export function NetWorthCard({ state, now = new Date() }: { state: FinanceState;
       )}
 
       <View style={styles.lines}>
-        <Line label="مصر" amount={byLocation.EG} />
-        <View style={styles.separator} />
-        <Line label="السعودية" amount={byLocation.SA} />
+        {Object.keys(byCountry).map((country, index) => (
+          <Fragment key={country}>
+            {index > 0 && <View style={styles.separator} />}
+            <Line label={countryName(country)} amount={byCountry[country]} />
+          </Fragment>
+        ))}
       </View>
 
       <View style={styles.split}>

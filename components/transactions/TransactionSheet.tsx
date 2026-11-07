@@ -15,7 +15,8 @@ import { colors, space } from '@/constants/theme';
 import type { NewRecurringRule } from '@/store/operations';
 import { planFor, spendImpact } from '@/store/planning';
 import { pickerCategories } from '@/store/selectors';
-import type { GoldKarat, Location, Transaction } from '@/store/types';
+import { DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
+import type { CountryCode, GoldKarat, Transaction } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { convertCurrency } from '@/utils/currency';
 import { monthOf, toDateKey } from '@/utils/dates';
@@ -110,7 +111,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   // Gold purchase fields.
   const [weightText, setWeightText] = useState(editedGold ? String(editedGold.weightGrams) : '');
   const [karat, setKarat] = useState<KaratOption>(editedGold ? `${editedGold.karat}` : '21');
-  const [goldLocation, setGoldLocation] = useState<Location>(editedGold?.location ?? 'EG');
+  const [goldLocation, setGoldLocation] = useState<CountryCode>(editedGold?.country ?? accountById(initialFlow.accountId)?.country ?? DEFAULT_COUNTRY);
   const [holdingName, setHoldingName] = useState(editedGold?.name ?? '');
   // Inline copies of the validation messages, shown under the related field.
   const [errors, setErrors] = useState<{ amount?: string; account?: string; category?: string }>({});
@@ -215,7 +216,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
           name: holdingName.trim() || `ذهب ${weightText.trim()} جم عيار ${karatValue}`,
           weightGrams: parseAmount(weightText) ?? NaN,
           karat: karatValue,
-          location: goldLocation,
+          country: goldLocation,
           ...(editedGold?.note ? { note: editedGold.note } : {}),
         },
       };

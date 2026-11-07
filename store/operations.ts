@@ -1,3 +1,4 @@
+import { isKnownCountry } from '@/constants/countries';
 import { convertCurrency, rateToEGP, snapshotRates } from '@/utils/currency';
 import { addMonthsToDate, isDateKey, isMonthKey, shiftDate, toDateKey } from '@/utils/dates';
 import { goldPricesEGP, isValidPremiumPct } from '@/utils/prices/calc';
@@ -26,6 +27,7 @@ import type {
   ActionDismissal,
   AssetPurchaseTransaction,
   Category,
+  CountryCode,
   CurrencyCode,
   ExchangeRates,
   FinanceState,
@@ -37,7 +39,6 @@ import type {
   IncomeExpenseTransaction,
   LastUsedSelection,
   Liability,
-  Location,
   MonthlyPlan,
   MonthlyReview,
   PlanLine,
@@ -130,6 +131,10 @@ function assertNonNegative(value: number, field: FinanceField) {
   if (value < 0) fail('NEGATIVE', { field });
 }
 
+function assertCountry(country: CountryCode) {
+  if (!isKnownCountry(country)) fail('UNKNOWN_COUNTRY');
+}
+
 function assertDate(value: string, field: FinanceField) {
   if (!isDateKey(value)) fail('INVALID_DATE', { field });
 }
@@ -175,6 +180,7 @@ function accountInUse(state: State, accountId: string): boolean {
 
 function validateAccount(account: NewAccount) {
   assertName(account.name, 'account');
+  assertCountry(account.country);
   assertNumber(account.openingBalance, 'openingBalance');
 }
 
@@ -426,7 +432,8 @@ export interface GoldPurchase {
     name: string;
     weightGrams: number;
     karat: GoldKarat;
-    location?: Location;
+    // Defaults to the paying account's country (a new purchase) or the holding's own (an edit).
+    country?: CountryCode;
     // Defaults to `date`.
     purchaseDate?: string;
     note?: string;
@@ -437,6 +444,7 @@ function goldHoldingFor(
   input: GoldPurchase,
   id: string,
   purchaseCostEGP: number,
+  defaultCountry: CountryCode,
   ctx: OpContext
 ): GoldHolding {
   const { holding } = input;
@@ -449,7 +457,7 @@ function goldHoldingFor(
     karat: holding.karat,
     purchaseCostEGP,
     purchaseDate: holding.purchaseDate ?? input.date,
-    ...(holding.location ? { location: holding.location } : {}),
+    country: holding.country ?? defaultCountry,
     ...(holding.note?.trim() ? { note: holding.note.trim() } : {}),
   };
 }
@@ -461,7 +469,7 @@ export function buyGold(state: State, input: GoldPurchase, ctx: OpContext): Patc
   const account = requireById(state.accounts, input.accountId, 'account');
   assertPositive(input.amount, 'amount');
   const rate = rateToEGP(account.currency, state.settings.exchangeRates);
-  const holding = goldHoldingFor(input, ctx.newId(), input.amount * rate, ctx);
+  const holding = goldHoldingFor(input, ctx.newId(), input.amount * rate, account.country, ctx);
   validateHolding(holding);
 
   const tx: AssetPurchaseTransaction = {
@@ -494,7 +502,7 @@ export function updateGoldPurchase(state: State, txId: string, input: GoldPurcha
   const keepRates = account.currency === existing.currency;
   const rate = keepRates ? existing.rateToEGP : rateToEGP(account.currency, state.settings.exchangeRates);
   const holding: GoldHolding = {
-    ...goldHoldingFor(input, previousHolding.id, input.amount * rate, ctx),
+    ...goldHoldingFor(input, previousHolding.id, input.amount * rate, previousHolding.country, ctx),
   };
   validateHolding(holding);
 
@@ -832,6 +840,7 @@ export function deleteFundMovement(state: State, id: string, ctx: OpContext): Pa
 
 function validateHolding(holding: NewHolding) {
   assertName(holding.name, 'holding');
+  assertCountry(holding.country);
   assertNonNegative(holding.purchaseCostEGP, 'purchaseCostEGP');
   if (holding.purchaseDate !== undefined) assertDate(holding.purchaseDate, 'purchaseDate');
   if (holding.type === 'gold') {
@@ -884,6 +893,7 @@ export function deleteHolding(state: State, id: string, ctx: OpContext): Patch {
 
 function validateLiability(liability: NewLiability) {
   assertName(liability.name, 'liability');
+  assertCountry(liability.country);
   assertPositive(liability.principal, 'principal');
   if (liability.monthlyPayment !== undefined) assertPositive(liability.monthlyPayment, 'monthlyPayment');
   assertDate(liability.startDate, 'startDate');

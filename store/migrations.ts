@@ -3,6 +3,8 @@ import { fromEGP, rateToEGP, toEGP } from './legacy/currency.v7';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from './defaultCategories';
 import { holdingValueEGP, liquidTotalEGP } from './legacy/selectors.v7';
 import { missingPastSnapshots } from './legacy/snapshots.v7';
+import { migrateV7toV8 } from './migrateV8';
+import type { FinanceState as FinanceStateV8 } from './types';
 import type {
   Account,
   Category,
@@ -36,7 +38,16 @@ import type {
 //   v7: + netWorthSnapshots (past months since trackingStartDate backfilled as estimates),
 //       actionDismissals, monthlyReviews
 
-export const CURRENT_VERSION = 7;
+//   v8: currencies and funds redesign (docs/architecture/CURRENCY_AND_FUNDS_DESIGN.md); the v7 → v8
+//       step lives in migrateV8.ts. Everything up to v7 is frozen (store/legacy).
+
+export const CURRENT_VERSION = 8;
+
+// What the full chain produces: the current (v8) state.
+export interface MigrationResult {
+  state: FinanceStateV8;
+  clampedBy: number;
+}
 
 interface LegacyTransactionV1 {
   id: string;
@@ -167,7 +178,8 @@ interface V2Result {
   clampedBy: number;
 }
 
-export interface MigrationResult {
+// What the frozen chain produces: a data-v7 state.
+export interface V7MigrationResult {
   state: FinanceState;
   // EGP of v1 goal savings that could not be backed by cash (opening allocations are capped
   // so unassigned money never starts negative). 0 when nothing was clamped.
@@ -442,7 +454,7 @@ export function migrateToV7(
   persisted: unknown,
   version: number,
   ctx: MigrationContext
-): MigrationResult {
+): V7MigrationResult {
   let state = persisted;
   let clampedBy = 0;
   if (version < 1) state = migrateV0toV1(state);
@@ -461,5 +473,7 @@ export function migratePersistedState(
   version: number,
   ctx: MigrationContext
 ): MigrationResult {
-  return migrateToV7(persisted, version, ctx);
+  const { state, clampedBy } = migrateToV7(persisted, Math.min(version, 7), ctx);
+  // Data already at v8 (or newer, which the hydration guard refuses before it gets here) is not re-migrated.
+  return { state: version >= 8 ? (persisted as FinanceStateV8) : migrateV7toV8(state, ctx), clampedBy };
 }

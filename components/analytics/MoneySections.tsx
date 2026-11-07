@@ -9,6 +9,7 @@ import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { MetricGroup } from '@/components/ui/MetricGroup';
 import { Money } from '@/components/ui/Money';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { countryName } from '@/constants/countries';
 import { CURRENCY_NAMES_AR } from '@/constants/currencies';
 import { opacity, space } from '@/constants/theme';
 import type { DisplayCurrency, FundProjection, Insight, MoneyMap, Runway } from '@/store/analytics';
@@ -18,7 +19,6 @@ import { formatPercent } from '@/utils/formatters';
 import { compactNumber, projectionPhrase, runwayPhrase } from './analyticsUi';
 import { EmptyNote, NOT_ENOUGH_DATA } from './common';
 
-const LOCATION_NAMES = { EG: 'مصر', SA: 'السعودية' } as const;
 
 // Where the money is now: liquid by currency (native + value), by country, and gold by karat.
 // These are current valuations, so they use today's rates.
@@ -45,7 +45,7 @@ export function MoneyMapSection({ map, currency }: { map: MoneyMap; currency: Di
         {map.byLocation.map((l) => (
           <ListRow
             key={l.location}
-            title={LOCATION_NAMES[l.location]}
+            title={countryName(l.location)}
             subtitle={`كاش ${compactNumber(l.cash)} · ذهب ${compactNumber(l.gold)} · عملات ${compactNumber(l.currencies)}`}
             subtitleLines={1}
             trailing={<Money amount={l.total} currency={currency} size="row" align="left" />}

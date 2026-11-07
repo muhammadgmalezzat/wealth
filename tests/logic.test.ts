@@ -17,9 +17,7 @@ import * as assetsUi from '@/components/assets/assetsUi';
 import * as txUi from '@/components/transactions/transactionUi';
 import { exampleSeedV7, localSeedV7, ORACLE_NOW, richV7 } from './legacy/fixtures.v7';
 import { oracleReport } from './legacy/oracle.v7';
-import * as legacySel from '@/store/legacy/selectors.v7';
-import * as legacyPlan from '@/store/legacy/planning.v7';
-import * as legacyAnalytics from '@/store/legacy/analytics.v7';
+import { diffReports, reportV8 } from './legacy/report.v8';
 import * as planning from '@/store/planning';
 import { COUNTRY_REGISTRY, countryCodes, countryName, isKnownCountry } from '@/constants/countries';
 import { CURRENCY_REGISTRY, decimalsOf, isKnownCurrency, UnknownCurrencyError } from '@/constants/currencyRegistry';
@@ -56,6 +54,7 @@ import {
 import {
   CURRENT_VERSION,
   migratePersistedState,
+  migrateToV7,
   migrateV2toV3,
   migrateV3toV4,
   migrateV4toV5,
@@ -90,7 +89,7 @@ import {
   monthFlows,
   monthSummary,
   netWorthAsOf,
-  netWorthByLocation,
+  netWorthByCountry,
   netWorthEGP,
   openingBalanceForCurrentBalance,
   pickerCategories,
@@ -165,17 +164,23 @@ const account = (
   id: string,
   currency: 'EGP' | 'SAR' | 'USD',
   openingBalance: number,
-  location: 'EG' | 'SA' = 'EG'
+  country: string = 'EG'
 ) => ({
   id,
   name: id,
   type: 'bank' as const,
   currency,
   openingBalance,
-  location,
+  country,
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: T0,
 });
+
+// A data-v7 account (the shape the frozen migrations read: `location`, not `country`).
+const accountV7 = (id: string, currency: 'EGP' | 'SAR' | 'USD', openingBalance: number, location: string = 'EG') => {
+  const { country: _country, ...rest } = account(id, currency, openingBalance);
+  return { ...rest, location };
+};
 
 const fund = (overrides: Partial<Fund> & Pick<Fund, 'id'>): Fund => ({
   name: overrides.id,
@@ -331,10 +336,10 @@ describe('netWorthEGP', () => {
     let s = emptyState();
     s.accounts = [account('egp', 'EGP', 10000), account('sar', 'SAR', 1000)];
     s.holdings = [
-      { id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 50000 },
-      { id: 'usd', updatedAt: T0, type: 'currency', name: 'USD', currency: 'USD', quantity: 100, purchaseCostEGP: 4800 },
+      { id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 50000, country: 'EG' },
+      { id: 'usd', updatedAt: T0, type: 'currency', name: 'USD', currency: 'USD', quantity: 100, purchaseCostEGP: 4800, country: 'EG' },
     ];
-    s = apply(s, ops.addLiability(s, { name: 'Car', principal: 20000, currency: 'EGP', startDate: '2026-01-01' }, ctx));
+    s = apply(s, ops.addLiability(s, { name: 'Car', principal: 20000, currency: 'EGP', startDate: '2026-01-01', country: 'EG' }, ctx));
     const liabilityId = s.liabilities[0].id;
     s = apply(
       s,
@@ -365,7 +370,7 @@ describe('netWorthEGP', () => {
 describe('funds', () => {
   const withGold = (): FinanceState => ({
     ...emptyState(),
-    holdings: [{ id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 50000 }],
+    holdings: [{ id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 50000, country: 'EG' }],
   });
 
   it('fundCurrent = cash movements + market value of linked gold (in fund currency)', () => {
@@ -432,7 +437,7 @@ describe('unassignedEGP', () => {
   it('= liquid − cash allocated to funds (linked holdings excluded)', () => {
     const s = emptyState();
     s.accounts = [account('egp', 'EGP', 50000), account('sar', 'SAR', 2000)];
-    s.holdings = [{ id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 0 }];
+    s.holdings = [{ id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 0, country: 'EG' }];
     s.funds = [fund({ id: 'egp-fund', linkedHoldingIds: ['gold'] }), fund({ id: 'sar-fund', currency: 'SAR' })];
     s.fundMovements = [
       { id: 'm1', updatedAt: T0, fundId: 'egp-fund', amount: 30000, date: '2026-09-01' },
@@ -566,8 +571,8 @@ describe('one fund per holding', () => {
   const state = (): FinanceState => ({
     ...emptyState(),
     holdings: [
-      { id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 0 },
-      { id: 'usd', updatedAt: T0, type: 'currency', name: 'USD', currency: 'USD', quantity: 100, purchaseCostEGP: 0 },
+      { id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 0, country: 'EG' },
+      { id: 'usd', updatedAt: T0, type: 'currency', name: 'USD', currency: 'USD', quantity: 100, purchaseCostEGP: 0, country: 'EG' },
     ],
     funds: [fund({ id: 'a', linkedHoldingIds: ['gold'] })],
   });
@@ -1090,7 +1095,7 @@ describe('opening data import', { skip: noSeed }, () => {
 
   it('splits net worth by location', () => {
     const s = imported();
-    const byLocation = netWorthByLocation(s);
+    const byLocation = netWorthByCountry(s);
     approx(byLocation.SA, 8000 * 12.5);
     approx(byLocation.EG + byLocation.SA, netWorthEGP(s));
   });
@@ -1106,7 +1111,7 @@ describe('buyGold', () => {
     accountId: 'egp',
     amount: 60000,
     date: '2026-10-10',
-    holding: { name: 'Bar 10g', weightGrams: 10, karat: 24, location: 'EG' },
+    holding: { name: 'Bar 10g', weightGrams: 10, karat: 24, country: 'EG' },
     ...overrides,
   });
 
@@ -1218,12 +1223,12 @@ describe('settings & gold prices', () => {
     const s = emptyState();
     s.settings = { ...s.settings, goldPrice24kEGP: 6000, goldPrice21kEGP: 5300 };
     s.holdings = [
-      { id: 'a', updatedAt: T0, type: 'gold', name: 'a', weightGrams: 1, karat: 24, purchaseCostEGP: 0 },
-      { id: 'b', updatedAt: T0, type: 'gold', name: 'b', weightGrams: 1, karat: 21, purchaseCostEGP: 0 },
-      { id: 'c', updatedAt: T0, type: 'gold', name: 'c', weightGrams: 1, karat: 18, purchaseCostEGP: 0, location: 'SA' },
+      { id: 'a', updatedAt: T0, type: 'gold', name: 'a', weightGrams: 1, karat: 24, purchaseCostEGP: 0, country: 'EG' },
+      { id: 'b', updatedAt: T0, type: 'gold', name: 'b', weightGrams: 1, karat: 21, purchaseCostEGP: 0, country: 'EG' },
+      { id: 'c', updatedAt: T0, type: 'gold', name: 'c', weightGrams: 1, karat: 18, purchaseCostEGP: 0, country: 'SA' },
     ];
     approx(holdingsTotalEGP(s), 6000 + 5300 + 4500);
-    approx(netWorthByLocation(s).SA, 4500);
+    approx(netWorthByCountry(s).SA, 4500);
   });
 
   it('updateSettings validates and stamps changed market inputs', () => {
@@ -1260,7 +1265,7 @@ describe('migration v2 → v3', () => {
 
   it('fills new fields with defaults and adds missing categories', () => {
     const { state } = migratePersistedState(v2(), 2, MIGRATION_CTX);
-    assert.equal(state.accounts[0].location, 'EG');
+    assert.equal(state.accounts[0].country, 'EG');
     approx(state.settings.goldPrice21kEGP, 6000 * (21 / 24));
     assert.equal(state.settings.trackingStartDate, '2026-08-05');
     const ids = state.categories.map((c) => c.id);
@@ -1278,7 +1283,7 @@ describe('migration v2 → v3', () => {
 
   it('chains all the way from v0', () => {
     const { state } = migratePersistedState(LEGACY_V1, 0, MIGRATION_CTX);
-    assert.ok(state.accounts.every((a) => a.location === 'EG'));
+    assert.ok(state.accounts.every((a) => a.country === 'EG'));
     assert.equal(state.settings.trackingStartDate, '2026-08-05');
   });
 });
@@ -1321,7 +1326,7 @@ describe('sync bookkeeping', () => {
   it('every create and update sets updatedAt to now', () => {
     const { ctx, advance, iso } = makeClock();
     let s: FinanceState = emptyState();
-    s = apply(s, ops.addAccount(s, { name: 'Bank', type: 'bank', currency: 'EGP', openingBalance: 100, location: 'EG' }, ctx));
+    s = apply(s, ops.addAccount(s, { name: 'Bank', type: 'bank', currency: 'EGP', openingBalance: 100, country: 'EG' }, ctx));
     const created = iso();
     assert.equal(s.accounts[0].updatedAt, created);
     assert.equal(s.accounts[0].createdAt, created);
@@ -1518,7 +1523,7 @@ describe('backup export / import', () => {
     const isV4 = (s: FinanceState) => {
       assert.ok(Array.isArray(s.tombstones));
       assert.ok(s.settings.deviceId);
-      assert.ok(s.accounts.every((a) => a.location && a.updatedAt));
+      assert.ok(s.accounts.every((a) => a.country && a.updatedAt));
       assert.ok(s.categories.some((c) => c.id === 'cat-lifestyle-misc'));
     };
 
@@ -1527,7 +1532,8 @@ describe('backup export / import', () => {
     assert.equal(fromV1.state.accounts.length, 3);
 
     const v3Payload = (() => {
-      const { state } = migratePersistedState(LEGACY_V1, 1, MIGRATION_CTX);
+      // A v7-shaped state (the frozen chain), stripped further down to the v3 shape.
+      const { state } = migrateToV7(LEGACY_V1, 1, MIGRATION_CTX);
       const strip = <T extends object>(items: T[]) => items.map(({ updatedAt: _u, ...rest }: any) => rest);
       const { deviceId: _d, ...settings } = state.settings;
       return { ...state, accounts: strip(state.accounts), transactions: strip(state.transactions), settings, tombstones: undefined };
@@ -2478,7 +2484,7 @@ describe('next best actions: rules and ordering', () => {
       fund({ id: 'goal', name: 'جواز', targetAmount: 12000, deadline: '2027-09-30', priority: 2 }),
     ],
     holdings: [
-      { id: 'g', type: 'gold', name: 'gold', weightGrams: 10, karat: 21, purchaseCostEGP: 50000, updatedAt: T0 },
+      { id: 'g', type: 'gold', name: 'gold', weightGrams: 10, karat: 21, purchaseCostEGP: 50000, country: 'EG', updatedAt: T0 },
     ],
   });
 
@@ -2605,7 +2611,7 @@ describe('next best actions: rules and ordering', () => {
     const s: FinanceState = {
       ...emptyState(),
       accounts: [account('egp', 'EGP', 100)],
-      holdings: [{ id: 'g', type: 'gold', name: 'gold', weightGrams: 1, karat: 24, purchaseCostEGP: 1, updatedAt: T0 }],
+      holdings: [{ id: 'g', type: 'gold', name: 'gold', weightGrams: 1, karat: 24, purchaseCostEGP: 1, country: 'EG', updatedAt: T0 }],
       settings: { ...emptyState().settings, goldPriceUpdatedAt: sixDaysAgo, lastBackupAt: sixDaysAgo },
     };
     // 6 days: fine.
@@ -2724,8 +2730,8 @@ describe('net worth snapshots', () => {
   it('leaves out what came after a month ended', () => {
     const s: FinanceState = {
       ...base(),
-      holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 1, purchaseDate: '2026-09-15', updatedAt: T0 }],
-      liabilities: [{ id: 'l', name: 'loan', principal: 200, currency: 'EGP', startDate: '2026-10-01', updatedAt: T0 }],
+      holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 1, country: 'EG', purchaseDate: '2026-09-15', updatedAt: T0 }],
+      liabilities: [{ id: 'l', name: 'loan', principal: 200, currency: 'EGP', startDate: '2026-10-01', country: 'EG', updatedAt: T0 }],
     };
     assert.equal(netWorthAsOf(s, '2026-08-31').netWorthEGP, 1000);
     assert.equal(netWorthAsOf(s, '2026-09-30').netWorthEGP, 1500 + 6000);
@@ -2757,7 +2763,7 @@ describe('migration v6 → v7', () => {
   const v6 = () => {
     const { netWorthSnapshots: _n, actionDismissals: _a, monthlyReviews: _r, ...rest } = {
       ...emptyState(),
-      accounts: [{ ...account('egp', 'EGP', 1000), openingDate: '2026-08-01' }],
+      accounts: [{ ...accountV7('egp', 'EGP', 1000), openingDate: '2026-08-01' }],
       settings: { ...emptyState().settings, trackingStartDate: '2026-08-20' },
     };
     return rest;
@@ -2788,7 +2794,7 @@ describe('migration v6 → v7', () => {
   });
 
   it('runs as part of the chain', () => {
-    assert.equal(CURRENT_VERSION, 7);
+    assert.equal(CURRENT_VERSION, 8);
     const { state } = migratePersistedState(v6(), 6, MIGRATION_CTX);
     assert.equal(state.netWorthSnapshots.length, 2);
     // Tracking that starts this month has nothing to backfill.
@@ -2835,7 +2841,7 @@ describe('monthly review', () => {
         updatedAt: T0,
       },
     ],
-    holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 4000, updatedAt: T0 }],
+    holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 4000, country: 'EG', updatedAt: T0 }],
     funds: [fund({ id: 'goal', name: 'جواز', targetAmount: 50000 }), fund({ id: 'done', targetAmount: 100, priority: 2 })],
     fundMovements: [
       { id: 'm1', fundId: 'goal', amount: 1000, date: '2026-09-15', updatedAt: T0 },
@@ -3312,7 +3318,7 @@ describe('settings / assets UI helpers', () => {
   });
 
   it('holdingTitle, signedDifference and groupAccounts', () => {
-    const gold = { id: 'g', type: 'gold' as const, name: 'سبيكة 5 جم', weightGrams: 5, karat: 24 as const, purchaseCostEGP: 1, updatedAt: T0 };
+    const gold = { id: 'g', type: 'gold' as const, name: 'سبيكة 5 جم', weightGrams: 5, karat: 24 as const, purchaseCostEGP: 1, country: 'EG', updatedAt: T0 };
     assert.equal(assetsUi.holdingTitle(gold), 'سبيكة 5 جم — عيار 24');
     assert.equal(assetsUi.holdingTitle({ ...gold, name: ' ' }), '5 جم — عيار 24');
     assert.ok(assetsUi.signedDifference(1200).includes('+'));
@@ -3323,7 +3329,12 @@ describe('settings / assets UI helpers', () => {
       { ...account('c', 'EGP', 0), archived: true },
     ];
     const g = assetsUi.groupAccounts(accs);
-    assert.deepEqual([g.EG.map((a) => a.id), g.SA.map((a) => a.id), g.archived.map((a) => a.id)], [['a'], ['b'], ['c']]);
+    assert.deepEqual(
+      [g.byCountry.map((c) => [c.country, c.accounts.map((a) => a.id)]), g.archived.map((a) => a.id)],
+      [[['EG', ['a']], ['SA', ['b']]], ['c']]
+    );
+    // A country with no active account is left out.
+    assert.deepEqual(assetsUi.groupAccounts([account('d', 'EGP', 1)]).byCountry.map((c) => c.country), ['EG']);
   });
 });
 
@@ -3566,7 +3577,7 @@ describe('live prices: applying', () => {
       {
         ...emptyState(),
         accounts: [account('sar', 'SAR', 1000, 'SA'), account('egp', 'EGP', 5000)],
-        holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 10, karat: 24, purchaseCostEGP: 1, updatedAt: T0 }],
+        holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 10, karat: 24, purchaseCostEGP: 1, country: 'EG', updatedAt: T0 }],
       },
       { exchangeRates: { ...RATES, SAR_EGP: 12.5 }, priceSource: 'auto' }
     );
@@ -3606,7 +3617,7 @@ describe('live prices: applying', () => {
     const DAY = 86_400_000;
     const stale = new Date(NOW.getTime() - 30 * DAY).toISOString();
     const base = withSettings(
-      { ...emptyState(), holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 1, updatedAt: T0 }] },
+      { ...emptyState(), holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 1, country: 'EG', updatedAt: T0 }] },
       { goldPriceUpdatedAt: stale, priceSource: 'auto' }
     );
     const has = (s: FinanceState) => nba.nextActions(s, NOW).some((a) => a.id === 'prices');
@@ -3676,7 +3687,7 @@ describe('native amounts never drift with the rates', () => {
   });
 
   it('a currency holding is its quantity; only its value in EGP follows the rate', () => {
-    const holding = { id: 'h', type: 'currency' as const, name: 'ريال', currency: 'SAR' as const, quantity: 1000, purchaseCostEGP: 12000, updatedAt: T0 };
+    const holding = { id: 'h', type: 'currency' as const, name: 'ريال', currency: 'SAR' as const, quantity: 1000, purchaseCostEGP: 12000, country: 'EG', updatedAt: T0 };
     const s: FinanceState = {
       ...emptyState(),
       holdings: [holding],
@@ -3957,7 +3968,7 @@ describe('analytics', () => {
     ...emptyState(),
     accounts: [account('egp', 'EGP', 20000), account('sar', 'SAR', 2000, 'SA')],
     settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' },
-    holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 0.5, karat: 21, purchaseCostEGP: 3000, updatedAt: T0 }],
+    holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 0.5, karat: 21, purchaseCostEGP: 3000, country: 'EG', updatedAt: T0 }],
     funds: [fund({ id: 'F', targetAmount: 20000, priority: 1 })],
     fundMovements: [
       movement('m1', 'F', 1000, '2026-08-10'),
@@ -4326,7 +4337,7 @@ describe('analytics', () => {
   });
 
   describe('net worth over time', () => {
-    const zero = { cashEGP: 0, goldEGP: 0, currenciesEGP: 0 };
+    const zero = { cashEGP: 0, goldEGP: 0, currenciesEGP: 0, liabilitiesEGP: 0 };
     const snap = (month: string, extra: Partial<import('@/store/types').NetWorthSnapshot>): import('@/store/types').NetWorthSnapshot => ({
       id: `nw-${month}`,
       month,
@@ -4346,12 +4357,12 @@ describe('analytics', () => {
           estimated: true,
           netWorthEGP: 125000,
           ratesSnapshot: { SAR_EGP: 12.5, USD_EGP: 50 },
-          breakdown: { EG: { ...zero, cashEGP: 100000 }, SA: { ...zero, cashEGP: 25000 }, liabilitiesEGP: 0 },
+          breakdown: { EG: { ...zero, cashEGP: 100000 }, SA: { ...zero, cashEGP: 25000 } },
         }),
         snap('2026-09', {
           netWorthEGP: 131000,
           ratesSnapshot: { SAR_EGP: 13, USD_EGP: 50 },
-          breakdown: { EG: { cashEGP: 110000, goldEGP: 5000, currenciesEGP: 0 }, SA: { ...zero, cashEGP: 26000 }, liabilitiesEGP: 10000 },
+          breakdown: { EG: { cashEGP: 110000, goldEGP: 5000, currenciesEGP: 0, liabilitiesEGP: 10000 }, SA: { ...zero, cashEGP: 26000 } },
         }),
       ],
     });
@@ -4409,9 +4420,9 @@ describe('analytics', () => {
       ...emptyState(),
       accounts: [account('egp', 'EGP', 5000), account('sar', 'SAR', 1000, 'SA')],
       holdings: [
-        { id: 'g21', type: 'gold', name: 'a', weightGrams: 10, karat: 21, purchaseCostEGP: 50000, location: 'EG', updatedAt: T0 },
-        { id: 'g24', type: 'gold', name: 'b', weightGrams: 5, karat: 24, purchaseCostEGP: 28000, location: 'EG', updatedAt: T0 },
-        { id: 'fx', type: 'currency', name: 'ريال', currency: 'SAR', quantity: 200, purchaseCostEGP: 2400, location: 'SA', updatedAt: T0 },
+        { id: 'g21', type: 'gold', name: 'a', weightGrams: 10, karat: 21, purchaseCostEGP: 50000, country: 'EG', updatedAt: T0 },
+        { id: 'g24', type: 'gold', name: 'b', weightGrams: 5, karat: 24, purchaseCostEGP: 28000, country: 'EG', updatedAt: T0 },
+        { id: 'fx', type: 'currency', name: 'ريال', currency: 'SAR', quantity: 200, purchaseCostEGP: 2400, country: 'SA', updatedAt: T0 },
       ],
     });
 
@@ -4532,7 +4543,7 @@ describe('analytics', () => {
       let s: FinanceState = {
         ...emptyState(),
         accounts: [account('egp', 'EGP', 10000), account('sar', 'SAR', 1000, 'SA')],
-        holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 5000, updatedAt: T0 }],
+        holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 5000, country: 'EG', updatedAt: T0 }],
         funds: [fund({ id: 'G', targetAmount: 100000, deadline: '2027-01-31', linkedHoldingIds: ['g1'] })],
         fundMovements: [
           movement('a', 'G', 1000, '2026-08-05'),
@@ -4600,7 +4611,7 @@ describe('analytics', () => {
       const s: FinanceState = {
         ...ledger(),
         funds: [...ledger().funds, fund({ id: 'late', name: 'جواز', targetAmount: 60000, deadline: '2027-03-31', priority: 2 })],
-        holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 100, karat: 24, purchaseCostEGP: 500000, updatedAt: T0 }],
+        holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 100, karat: 24, purchaseCostEGP: 500000, country: 'EG', updatedAt: T0 }],
       };
       const list = analytics.insights(s, query(s, 'month'), OCT_26);
       const behind = list.find((i) => i.id === 'fund-behind')!;
@@ -4618,7 +4629,7 @@ describe('analytics', () => {
       const s: FinanceState = {
         ...base,
         funds: [...base.funds, fund({ id: 'late', name: 'جواز', targetAmount: 60000, deadline: '2027-03-31', priority: 2 })],
-        holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 100, karat: 24, purchaseCostEGP: 500000, updatedAt: T0 }],
+        holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 100, karat: 24, purchaseCostEGP: 500000, country: 'EG', updatedAt: T0 }],
         // A big one-time purchase in October: spending beats income and it dominates.
         transactions: [...base.transactions, tx('huge', 'expense', 'cat-essentials-home-setup', 5000, '2026-10-14', { oneTime: true })],
       };
@@ -4679,15 +4690,14 @@ describe('analytics', () => {
       const s: FinanceState = {
         ...emptyState(),
         accounts: [account('egp', 'EGP', 1000), account('sar', 'SAR', 100, 'SA')],
-        holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 1, updatedAt: T0 }],
+        holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 1, country: 'EG', updatedAt: T0 }],
         settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' },
       };
       const list = snapshots.syncedSnapshots(s, NOW)!;
       const oct = list.at(-1)!;
       assert.deepEqual(oct.breakdown, {
-        EG: { cashEGP: 1000, goldEGP: 6000, currenciesEGP: 0 },
-        SA: { cashEGP: 1250, goldEGP: 0, currenciesEGP: 0 },
-        liabilitiesEGP: 0,
+        EG: { cashEGP: 1000, goldEGP: 6000, currenciesEGP: 0, liabilitiesEGP: 0 },
+        SA: { cashEGP: 1250, goldEGP: 0, currenciesEGP: 0, liabilitiesEGP: 0 },
       });
       assert.deepEqual(oct.ratesSnapshot, { SAR_EGP: 12.5, USD_EGP: 50 });
       assert.ok(list.every((p) => p.breakdown && p.ratesSnapshot));
@@ -5104,41 +5114,9 @@ describe('hydration fails closed', () => {
 });
 
 // --- Phase B test oracle ---------------------------------------------------------
-// The oracle is the FROZEN v7 code run on v7 states (tests/legacy). These tests prove (1) the frozen
-// copy is faithful to the live v7 code while that code is still unchanged, and (2) the oracle's
-// own numbers are right, by hand.
-
-describe('v7 oracle: the frozen copy is faithful', () => {
-  const fixtures: [string, ReturnType<typeof richV7>][] = [['rich', richV7()], ['example seed', exampleSeedV7()]];
-  const local = localSeedV7();
-  if (local) fixtures.push(['local seed', local]);
-
-  for (const [name, state] of fixtures) {
-    it(`frozen selectors, planning and analytics equal the live ones on the ${name} fixture`, () => {
-      const live = state as unknown as FinanceState;
-      for (const a of state.accounts) assert.equal(legacySel.accountBalance(state, a.id), sel.accountBalance(live, a.id));
-      assert.deepEqual(legacySel.liquidByCurrency(state), sel.liquidByCurrency(live));
-      assert.equal(legacySel.liquidTotalEGP(state), sel.liquidTotalEGP(live));
-      assert.equal(legacySel.holdingsTotalEGP(state), sel.holdingsTotalEGP(live));
-      assert.equal(legacySel.liabilitiesTotalEGP(state), sel.liabilitiesTotalEGP(live));
-      assert.equal(legacySel.netWorthEGP(state), sel.netWorthEGP(live));
-      assert.deepEqual(legacySel.netWorthByLocation(state), sel.netWorthByLocation(live));
-      assert.deepEqual(legacySel.unassignedByCurrency(state), sel.unassignedByCurrency(live));
-      for (const month of ['2026-08', '2026-09', '2026-10']) {
-        assert.deepEqual(legacySel.monthSummary(state, month), sel.monthSummary(live, month));
-        assert.deepEqual(legacySel.monthFlows(state, month), sel.monthFlows(live, month));
-        assert.deepEqual(legacyPlan.planProgress(state, month), planning.planProgress(live, month));
-      }
-      for (const f of state.funds) {
-        assert.equal(legacySel.fundCurrent(state, f.id), sel.fundCurrent(live, f.id));
-        assert.equal(legacySel.fundProgress(state, f.id), sel.fundProgress(live, f.id));
-      }
-      const query = { period: legacyAnalytics.resolvePeriod(state, 'sinceStart', ORACLE_NOW), currency: 'SAR' as const, includeOneTime: true };
-      assert.deepEqual(legacyAnalytics.periodTotals(state, query), analytics.periodTotals(live, query));
-      assert.deepEqual(legacyAnalytics.runway(state, 'EGP', ORACLE_NOW), analytics.runway(live, 'EGP', ORACLE_NOW));
-    });
-  }
-});
+// The oracle is the FROZEN v7 code run on v7 states (tests/legacy). These tests prove the oracle's own
+// numbers are right, by hand. (Its frozen copy was checked equal to the live v7 code in the commit that
+// added it, before the live code started to change.)
 
 describe('v7 oracle: report on the rich fixture (hand-checked numbers)', () => {
   const report = oracleReport(richV7(), ORACLE_NOW);
@@ -5363,5 +5341,62 @@ describe('rate snapshots are immutable and deduplicated', () => {
     assert.equal(snapshotById([...existing, changed.snapshot], changed.snapshot.id), changed.snapshot);
     assert.equal(snapshotById(existing, 'rs-missing'), undefined);
     assert.ok(sameTable(a, sameButReordered) && !sameTable(a, changed.snapshot));
+  });
+});
+
+// --- v7 → v8, step 1: countries ------------------------------------------------------
+
+describe('v7 → v8: countries, and every v7 number is unchanged', () => {
+  const fixtures: [string, ReturnType<typeof richV7>][] = [['rich', richV7()], ['example seed', exampleSeedV7()]];
+  const local = localSeedV7();
+  if (local) fixtures.push(['local seed', local]);
+  const migrate = (v7: ReturnType<typeof richV7>) => migratePersistedState(v7, 7, MIGRATION_CTX).state;
+
+  for (const [name, v7] of fixtures) {
+    it(`the ${name} fixture reports exactly the numbers the v7 oracle does`, () => {
+      assert.deepEqual(diffReports(oracleReport(v7, ORACLE_NOW), reportV8(migrate(v7), ORACLE_NOW)), []);
+    });
+  }
+
+  it('locations become country codes; a missing holding location and every liability are Egypt, as v7 treated them', () => {
+    const v8 = migrate(richV7());
+    assert.deepEqual(v8.accounts.map((a) => [a.id, a.country]), [['a-egp', 'EG'], ['a-sar-eg', 'EG'], ['a-sar-sa', 'SA'], ['a-usd', 'EG'], ['a-old', 'EG']]);
+    assert.deepEqual(v8.holdings.map((h) => [h.id, h.country]), [['h-gold-1', 'EG'], ['h-gold-2', 'EG'], ['h-gold-3', 'SA'], ['h-usd', 'SA']]);
+    assert.deepEqual(v8.liabilities.map((l) => l.country), ['EG']);
+    assert.ok(v8.accounts.every((a) => !('location' in a)) && v8.holdings.every((h) => !('location' in h)));
+    // 90,500 in Saudi (cash 57,500 + gold 18,000 + USD 15,000) and 150,000 in Egypt net of the 45,000 loan.
+    const byCountry = sel.netWorthByCountry(v8);
+    assert.deepEqual(byCountry, { EG: 150000, SA: 90500 });
+    approx(Object.values(byCountry).reduce((a, b) => a + b, 0), sel.netWorthEGP(v8));
+  });
+
+  it('net-worth snapshots keep their numbers; the old liabilities total moves into Egypt', () => {
+    const v8 = migrate(richV7());
+    assert.deepEqual(v8.netWorthSnapshots.find((s) => s.month === '2026-09')!.breakdown, {
+      EG: { cashEGP: 120000, goldEGP: 200000, currenciesEGP: 0, liabilitiesEGP: 54400 },
+      SA: { cashEGP: 50000, goldEGP: 20000, currenciesEGP: 14400, liabilitiesEGP: 0 },
+    });
+    assert.equal(v8.netWorthSnapshots.find((s) => s.month === '2026-08')!.breakdown, undefined);
+  });
+
+  it('the country must be in the registry; a gold purchase takes the paying account\'s country', () => {
+    const ctx = makeCtx();
+    const s = { ...emptyState(), accounts: [account('sa', 'SAR', 10000, 'SA')] };
+    assert.throws(() => ops.addAccount(s, { name: 'x', type: 'cash', currency: 'EGP', openingBalance: 0, country: 'XX' }, ctx), { code: 'UNKNOWN_COUNTRY' });
+    assert.throws(() => ops.addLiability(s, { name: 'x', principal: 1, currency: 'EGP', startDate: '2026-01-01', country: 'XX' }, ctx), { code: 'UNKNOWN_COUNTRY' });
+    const bought = apply(s, ops.buyGold(s, { accountId: 'sa', amount: 1000, date: '2026-10-01', holding: { name: 'g', weightGrams: 1, karat: 24 } }, ctx));
+    assert.equal(bought.holdings[0].country, 'SA');
+    // An edit keeps the holding's own country unless one is given.
+    const edited = apply(bought, ops.updateGoldPurchase(bought, bought.transactions[0].id, { accountId: 'sa', amount: 900, date: '2026-10-01', holding: { name: 'g', weightGrams: 1, karat: 24 } }, ctx));
+    assert.equal(edited.holdings[0].country, 'SA');
+  });
+
+  it('a third country is data-only: the registry decides which countries lists show', () => {
+    const registry = { ...COUNTRY_REGISTRY, KW: { code: 'KW', nameAr: 'الكويت', defaultCurrency: 'KWD' } };
+    const s = { ...emptyState(), accounts: [account('kw', 'EGP', 100, 'KW')] };
+    assert.deepEqual(sel.countriesInUse(s, registry), ['EG', 'SA', 'KW']);
+    // Data using a country the registry doesn't know yet still shows (as its code) instead of crashing.
+    assert.deepEqual(sel.countriesInUse(s), ['EG', 'SA', 'KW']);
+    assert.deepEqual(Object.keys(sel.netWorthBreakdown(s)), ['EG', 'SA', 'KW']);
   });
 });

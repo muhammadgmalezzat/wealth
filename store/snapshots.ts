@@ -58,10 +58,11 @@ export function missingPastSnapshots(state: State, now: Date): NetWorthSnapshot[
   return result;
 }
 
+const PARTS = ['cashEGP', 'goldEGP', 'currenciesEGP', 'liabilitiesEGP'] as const;
+
 const sameBreakdown = (a: NetWorthBreakdown, b: NetWorthBreakdown) =>
-  Math.abs(a.liabilitiesEGP - b.liabilitiesEGP) < EPSILON &&
-  (['EG', 'SA'] as const).every((where) =>
-    (['cashEGP', 'goldEGP', 'currenciesEGP'] as const).every((part) => Math.abs(a[where][part] - b[where][part]) < EPSILON)
+  [...new Set([...Object.keys(a), ...Object.keys(b)])].every((country) =>
+    PARTS.every((part) => Math.abs((a[country]?.[part] ?? 0) - (b[country]?.[part] ?? 0)) < EPSILON)
   );
 
 // Whether a stored snapshot already says what the live figures say (and carries the breakdown

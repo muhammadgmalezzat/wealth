@@ -13,7 +13,8 @@ import { useFinanceStore } from '@/store/useFinanceStore';
 import { confirmAction } from '@/utils/dialogs';
 import { runAction } from '@/utils/runAction';
 
-import { holdingTitle, LOCATION_LABELS, signedDifference } from './assetsUi';
+import { countryName } from '@/constants/countries';
+import { holdingTitle, signedDifference } from './assetsUi';
 
 interface HoldingSheetProps {
   holding: Holding;
@@ -75,7 +76,7 @@ function details(state: FinanceState, holding: Holding) {
           { label: 'العيار', value: `عيار ${holding.karat}` },
         ]
       : [{ label: 'الكمية', value: formatMoney(holding.quantity, holding.currency) }]),
-    { label: 'المكان', value: LOCATION_LABELS[holding.location ?? 'EG'] },
+    { label: 'المكان', value: countryName(holding.country) },
   ];
   if (holding.purchaseCostEGP > 0) {
     rows.push({ label: 'تكلفة الشراء', value: formatMoney(holding.purchaseCostEGP, 'EGP') });

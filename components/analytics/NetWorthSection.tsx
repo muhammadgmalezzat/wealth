@@ -5,6 +5,7 @@ import { AppText } from '@/components/ui/AppText';
 import { Money } from '@/components/ui/Money';
 import { Segment } from '@/components/ui/Segment';
 import { colors, space, type as typeScale } from '@/constants/theme';
+import { COUNTRY_OPTIONS } from '@/components/ui/countryOptions';
 import type { DisplayCurrency, NetWorthLocation, NetWorthSeries } from '@/store/analytics';
 
 import { chartAxis, compactNumber, monthShort } from './analyticsUi';
@@ -13,11 +14,7 @@ import { ChartCard, EmptyNote, LegendDot, LegendRow, NOT_ENOUGH_DATA, useMeasure
 const Y_AXIS_WIDTH = 42;
 const CHART_HEIGHT = 190;
 
-const LOCATIONS: { label: string; value: NetWorthLocation }[] = [
-  { label: 'الكل', value: 'all' },
-  { label: 'مصر', value: 'EG' },
-  { label: 'السعودية', value: 'SA' },
-];
+const LOCATIONS: { label: string; value: NetWorthLocation }[] = [{ label: 'الكل', value: 'all' }, ...COUNTRY_OPTIONS];
 
 interface NetWorthSectionProps {
   series: NetWorthSeries;

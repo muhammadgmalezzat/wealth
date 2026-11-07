@@ -10,8 +10,9 @@ interface Synced {
   updatedAt: string;
 }
 
-// Country the money or asset physically sits in.
-export type Location = 'EG' | 'SA';
+// Country the money or asset physically sits in: an ISO 3166-1 alpha-2 code from the country
+// registry (constants/countries.ts).
+export type CountryCode = string;
 
 export type Bucket = 'essentials' | 'lifestyle' | 'giving' | 'income';
 export type ExpenseBucket = Exclude<Bucket, 'income'>;
@@ -25,7 +26,7 @@ export interface Account extends Synced {
   openingBalance: number;
   // The date openingBalance refers to.
   openingDate?: string;
-  location: Location;
+  country: CountryCode;
   createdAt: string;
   archived?: boolean;
 }
@@ -147,7 +148,7 @@ export interface GoldHolding extends Synced {
   karat: GoldKarat;
   purchaseCostEGP: number;
   purchaseDate?: string;
-  location?: Location; // treated as 'EG' when missing
+  country: CountryCode;
   note?: string;
 }
 
@@ -159,7 +160,7 @@ export interface CurrencyHolding extends Synced {
   quantity: number;
   purchaseCostEGP: number;
   purchaseDate?: string;
-  location?: Location; // treated as 'EG' when missing
+  country: CountryCode;
   note?: string;
 }
 
@@ -173,6 +174,8 @@ export interface Liability extends Synced {
   monthlyPayment?: number;
   startDate: string;
   notes?: string;
+  // Where the debt is owed; it is subtracted from that country's net worth.
+  country: CountryCode;
 }
 
 export type RecurringKind = 'income' | 'expense' | 'transfer';
@@ -247,20 +250,17 @@ export interface MonthlyPlan extends Synced {
 // recomputed from what existed at the month's end, valued at the rates/prices of `takenAt`
 // (there is no price history).
 // One per month; the id derives from the month (nw-YYYY-MM).
-// What net worth is made of, in EGP, per location (Egypt / Saudi): cash in accounts, gold, and
-// currency holdings. Liabilities have no location and are subtracted from Egypt, so
-// EG + SA - liabilitiesEGP is the net worth.
+// What net worth is made of, in EGP, per country: cash in accounts, gold, currency holdings, and
+// the liabilities owed there. cash + gold + currencies - liabilities, summed over the countries,
+// is the net worth.
 export interface LocationBreakdown {
   cashEGP: number;
   goldEGP: number;
   currenciesEGP: number;
-}
-
-export interface NetWorthBreakdown {
-  EG: LocationBreakdown;
-  SA: LocationBreakdown;
   liabilitiesEGP: number;
 }
+
+export type NetWorthBreakdown = Record<CountryCode, LocationBreakdown>;
 
 export interface NetWorthSnapshot extends Synced {
   id: string;

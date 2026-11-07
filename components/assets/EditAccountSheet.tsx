@@ -8,7 +8,8 @@ import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { Segment } from '@/components/ui/Segment';
 import { space } from '@/constants/theme';
 import { accountBalance, openingBalanceForCurrentBalance } from '@/store/selectors';
-import type { Account, Location } from '@/store/types';
+import { COUNTRY_OPTIONS } from '@/components/ui/countryOptions';
+import type { Account, CountryCode } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { confirmAction } from '@/utils/dialogs';
 import { runAction } from '@/utils/runAction';
@@ -24,7 +25,7 @@ interface EditAccountSheetProps {
 export function EditAccountSheet({ account, onClose }: EditAccountSheetProps) {
   const state = useFinanceStore();
   const [name, setName] = useState(account.name);
-  const [location, setLocation] = useState<Location>(account.location);
+  const [location, setLocation] = useState<CountryCode>(account.country);
   const [balance, setBalance] = useState(String(Math.round(accountBalance(state, account.id) * 100) / 100));
 
   const handleSave = () => {
@@ -32,7 +33,7 @@ export function EditAccountSheet({ account, onClose }: EditAccountSheetProps) {
       state.updateAccount({
         ...account,
         name: name.trim(),
-        location,
+        country: location,
         openingBalance: openingBalanceForCurrentBalance(state, account.id, parseFloat(balance)),
       })
     );
@@ -61,11 +62,8 @@ export function EditAccountSheet({ account, onClose }: EditAccountSheetProps) {
         <FormInput value={name} onChangeText={setName} />
       </FormField>
       <FormField label="المكان">
-        <Segment<Location>
-          options={[
-            { label: 'مصر', value: 'EG' },
-            { label: 'السعودية', value: 'SA' },
-          ]}
+        <Segment<CountryCode>
+          options={COUNTRY_OPTIONS}
           value={location}
           onChange={setLocation}
         />

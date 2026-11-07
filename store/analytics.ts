@@ -27,8 +27,8 @@ import type {
   CurrencyCode,
   ExpenseBucket,
   FinanceState,
+  CountryCode,
   GoldKarat,
-  Location,
   NetWorthBreakdown,
   RatesSnapshot,
   Transaction,
@@ -591,7 +591,7 @@ export function spendingBreakdown(state: State, query: AnalyticsQuery): Spending
 
 // --- 4. Net worth over time ---------------------------------------------------------------
 
-export type NetWorthLocation = 'all' | Location;
+export type NetWorthLocation = 'all' | CountryCode;
 
 export interface NetWorthPoint {
   month: string;
@@ -616,13 +616,13 @@ export interface NetWorthSeries {
 // Each snapshot's figures are in EGP at the rates it was valued at; showing them in SAR uses
 // those same rates (today's for the current month and for snapshots that didn't keep theirs).
 function breakdownPart(b: NetWorthBreakdown, location: NetWorthLocation) {
-  const parts = location === 'all' ? [b.EG, b.SA] : [b[location]];
+  const parts = location === 'all' ? Object.values(b) : b[location] ? [b[location]] : [];
   return {
     cash: sum(parts.map((p) => p.cashEGP)),
     gold: sum(parts.map((p) => p.goldEGP)),
     currencies: sum(parts.map((p) => p.currenciesEGP)),
-    // Liabilities are Egypt's.
-    liabilities: location === 'SA' ? 0 : b.liabilitiesEGP,
+    // Liabilities belong to the country they are owed in.
+    liabilities: sum(parts.map((p) => p.liabilitiesEGP)),
   };
 }
 
@@ -696,7 +696,7 @@ export interface GoldRow {
 export interface MoneyMap {
   liquid: LiquidRow[];
   liquidTotal: number;
-  byLocation: { location: Location; cash: number; gold: number; currencies: number; total: number }[];
+  byLocation: { location: CountryCode; cash: number; gold: number; currencies: number; total: number }[];
   gold: { rows: GoldRow[]; grams: number; value: number; cost: number; pnl: number };
   netWorth: number;
   // Gold's share of net worth (0..1); null when net worth isn't positive.
@@ -717,7 +717,7 @@ export function moneyMap(state: State, currency: DisplayCurrency): MoneyMap {
     }));
 
   const breakdown = netWorthBreakdown(state);
-  const byLocation = (['EG', 'SA'] as Location[]).map((location) => {
+  const byLocation = Object.keys(breakdown).map((location) => {
     const b = breakdown[location];
     return {
       location,
