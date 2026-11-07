@@ -1,9 +1,8 @@
-import { DEFAULT_RATES } from '@/constants/currencies';
-import { DEFAULT_TRACKING_START_DATE, GOLD_PRICE_21K, GOLD_PRICE_24K } from '@/constants/market';
-import { fromEGP, rateToEGP, toEGP } from '@/utils/currency';
+import { DEFAULT_RATES, DEFAULT_TRACKING_START_DATE, GOLD_PRICE_21K, GOLD_PRICE_24K } from './legacy/constants.v7';
+import { fromEGP, rateToEGP, toEGP } from './legacy/currency.v7';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from './defaultCategories';
-import { holdingValueEGP, liquidTotalEGP } from './selectors';
-import { missingPastSnapshots } from './snapshots';
+import { holdingValueEGP, liquidTotalEGP } from './legacy/selectors.v7';
+import { missingPastSnapshots } from './legacy/snapshots.v7';
 import type {
   Account,
   Category,
@@ -22,7 +21,7 @@ import type {
   Settings,
   Tombstone,
   Transaction,
-} from './types';
+} from './legacy/types.v7';
 
 // Pure, deterministic migrations (no RN imports) so they run in Node tests.
 //   v0: pre-Zustand bare JSON — same shape as v1.

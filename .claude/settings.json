@@ -18,8 +18,12 @@
       "Bash(node __TRACKED_VAR__/bundlePkgs.cjs __TRACKED_VAR__/export7/_expo/static/js/android/entry-9327ae0487675df62f801f231b425436.hbc.map)",
       "Bash(npm explain *)",
       "Bash(git add *)",
-"Bash(git commit *)"
+      "Bash(grep -n \"deny\\\\|git commit\\\\|\\\\\"ask\\\\\"\" \"C:/Users/YOGA/.claude/settings.json\" 2>/dev/null | head; ls \"C:/Users/YOGA/.claude/\" | head -20; grep -n \"deny\\\\|git commit\" .claude/settings.local.json 2>/dev/null | head -5)",
+      "Read(//c/Users/YOGA/.claude/**)"
     ],
+    "ask": [
+    "Bash(git commit:*)"
+  ],
     "additionalDirectories": [
       "P:\\personal projects\\wealth\\docs"
     ]
