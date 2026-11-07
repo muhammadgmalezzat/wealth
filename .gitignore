@@ -48,3 +48,6 @@ store/seed.local.ts
 # personal backups exported from the app (contain real financial data)
 wealth-backup-*.json
 *.backup.json
+
+# local working data (real backup copies for migration dry-runs); never commit
+.local/
