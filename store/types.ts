@@ -147,22 +147,54 @@ export interface Fund extends Synced {
   nextDueDate?: string;
 }
 
-export interface FundMovement extends Synced {
+// Why a reservation changed. 'reserve' / 'release': the user put money aside / gave it back; 'reallocate': one
+// fund → another on the same account (a pair sharing `groupId`); 'follow_transfer' / 'follow_exchange': the
+// reservation moved with a transfer, or was converted by an exchange at its recorded amounts (pairs sharing
+// `groupId` = the transaction id); 'spend': a sinking-fund payment consumed it; 'cover': released to cover
+// spending or an edit; 'adjust': a migrated v7 movement, or a repair.
+export type ReservationKind =
+  | 'reserve'
+  | 'release'
+  | 'reallocate'
+  | 'follow_transfer'
+  | 'follow_exchange'
+  | 'spend'
+  | 'cover'
+  | 'adjust';
+
+// Money of one account set aside for one fund. `amount` is signed and in the ACCOUNT's currency (a reservation
+// never has a currency of its own), so 1,000 SAR reserved for an EGP fund stays 1,000 SAR whatever the rates do;
+// only its value in the fund's currency moves. reservation(fund, account) = Σ amount, never stored.
+export interface ReservationMovement extends Synced {
   id: string;
   fundId: string;
-  // In `currency`: positive = allocate, negative = withdraw. It never changes with the rates;
-  // only its value in the fund's currency does (see fundAllocated).
+  accountId: string;
   amount: number;
-  // The currency `amount` is in, and so the currency of the money that was set aside. Missing =
-  // the fund's currency, covered by whichever money is available (matching currency first, then
-  // the others at today's rate): every movement saved before currencies existed, and the fund
-  // edit sheet's adjustments.
-  currency?: CurrencyCode;
+  kind: ReservationKind;
+  groupId?: string;
+  sourceTransactionId?: string;
   date: string;
   note?: string;
-  // The rate snapshot in force when the movement was made; used to show it in another currency in
-  // history (plan, review, month totals).
+  // The rate snapshot in force when it was made, to show it in another currency in history (plan, review,
+  // "saved this month").
   rateSnapshotId: string;
+}
+
+export type UnresolvedReason = 'ambiguous' | 'insufficient' | 'negative' | 'no_account';
+
+// Migration only: a v7 fund movement that could not be assigned to ONE account without guessing. It still counts
+// toward its fund's total (in `currency`) but never against any account's available money, until the user
+// resolves it (picks an account). Empty after resolution.
+export interface UnresolvedMovement extends Synced {
+  id: string;
+  fundId: string;
+  // In `currency`, signed.
+  amount: number;
+  currency: CurrencyCode;
+  date: string;
+  note?: string;
+  rateSnapshotId: string;
+  reason: UnresolvedReason;
 }
 
 // An amount in its own currency.
@@ -403,7 +435,8 @@ export type SyncEntity =
   | 'category'
   | 'transaction'
   | 'fund'
-  | 'fundMovement'
+  | 'reservationMovement'
+  | 'unresolvedMovement'
   | 'holding'
   | 'liability'
   | 'recurringRule'
@@ -427,7 +460,9 @@ export interface FinanceState {
   categories: Category[];
   transactions: Transaction[];
   funds: Fund[];
-  fundMovements: FundMovement[];
+  // Account-backed reservations (replaces the v7 fundMovements) and the migration's quarantine.
+  reservationMovements: ReservationMovement[];
+  unresolvedMovements: UnresolvedMovement[];
   holdings: Holding[];
   liabilities: Liability[];
   recurringRules: RecurringRule[];

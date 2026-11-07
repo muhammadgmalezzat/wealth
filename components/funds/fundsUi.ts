@@ -6,7 +6,8 @@ import {
   fundsByPriority,
   fundStatus,
 } from '@/store/selectors';
-import type { FinanceState, Fund, FundMovement } from '@/store/types';
+import type { FundMovementRow } from '@/store/selectors';
+import type { FinanceState, Fund } from '@/store/types';
 import { toEGP } from '@/utils/currency';
 
 // Pure UI helpers for the Funds tab and fund detail (no React Native; unit-tested).
@@ -60,10 +61,10 @@ export function fundNextStep(state: FinanceState, fund: Fund, now: Date = new Da
 
 export type MovementKind = 'allocation' | 'withdrawal' | 'payment';
 
-// Sinking payments are withdrawals noted "اتدفعت: {fund}" (store/operations paySinkingFund).
-export function movementKind(movement: Pick<FundMovement, 'amount' | 'note'>): MovementKind {
-  if (movement.amount >= 0) return 'allocation';
-  return movement.note?.startsWith('اتدفعت') ? 'payment' : 'withdrawal';
+// A sinking-fund payment is a 'spend' reservation movement; any other negative movement is a withdrawal.
+export function movementKind(movement: Pick<FundMovementRow, 'amount' | 'kind'>): MovementKind {
+  if (movement.kind === 'spend') return 'payment';
+  return movement.amount >= 0 ? 'allocation' : 'withdrawal';
 }
 
 export interface PercentDisplay {

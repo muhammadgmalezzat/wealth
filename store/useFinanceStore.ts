@@ -16,7 +16,6 @@ import type {
   CurrencyCode,
   FinanceState,
   Fund,
-  FundMovement,
   Holding,
   Liability,
   RecurringRule,
@@ -58,7 +57,8 @@ export function dataOf(s: FinanceState): FinanceState {
     categories: s.categories,
     transactions: s.transactions,
     funds: s.funds,
-    fundMovements: s.fundMovements,
+    reservationMovements: s.reservationMovements,
+    unresolvedMovements: s.unresolvedMovements,
     holdings: s.holdings,
     liabilities: s.liabilities,
     recurringRules: s.recurringRules,
@@ -108,8 +108,6 @@ interface FinanceActions {
   // `currency`: the currency of `amount` (the fund's when omitted).
   allocateToFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode) => void;
   withdrawFromFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode) => void;
-  updateFundMovement: (movement: ops.Editable<FundMovement>) => void;
-  deleteFundMovement: (id: string) => void;
 
   addHolding: (input: ops.NewHolding) => void;
   updateHolding: (holding: ops.Editable<Holding>) => void;
@@ -247,8 +245,6 @@ export const useFinanceStore = create<FinanceStore>()(
         set(ops.allocateToFund(get(), fundId, amount, note, ctx, currency)),
       withdrawFromFund: (fundId, amount, note, currency) =>
         set(ops.withdrawFromFund(get(), fundId, amount, note, ctx, currency)),
-      updateFundMovement: (movement) => set(ops.updateFundMovement(get(), movement, ctx)),
-      deleteFundMovement: (id) => set(ops.deleteFundMovement(get(), id, ctx)),
 
       addHolding: (input) => set(ops.addHolding(get(), input, ctx)),
       updateHolding: (holding) => set(ops.updateHolding(get(), holding, ctx)),

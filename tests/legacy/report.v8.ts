@@ -80,7 +80,7 @@ export function reportV8(state: FinanceState, now: Date): OracleReport {
       cash: { ...sel.fundCashByCurrency(state, fund.id) },
     };
   }
-  for (const m of state.fundMovements) {
+  for (const m of sel.fundMovementRows(state)) {
     report.movements[m.id] = Object.fromEntries(CURRENCIES.map((c) => [c, sel.movementAmountIn(state, m, c)]));
   }
 

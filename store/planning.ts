@@ -4,7 +4,15 @@ import { fromDateKey, monthOf, shiftMonth, toDateKey } from '@/utils/dates';
 import { feeCategoryId, FIXED_CATEGORY_IDS } from './defaultCategories';
 import type { PlanInput } from './operations';
 import { isLive, monthlyEquivalent } from './recurring';
-import { fundsByPriority, fundSuggestedMonthly, incomeExpenseRows, movementAmountIn, transactionAmountIn } from './selectors';
+import {
+  countsAsSaving,
+  fundMovementRows,
+  fundsByPriority,
+  fundSuggestedMonthly,
+  incomeExpenseRows,
+  movementAmountIn,
+  transactionAmountIn,
+} from './selectors';
 import { daysInMonth, daysLeftInMonth } from './shared';
 import type {
   CurrencyCode,
@@ -296,8 +304,8 @@ export function planProgress(state: State, month: string): PlanProgress | null {
       fundId: c.fundId,
       planned: c.amount,
       allocated: sumIn(
-        state.fundMovements
-          .filter((m) => m.fundId === c.fundId && monthOf(m.date) === month)
+        fundMovementRows(state)
+          .filter((m) => m.fundId === c.fundId && monthOf(m.date) === month && countsAsSaving(m.kind))
           .map((m) => movementAmountIn(state, m, plan.currency)),
         plan.currency
       ),

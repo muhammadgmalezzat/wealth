@@ -20,10 +20,12 @@ import {
   type FinanceField,
 } from './errors';
 import {
+  accountAvailable,
+  accountBalance,
+  accountReserved,
   fundAllocated,
-  fundAllocatedIn,
+  reservation,
   SINKING_CYCLE_MONTHS,
-  unassignedSummary,
   withdrawalPlan,
   type FundAmount,
 } from './selectors';
@@ -38,7 +40,8 @@ import type {
   CurrencyCode,
   FinanceState,
   Fund,
-  FundMovement,
+  ReservationKind,
+  ReservationMovement,
   GoldHolding,
   GoldKarat,
   Holding,
@@ -731,13 +734,15 @@ export function updateFund(state: State, fund: Editable<Fund>, ctx: OpContext): 
   return { funds: replaceById(state.funds, normalized, 'fund') };
 }
 
-// Deleting a fund releases its allocations back to unassigned money.
+// Deleting a fund releases its reservations (the money becomes available again).
 export function deleteFund(state: State, id: string, ctx: OpContext): Patch {
   requireById(state.funds, id, 'fund');
-  const movementIds = state.fundMovements.filter((m) => m.fundId === id).map((m) => m.id);
+  const reservationIds = state.reservationMovements.filter((m) => m.fundId === id).map((m) => m.id);
+  const unresolvedIds = state.unresolvedMovements.filter((m) => m.fundId === id).map((m) => m.id);
   return {
     funds: state.funds.filter((f) => f.id !== id),
-    fundMovements: state.fundMovements.filter((m) => m.fundId !== id),
+    reservationMovements: state.reservationMovements.filter((m) => m.fundId !== id),
+    unresolvedMovements: state.unresolvedMovements.filter((m) => m.fundId !== id),
     monthlyPlans: state.monthlyPlans.map((p) =>
       p.fundContributions.some((c) => c.fundId === id)
         ? stamp({ ...p, fundContributions: p.fundContributions.filter((c) => c.fundId !== id) }, ctx)
@@ -745,30 +750,9 @@ export function deleteFund(state: State, id: string, ctx: OpContext): Patch {
     ),
     tombstones: [
       ...logDeletes(state, 'fund', [id], ctx),
-      ...movementIds.map((movementId) => tombstone('fundMovement', movementId, ctx)),
+      ...reservationIds.map((movementId) => tombstone('reservationMovement', movementId, ctx)),
+      ...unresolvedIds.map((movementId) => tombstone('unresolvedMovement', movementId, ctx)),
     ],
-  };
-}
-
-function newMovement(
-  rateSnapshotId: string,
-  fundId: string,
-  amount: number,
-  note: string | undefined,
-  ctx: OpContext,
-  currency?: CurrencyCode
-): FundMovement {
-  return {
-    updatedAt: ctx.now().toISOString(),
-    id: ctx.newId(),
-    fundId,
-    amount,
-    // Only when the money's currency was chosen; otherwise the movement is in the fund's currency
-    // and covered by whichever money is available (see unassignedByCurrency).
-    ...(currency ? { currency } : {}),
-    date: toDateKey(ctx.now()),
-    rateSnapshotId,
-    ...(note ? { note } : {}),
   };
 }
 
@@ -776,52 +760,146 @@ function assertCurrency(currency: CurrencyCode | undefined) {
   if (currency !== undefined && !isKnownCurrency(currency)) fail('UNKNOWN_CURRENCY');
 }
 
-// Whether the new movements leave more money short (in EGP, per currency) than before.
-function worsensShortfall(state: State, added: FundMovement[]): boolean {
-  const before = unassignedSummary(state).deficitEGP;
-  const after = unassignedSummary({ ...state, fundMovements: [...state.fundMovements, ...added] }).deficitEGP;
-  return after > before + 0.005;
+// --- Reservations -----------------------------------------------------------
+//
+// A reservation is money of ONE account set aside for a fund, in that account's currency (INV-2). The
+// operations below pick the account by default rules (no prompt) and keep every account's reservations within
+// what it holds: reserving more than is available is refused (Q13: release or reallocate first).
+
+function newReservation(
+  rateSnapshotId: string,
+  fundId: string,
+  accountId: string,
+  amount: number,
+  kind: ReservationKind,
+  note: string | undefined,
+  ctx: OpContext,
+  extra: { groupId?: string; sourceTransactionId?: string } = {}
+): ReservationMovement {
+  return {
+    updatedAt: ctx.now().toISOString(),
+    id: ctx.newId(),
+    fundId,
+    accountId,
+    amount,
+    kind,
+    ...extra,
+    date: toDateKey(ctx.now()),
+    rateSnapshotId,
+    ...(note ? { note } : {}),
+  };
 }
 
-// Sets `amount` of `currency` aside for the fund (the fund's currency when omitted).
+type ReservationState = Pick<State, 'accounts' | 'transactions' | 'reservationMovements'>;
+
+// Deterministic order: the account with the most of something first, then the oldest account, then the id.
+const byAmountDesc = (state: ReservationState, amountOf: (accountId: string) => number) => (a: Account, b: Account) =>
+  amountOf(b.id) - amountOf(a.id) || (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : 1);
+
+// Reserves `amount` of `currency` for the fund: on `accountId` when given, otherwise on the active accounts of that
+// currency with the most available money, split across them when one cannot hold it all (the last one takes the
+// rest). Never more than is available.
+function reserveFor(
+  state: ReservationState,
+  fundId: string,
+  amount: number,
+  currency: CurrencyCode,
+  note: string | undefined,
+  ctx: OpContext,
+  rateSnapshotId: string,
+  accountId?: string
+): ReservationMovement[] {
+  const candidates = state.accounts.filter((a) => a.currency === currency && !a.archived && (!accountId || a.id === accountId));
+  if (candidates.length === 0) fail('NO_ACCOUNT_IN_CURRENCY');
+  const available = (id: string) => Math.max(0, accountAvailable(state, id));
+  candidates.sort(byAmountDesc(state, available));
+  const moves: ReservationMovement[] = [];
+  let left = amount;
+  for (const account of candidates) {
+    if (left <= 0) break;
+    const take = Math.min(left, available(account.id));
+    if (take <= 0) continue;
+    moves.push(newReservation(rateSnapshotId, fundId, account.id, take, 'reserve', note, ctx));
+    left = money(left - take, currency);
+  }
+  if (left > 0) fail('RESERVE_EXCEEDS_AVAILABLE', { id: fundId });
+  return moves;
+}
+
+// Gives `amount` of `currency` back from the fund's reservations: the accounts where it is over-reserved first,
+// then the largest reservation. Never more than the fund has reserved in that currency.
+function releaseFrom(
+  state: ReservationState,
+  fundId: string,
+  amount: number,
+  currency: CurrencyCode,
+  note: string | undefined,
+  ctx: OpContext,
+  rateSnapshotId: string,
+  kind: ReservationKind = 'release',
+  accountId?: string
+): ReservationMovement[] {
+  const held = state.accounts.filter((a) => a.currency === currency && (!accountId || a.id === accountId) && reservation(state, fundId, a.id) > 0);
+  const overReserved = (id: string) => (accountReserved(state, id) > Math.max(0, accountBalance(state, id)) ? 1 : 0);
+  held.sort(
+    (a, b) =>
+      overReserved(b.id) - overReserved(a.id) ||
+      byAmountDesc(state, (id) => reservation(state, fundId, id))(a, b)
+  );
+  const moves: ReservationMovement[] = [];
+  let left = amount;
+  for (const account of held) {
+    if (left <= 0) break;
+    const take = Math.min(left, reservation(state, fundId, account.id));
+    if (take <= 0) continue;
+    moves.push(newReservation(rateSnapshotId, fundId, account.id, -take, kind, note, ctx));
+    left = money(left - take, currency);
+  }
+  if (left > 0) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
+  return moves;
+}
+
+// Sets `amount` of `currency` aside for the fund (the fund's currency when omitted), from the account with the
+// most available money, or from `accountId`. Refused when the accounts cannot cover it.
 export function allocateToFund(
   state: State,
   fundId: string,
   amount: number,
   note: string | undefined,
   ctx: OpContext,
-  currency?: CurrencyCode
+  currency?: CurrencyCode,
+  accountId?: string
 ): Patch {
-  requireById(state.funds, fundId, 'fund');
+  const fund = requireById(state.funds, fundId, 'fund');
   const value = fundMoney(state, fundId, amount, currency);
   assertPositive(value, 'amount');
   assertCurrency(currency);
   const use = snapshotForNow(state, ctx.now());
-  return { ...ratePatch(use), fundMovements: [...state.fundMovements, newMovement(use.id, fundId, value, note, ctx, currency)] };
+  const moves = reserveFor(state, fundId, value, currency ?? fund.currency, note, ctx, use.id, accountId);
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...moves] };
 }
 
-// Takes `amount` of `currency` out of the fund's cash in that currency (the fund's currency when
-// omitted, from its own-currency cash).
+// Takes `amount` of `currency` out of the fund's reservations (the fund's currency when omitted).
 export function withdrawFromFund(
   state: State,
   fundId: string,
   amount: number,
   note: string | undefined,
   ctx: OpContext,
-  currency?: CurrencyCode
+  currency?: CurrencyCode,
+  accountId?: string
 ): Patch {
   const fund = requireById(state.funds, fundId, 'fund');
   const value = fundMoney(state, fundId, amount, currency);
   assertPositive(value, 'amount');
   assertCurrency(currency);
-  if (value > fundAllocatedIn(state, fundId, currency ?? fund.currency)) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
   const use = snapshotForNow(state, ctx.now());
-  return { ...ratePatch(use), fundMovements: [...state.fundMovements, newMovement(use.id, fundId, -value, note, ctx, currency)] };
+  const moves = releaseFrom(state, fundId, value, currency ?? fund.currency, note, ctx, use.id, 'release', accountId);
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...moves] };
 }
 
-// Allocates to several funds at once. All or nothing: the money may not exceed what is
-// unassigned in its currency (an allocation without a currency is in its fund's currency and,
-// like data from before currencies, may use any currency's money).
+// Reserves for several funds at once. All or nothing: each reservation sees the ones before it, so the money
+// may not exceed what is available in its currency.
 export function allocateMany(
   state: State,
   rawAllocations: FundAmount[],
@@ -836,13 +914,18 @@ export function allocateMany(
     assertCurrency(currency);
   }
   const use = snapshotForNow(state, ctx.now());
-  const added = allocations.map(({ fundId, amount, currency }) => newMovement(use.id, fundId, amount, note, ctx, currency));
-  if (worsensShortfall(state, added)) fail('INSUFFICIENT_UNASSIGNED');
-  return { ...ratePatch(use), fundMovements: [...state.fundMovements, ...added] };
+  let draft: ReservationState = state;
+  const added: ReservationMovement[] = [];
+  for (const { fundId, amount, currency } of allocations) {
+    const fund = requireById(state.funds, fundId, 'fund');
+    const moves = reserveFor(draft, fundId, amount, currency ?? fund.currency, note, ctx, use.id);
+    added.push(...moves);
+    draft = { ...draft, reservationMovements: [...draft.reservationMovements, ...moves] };
+  }
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...added] };
 }
 
-// Withdraws from several funds at once. All or nothing: no fund may go below zero cash in any
-// currency.
+// Releases from several funds at once. All or nothing: no fund may go below zero in any currency.
 export function withdrawMany(
   state: State,
   rawWithdrawals: FundAmount[],
@@ -851,34 +934,27 @@ export function withdrawMany(
 ): Patch {
   const withdrawals = rawWithdrawals.map((w) => ({ ...w, amount: fundMoney(state, w.fundId, w.amount, w.currency) }));
   if (withdrawals.length === 0) fail('NOTHING_SELECTED');
-  const perFundCurrency = new Map<string, { fundId: string; currency: CurrencyCode; total: number }>();
   for (const { fundId, amount, currency } of withdrawals) {
-    const fund = requireById(state.funds, fundId, 'fund');
+    requireById(state.funds, fundId, 'fund');
     assertPositive(amount, 'amount');
     assertCurrency(currency);
-    const cur = currency ?? fund.currency;
-    const key = `${fundId}|${cur}`;
-    const entry = perFundCurrency.get(key) ?? { fundId, currency: cur, total: 0 };
-    entry.total += amount;
-    perFundCurrency.set(key, entry);
-  }
-  for (const { fundId, currency, total } of perFundCurrency.values()) {
-    if (total > fundAllocatedIn(state, fundId, currency) + 0.005) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
   }
   const use = snapshotForNow(state, ctx.now());
-  return {
-    ...ratePatch(use),
-    fundMovements: [
-      ...state.fundMovements,
-      ...withdrawals.map(({ fundId, amount, currency }) => newMovement(use.id, fundId, -amount, note, ctx, currency)),
-    ],
-  };
+  let draft: ReservationState = state;
+  const added: ReservationMovement[] = [];
+  for (const { fundId, amount, currency } of withdrawals) {
+    const fund = requireById(state.funds, fundId, 'fund');
+    const moves = releaseFrom(draft, fundId, amount, currency ?? fund.currency, note, ctx, use.id);
+    added.push(...moves);
+    draft = { ...draft, reservationMovements: [...draft.reservationMovements, ...moves] };
+  }
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...added] };
 }
-// Edits a fund's details and sets its cash allocation in one atomic patch. The allocation is
-// changed by an adjustment movement for the difference (a decrease comes out of the fund's cash
-// currency by currency, so it can be several). Increasing it may not leave more money short;
-// decreasing is always allowed (it only frees money).
-// Omitted optional fields keep their current values, except `deadline`, which is cleared.
+
+// Edits a fund's details and sets its cash allocation in one atomic patch. The allocation changes by reserving the
+// difference (an increase may not exceed what is available) or releasing it (the fund's own currency first, then
+// the others at today's rate: see withdrawalPlan). Omitted optional fields keep their current values, except
+// `deadline`, which is cleared.
 export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpContext): Patch {
   const fund = requireById(state.funds, fundId, 'fund');
   const { deadline: _previousDeadline, frequency, nextDueDate, ...rest } = fund;
@@ -900,22 +976,25 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
 
   const use = snapshotForNow(state, ctx.now());
   const change = money(cashAllocation - fundAllocated(state, fundId), fund.currency);
-  let adjustments: FundMovement[] = [];
+  let moves: ReservationMovement[] = [];
   if (change >= 0.005) {
-    // In the fund's currency, covered by any currency's money (like data from before currencies).
-    adjustments = [newMovement(use.id, fundId, change, 'تعديل الرصيد', ctx)];
-    if (worsensShortfall(state, adjustments)) fail('INSUFFICIENT_UNASSIGNED', { id: fundId });
+    moves = reserveFor(state, fundId, change, fund.currency, 'تعديل الرصيد', ctx, use.id);
   } else if (change <= -0.005) {
     const plan = withdrawalPlan(state, fundId, -change, fund.currency);
-    adjustments = plan.withdrawals.map((w) =>
-      newMovement(use.id, fundId, -fundMoney(state, fundId, w.amount, w.currency), 'تعديل الرصيد', ctx, w.currency)
-    );
-    if (plan.shortfall > 0.005) {
-      adjustments.push(newMovement(use.id, fundId, -money(plan.shortfall, fund.currency), 'تعديل الرصيد', ctx));
+    // What the fund's reservations cannot give (e.g. a migrated movement not yet assigned to an account).
+    if (plan.shortfall > 0.005) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
+    let draft: ReservationState = state;
+    for (const w of plan.withdrawals) {
+      const released = releaseFrom(draft, fundId, fundMoney(state, fundId, w.amount, w.currency), w.currency ?? fund.currency, 'تعديل الرصيد', ctx, use.id);
+      moves.push(...released);
+      draft = { ...draft, reservationMovements: [...draft.reservationMovements, ...released] };
     }
   }
-  const fundMovements = adjustments.length > 0 ? [...state.fundMovements, ...adjustments] : state.fundMovements;
-  return { ...(adjustments.length > 0 ? ratePatch(use) : {}), funds: replaceById(state.funds, updated, 'fund'), fundMovements };
+  return {
+    ...(moves.length > 0 ? ratePatch(use) : {}),
+    funds: replaceById(state.funds, updated, 'fund'),
+    reservationMovements: moves.length > 0 ? [...state.reservationMovements, ...moves] : state.reservationMovements,
+  };
 }
 
 export interface SinkingPayment {
@@ -928,9 +1007,9 @@ export interface SinkingPayment {
   note?: string;
 }
 
-// Records a sinking fund's bill as one atomic step: the expense transaction, a withdrawal of
-// the same value from the fund's cash (as much as it holds, the payment's currency first; any
-// excess comes out of unassigned money), and nextDueDate advanced by one cycle.
+// Records a sinking fund's bill as one atomic step: the expense transaction, a `spend` movement consuming the
+// fund's reservation on the paying account (as much as it holds there; the rest of the bill is paid from the
+// account's available money), and nextDueDate advanced by one cycle.
 export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpContext): Patch {
   const fund = requireById(state.funds, payment.fundId, 'fund');
   if (fund.type !== 'sinking') fail('NOT_A_SINKING_FUND', { id: fund.id });
@@ -959,11 +1038,17 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
       ctx
     )
   );
-  // Cash in the payment's own currency pays first (no conversion), then the fund's own currency
-  // and the others at today's rate.
-  const { withdrawals } = withdrawalPlan(draft, fund.id, payment.amount, account.currency);
-  for (const w of withdrawals) {
-    apply(withdrawFromFund(draft, fund.id, w.amount, `اتدفعت: ${fund.name}`, ctx, w.currency));
+  const paid = draft.transactions[0];
+  const use = snapshotForNow(draft, ctx.now());
+  const spent = Math.min(money(payment.amount, account.currency), reservation(draft, fund.id, account.id));
+  if (spent > 0) {
+    apply({
+      ...ratePatch(use),
+      reservationMovements: [
+        ...draft.reservationMovements,
+        newReservation(use.id, fund.id, account.id, -spent, 'spend', `اتدفعت: ${fund.name}`, ctx, { sourceTransactionId: paid.id }),
+      ],
+    });
   }
 
   const nextDue = addMonthsToDate(fund.nextDueDate, SINKING_CYCLE_MONTHS[fund.frequency]);
@@ -973,27 +1058,10 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
 
   return {
     transactions: draft.transactions,
-    fundMovements: draft.fundMovements,
+    reservationMovements: draft.reservationMovements,
     funds: draft.funds,
     settings: draft.settings,
     rateSnapshots: draft.rateSnapshots,
-  };
-}
-
-export function updateFundMovement(state: State, raw: Editable<FundMovement>, ctx: OpContext): Patch {
-  requireById(state.funds, raw.fundId, 'fund');
-  const movement = { ...raw, amount: fundMoney(state, raw.fundId, raw.amount, raw.currency) };
-  assertNumber(movement.amount, 'amount');
-  if (movement.amount === 0) fail('NOT_POSITIVE', { field: 'amount' });
-  assertDate(movement.date, 'date');
-  return { fundMovements: replaceById(state.fundMovements, stamp(movement, ctx), 'fundMovement') };
-}
-
-export function deleteFundMovement(state: State, id: string, ctx: OpContext): Patch {
-  requireById(state.fundMovements, id, 'fundMovement');
-  return {
-    fundMovements: state.fundMovements.filter((m) => m.id !== id),
-    tombstones: logDeletes(state, 'fundMovement', [id], ctx),
   };
 }
 
@@ -1690,7 +1758,8 @@ const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones' | 'rate
   { key: 'categories', entity: 'category' },
   { key: 'transactions', entity: 'transaction' },
   { key: 'funds', entity: 'fund' },
-  { key: 'fundMovements', entity: 'fundMovement' },
+  { key: 'reservationMovements', entity: 'reservationMovement' },
+  { key: 'unresolvedMovements', entity: 'unresolvedMovement' },
   { key: 'holdings', entity: 'holding' },
   { key: 'liabilities', entity: 'liability' },
   { key: 'recurringRules', entity: 'recurringRule' },

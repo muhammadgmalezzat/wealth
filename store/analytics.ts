@@ -8,10 +8,12 @@ import { formatMonthLabel, formatPercent } from '@/utils/formatters';
 import { CATEGORY_IDS } from './defaultCategories';
 import {
   currencyList,
+  countsAsSaving,
   fundCashByCurrency,
   fundCurrent,
   fundDueDate,
   fundLinkedValue,
+  fundMovementRows,
   fundProgress,
   fundsByPriority,
   feeExpenses,
@@ -189,7 +191,9 @@ function scan(state: State, period: Pick<Period, 'from' | 'to'>, currency: Displ
 // Net fund movements in the period (allocations minus withdrawals), as made.
 function fundsNet(state: State, period: Pick<Period, 'from' | 'to'>, currency: DisplayCurrency): number {
   return sumIn(
-    state.fundMovements.filter((m) => inPeriod(m.date, period)).map((m) => movementAmountIn(state, m, currency)),
+    fundMovementRows(state)
+      .filter((m) => inPeriod(m.date, period) && countsAsSaving(m.kind))
+      .map((m) => movementAmountIn(state, m, currency)),
     currency
   );
 }
@@ -895,7 +899,7 @@ export function fundsProjection(state: State, now: Date): FundProjection[] {
   const today = toDateKey(now);
   const window = Array.from({ length: RUNWAY_WINDOW }, (_, i) => shiftMonth(month, -(i + 1)));
   return fundsByPriority(state).map((fund) => {
-    const moves = state.fundMovements.filter((m) => m.fundId === fund.id);
+    const moves = fundMovementRows(state).filter((m) => m.fundId === fund.id && countsAsSaving(m.kind));
     const first = moves.map((m) => monthOf(m.date)).sort()[0];
     // The completed months the fund has existed in; a fund started this month is judged on it.
     const observed = first === undefined ? [] : window.filter((m) => m >= first);

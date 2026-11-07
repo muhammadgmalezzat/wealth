@@ -3,6 +3,8 @@ import { addIn, sumIn } from '@/utils/money';
 import { isReviewed } from './nextActions';
 import { planFor, planProgress, previousPlanMonth, type LineProgress } from './planning';
 import {
+  countsAsSaving,
+  fundMovementRows,
   fundProgress,
   fundsByPriority,
   incomeExpenseRows,
@@ -149,13 +151,13 @@ export function monthReview(
   // Each movement at its own rates, so a past month reads the same whatever today's rates are.
   const allocatedIn = (fund: Fund) =>
     sumIn(
-      state.fundMovements
-        .filter((m) => m.fundId === fund.id && monthOf(m.date) === month)
+      fundMovementRows(state)
+        .filter((m) => m.fundId === fund.id && monthOf(m.date) === month && countsAsSaving(m.kind))
         .map((m) => movementAmountIn(state, m, fundCurrency)),
       fundCurrency
     );
   const funds: ReviewFund[] = state.funds
-    .filter((f) => planned.has(f.id) || state.fundMovements.some((m) => m.fundId === f.id && monthOf(m.date) === month))
+    .filter((f) => planned.has(f.id) || fundMovementRows(state).some((m) => m.fundId === f.id && monthOf(m.date) === month && countsAsSaving(m.kind)))
     .sort((a, b) => a.priority - b.priority)
     .map((f) => ({ fundId: f.id, allocated: allocatedIn(f), planned: planned.get(f.id) ?? null }));
 

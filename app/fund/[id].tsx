@@ -32,6 +32,7 @@ import {
   fundProgress,
   fundRequiredMonthly,
   fundStatus,
+  fundMovementRows,
   holdingValue,
   linkableHoldings,
   movementValueInFund,
@@ -85,7 +86,7 @@ export default function FundDetailScreen() {
   const requiredMonthly = fundRequiredMonthly(state, fund.id, now);
   const step = fundNextStep(state, fund, now);
   const sinking = fund.type === 'sinking';
-  const movements = state.fundMovements
+  const movements = fundMovementRows(state)
     .map((m, index) => ({ m, index }))
     .filter(({ m }) => m.fundId === fund.id)
     // Newest first; movements recorded later on the same day come first.
@@ -263,8 +264,8 @@ export default function FundDetailScreen() {
                   trailing={
                     <Money
                       amount={m.amount}
-                      currency={m.currency ?? fund.currency}
-                      converted={m.currency && m.currency !== fund.currency ? { amount: movementValueInFund(state, m), currency: fund.currency } : undefined}
+                      currency={m.currency}
+                      converted={m.currency !== fund.currency ? { amount: movementValueInFund(state, m), currency: fund.currency } : undefined}
                       showSign
                       align="left"
                       tone={kind === 'allocation' ? 'positive' : kind === 'payment' ? 'muted' : 'default'}

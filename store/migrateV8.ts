@@ -4,6 +4,8 @@ import { roundMoney } from '@/utils/money';
 import { makeSnapshot, snapshotId, tableFromEgpRates, type RateQuality, type RateSnapshot, type RateTable } from '@/utils/rates';
 
 import { CATEGORY_IDS } from './defaultCategories';
+import { assertInvariants } from './invariants';
+import { accountBalance } from './selectors';
 import type { MigrationContext } from './migrations';
 import type { FinanceState } from './types';
 
@@ -178,7 +180,16 @@ function stepRounding(s: Draft): Draft {
       }
       return { ...tx, amount: money(tx.amount, tx.currency) };
     }),
-    fundMovements: s.fundMovements.map((m: Draft) => ({ ...m, amount: money(m.amount, m.currency ?? fundCurrency.get(m.fundId) ?? '') })),
+    // v7 movements (step 8 turns them into reservations) or the reservations of step 8 and later.
+    ...(s.fundMovements
+      ? { fundMovements: s.fundMovements.map((m: Draft) => ({ ...m, amount: money(m.amount, m.currency ?? fundCurrency.get(m.fundId) ?? '') })) }
+      : {}),
+    ...(s.reservationMovements
+      ? { reservationMovements: s.reservationMovements.map((m: Draft) => ({ ...m, amount: money(m.amount, currencyOf.get(m.accountId) ?? '') })) }
+      : {}),
+    ...(s.unresolvedMovements
+      ? { unresolvedMovements: s.unresolvedMovements.map((m: Draft) => ({ ...m, amount: money(m.amount, m.currency) })) }
+      : {}),
     funds: s.funds.map((f: Draft) => ({
       ...f,
       targetAmount: money(f.targetAmount, f.currency),
@@ -333,6 +344,103 @@ function stepLedger(s: Draft): Draft {
   return { ...s, transactions, recurringRules, categories };
 }
 
+// --- 8. fund movements become reservations on accounts ------------------------------------------------
+
+// v7 funds held cash BY CURRENCY, not on an account. Each fund's movements are grouped by currency (a movement
+// without one is in its fund's currency) and netted. A group is assigned to an account ONLY when that is
+// unambiguous: exactly one active account of that currency can hold the net amount (balance − what earlier
+// groups already reserved there, funds in priority order). Otherwise every movement of the group goes to
+// `unresolvedMovements` (reason: ambiguous, insufficient, negative, no_account): it still counts toward the
+// fund's total, never against an account's available money, and the user resolves it. Nothing is guessed and no
+// FX is invented. Every assigned movement keeps its id, date, note and rates, as kind 'adjust'.
+function stepReservations(s: Draft): Draft {
+  if (!s.fundMovements) {
+    return { ...s, reservationMovements: s.reservationMovements ?? [], unresolvedMovements: s.unresolvedMovements ?? [] };
+  }
+  const { fundMovements, ...rest } = s;
+  const funds: Draft[] = [...s.funds].sort((a, b) => a.priority - b.priority || (a.id < b.id ? -1 : 1));
+  const reserved = new Map<string, number>();
+  const reservations: Draft[] = [...(s.reservationMovements ?? [])];
+  const unresolved: Draft[] = [...(s.unresolvedMovements ?? [])];
+  const accounts: Draft[] = [...s.accounts].sort((a, b) => (a.id < b.id ? -1 : 1));
+
+  for (const fund of funds) {
+    const groups = new Map<string, Draft[]>();
+    for (const m of fundMovements.filter((x: Draft) => x.fundId === fund.id)) {
+      const currency: string = m.currency ?? fund.currency;
+      groups.set(currency, [...(groups.get(currency) ?? []), m]);
+    }
+    for (const [currency, list] of groups) {
+      const net = money(list.reduce((sum, m) => sum + m.amount, 0), currency);
+      const active = accounts.filter((a) => a.currency === currency && !a.archived);
+      const quarantine = (reason: string) => {
+        for (const m of list) {
+          unresolved.push({
+            id: m.id,
+            fundId: m.fundId,
+            amount: m.amount,
+            currency,
+            date: m.date,
+            ...(m.note ? { note: m.note } : {}),
+            rateSnapshotId: m.rateSnapshotId,
+            reason,
+            updatedAt: m.updatedAt,
+          });
+        }
+      };
+      const assign = (accountId: string) => {
+        for (const m of list) {
+          reservations.push({
+            id: m.id,
+            fundId: m.fundId,
+            accountId,
+            amount: m.amount,
+            kind: 'adjust',
+            date: m.date,
+            ...(m.note ? { note: m.note } : {}),
+            rateSnapshotId: m.rateSnapshotId,
+            updatedAt: m.updatedAt,
+          });
+        }
+        reserved.set(accountId, money((reserved.get(accountId) ?? 0) + net, currency));
+      };
+      if (Math.abs(net) < 0.005) {
+        // Nets to nothing: it holds no money, so any account of that currency carries the history.
+        if (active[0]) assign(active[0].id);
+        continue;
+      }
+      if (net < 0) quarantine('negative');
+      else if (active.length === 0) quarantine('no_account');
+      else {
+        const fits = active.filter((a) => Math.max(0, accountBalance(s as never, a.id)) - (reserved.get(a.id) ?? 0) >= net - 0.005);
+        if (fits.length === 1) assign(fits[0].id);
+        else quarantine(fits.length === 0 ? 'insufficient' : 'ambiguous');
+      }
+    }
+  }
+  const next: Draft = {
+    ...rest,
+    reservationMovements: reservations,
+    unresolvedMovements: unresolved,
+    tombstones: s.tombstones.map((x: Draft) => (x.entity === 'fundMovement' ? { ...x, entity: 'reservationMovement' } : x)),
+  };
+  // Fail closed (design F9): what was assigned must fit, and no fund may hold more or less than it did.
+  assertInvariants(next as never);
+  const total = (movements: Draft[], currencyOf: (m: Draft) => string) =>
+    movements.reduce((map: Map<string, number>, m) => {
+      const key = `${m.fundId}|${currencyOf(m)}`;
+      return map.set(key, money((map.get(key) ?? 0) + m.amount, currencyOf(m)));
+    }, new Map<string, number>());
+  const fundCurrency = new Map<string, string>(funds.map((f) => [f.id, f.currency]));
+  const accountCurrency = new Map<string, string>(accounts.map((a) => [a.id, a.currency]));
+  const before = total(fundMovements, (m) => m.currency ?? fundCurrency.get(m.fundId) ?? '');
+  const after = total([...reservations, ...unresolved], (m) => (m.accountId ? (accountCurrency.get(m.accountId) ?? '') : m.currency));
+  for (const [key, amount] of before) {
+    if (Math.abs((after.get(key) ?? 0) - amount) > 0.005) throw new Error(`Fund total changed by the migration: ${key} ${amount} → ${after.get(key) ?? 0}`);
+  }
+  return next;
+}
+
 // --- the runner -----------------------------------------------------------------------------------------
 
 // In order; a step's position + 1 is its number in `settings.v8Step`. Only ever append.
@@ -344,6 +452,7 @@ export const V8_STEPS: { name: string; run: (state: Draft) => Draft }[] = [
   { name: 'holdings', run: stepHoldings },
   { name: 'preferences', run: stepPreferences },
   { name: 'ledger', run: stepLedger },
+  { name: 'reservations', run: stepReservations },
 ];
 
 export const LATEST_V8_STEP = V8_STEPS.length;

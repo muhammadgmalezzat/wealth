@@ -14,7 +14,7 @@ import type {
   ExpenseBucket,
   FinanceState,
   Fund,
-  FundMovement,
+  ReservationKind,
   GoldKarat,
   Holding,
   IncomeExpenseTransaction,
@@ -76,7 +76,7 @@ export function incomeExpenseRows(state: FeeState): IncomeExpenseTransaction[] {
 
 type LiquidState = Pick<State, 'accounts' | 'transactions' | 'settings'>;
 // What per-currency liquid money needs: every currency the data uses, not just the accounts'.
-type LiquidByCurrencyState = LiquidState & Pick<State, 'funds' | 'holdings' | 'fundMovements'>;
+type LiquidByCurrencyState = LiquidState & Pick<State, 'funds' | 'holdings' | 'unresolvedMovements'>;
 
 // Net effect of all transactions on the account, in its own currency. Added in integer minor units, so
 // a thousand 0.01s are exactly 10.00.
@@ -316,10 +316,10 @@ function findFund(state: State, fundId: string): Fund | undefined {
   return state.funds.find((f) => f.id === fundId);
 }
 
-type CurrencyListState = Pick<State, 'settings' | 'accounts' | 'funds' | 'holdings' | 'fundMovements'>;
+type CurrencyListState = Pick<State, 'settings' | 'accounts' | 'funds' | 'holdings' | 'unresolvedMovements'>;
 
 // Every currency the data uses: the enabled ones first (settings order), then any other currency an
-// account, fund, currency holding or fund movement is in. What per-currency lists and loops run over.
+// account, fund, currency holding or unresolved migrated movement is in. What per-currency lists and loops run over.
 export function currencyList(state: CurrencyListState): CurrencyCode[] {
   return [
     ...new Set<CurrencyCode>([
@@ -327,7 +327,7 @@ export function currencyList(state: CurrencyListState): CurrencyCode[] {
       ...state.accounts.map((a) => a.currency),
       ...state.funds.map((f) => f.currency),
       ...state.holdings.flatMap((h) => (h.type === 'currency' ? [h.currency] : [])),
-      ...state.fundMovements.flatMap((m) => (m.currency ? [m.currency] : [])),
+      ...state.unresolvedMovements.map((m) => m.currency),
     ]),
   ];
 }
@@ -337,31 +337,132 @@ const zeroByCurrency = (state: CurrencyListState): Record<CurrencyCode, number> 
 // Float noise isn't money.
 const MONEY_EPSILON = 0.005;
 
-// The currency a movement's amount is in: its own, else its fund's (undefined when the fund is
-// gone, which is also why such movements are ignored everywhere).
-export function movementCurrency(
-  state: Pick<State, 'funds'>,
-  movement: Pick<FundMovement, 'fundId' | 'currency'>
-): CurrencyCode | undefined {
-  return movement.currency ?? state.funds.find((f) => f.id === movement.fundId)?.currency;
+// --- Reservations -----------------------------------------------------------
+
+// Everything that counts toward a fund's cash, in one shape: a reservation (money of an account, in the
+// account's currency) or a movement the v7 migration could not assign to one account (`unresolved`, in its own
+// currency). `kind` of an unresolved one is 'adjust' (what the migrated movements are).
+export interface FundMovementRow {
+  id: string;
+  fundId: string;
+  // Signed, in `currency`.
+  amount: number;
+  currency: CurrencyCode;
+  kind: ReservationKind;
+  date: string;
+  note?: string;
+  rateSnapshotId: string;
+  accountId?: string;
+  unresolved?: boolean;
 }
 
-// Cash set aside for the fund, per currency, each in its own currency: nothing is converted, so
-// 1000 SAR stays 1000 SAR whatever the rates do.
-export function fundCashByCurrency(state: State, fundId: string): Record<CurrencyCode, number> {
+type MovementRowState = Pick<State, 'accounts' | 'reservationMovements' | 'unresolvedMovements'>;
+
+export function fundMovementRows(state: MovementRowState): FundMovementRow[] {
+  const currencyOf = new Map(state.accounts.map((a) => [a.id, a.currency]));
+  const rows: FundMovementRow[] = [];
+  for (const m of state.reservationMovements) {
+    const currency = currencyOf.get(m.accountId);
+    // A reservation on an account that is gone has nothing to be valued in.
+    if (!currency) continue;
+    rows.push({
+      id: m.id,
+      fundId: m.fundId,
+      amount: m.amount,
+      currency,
+      kind: m.kind,
+      date: m.date,
+      ...(m.note ? { note: m.note } : {}),
+      rateSnapshotId: m.rateSnapshotId,
+      accountId: m.accountId,
+    });
+  }
+  for (const m of state.unresolvedMovements) {
+    rows.push({
+      id: m.id,
+      fundId: m.fundId,
+      amount: m.amount,
+      currency: m.currency,
+      kind: 'adjust',
+      date: m.date,
+      ...(m.note ? { note: m.note } : {}),
+      rateSnapshotId: m.rateSnapshotId,
+      unresolved: true,
+    });
+  }
+  return rows;
+}
+
+// Whether a movement adds to or takes from what is saved. Moving a reservation between funds or accounts
+// (reallocate, a transfer or exchange carrying it) saves nothing new.
+export const countsAsSaving = (kind: ReservationKind): boolean =>
+  kind !== 'reallocate' && kind !== 'follow_transfer' && kind !== 'follow_exchange';
+
+// What fund `fundId` has reserved on `accountId`, in the account's currency.
+export function reservation(state: Pick<State, 'reservationMovements' | 'accounts'>, fundId: string, accountId: string): number {
+  const currency = state.accounts.find((a) => a.id === accountId)?.currency;
+  if (!currency) return 0;
+  return roundIn(
+    sumIn(
+      state.reservationMovements.filter((m) => m.fundId === fundId && m.accountId === accountId).map((m) => m.amount),
+      currency
+    ),
+    currency
+  );
+}
+
+// Everything reserved on the account, across funds.
+export function accountReserved(state: Pick<State, 'reservationMovements' | 'accounts'>, accountId: string): number {
+  const currency = state.accounts.find((a) => a.id === accountId)?.currency;
+  if (!currency) return 0;
+  const perFund = new Map<string, number[]>();
+  for (const m of state.reservationMovements) {
+    if (m.accountId === accountId) perFund.set(m.fundId, [...(perFund.get(m.fundId) ?? []), m.amount]);
+  }
+  return sumIn([...perFund.values()].map((amounts) => sumIn(amounts, currency)), currency);
+}
+
+// What is not set aside for a fund: balance − reserved (INV-5 keeps it from going below 0).
+export function accountAvailable(
+  state: Pick<State, 'reservationMovements' | 'accounts' | 'transactions'>,
+  accountId: string
+): number {
+  const account = state.accounts.find((a) => a.id === accountId);
+  if (!account) return 0;
+  return roundIn(accountBalance(state, accountId) - accountReserved(state, accountId), account.currency);
+}
+
+// A fund's reservations per account (only the ones holding money), largest first.
+export function fundReservationsByAccount(
+  state: Pick<State, 'reservationMovements' | 'accounts'>,
+  fundId: string
+): { accountId: string; currency: CurrencyCode; amount: number }[] {
+  return state.accounts
+    .map((a) => ({ accountId: a.id, currency: a.currency, amount: reservation(state, fundId, a.id) }))
+    .filter((r) => r.amount > MONEY_EPSILON)
+    .sort((a, b) => b.amount - a.amount || (a.accountId < b.accountId ? -1 : 1));
+}
+
+// Cash set aside for the fund, per currency, each in its own currency: nothing is converted, so 1000 SAR stays
+// 1000 SAR whatever the rates do. Includes unresolved migrated movements (they count toward the fund's total);
+// `resolvedOnly` leaves them out (what can actually be released).
+export function fundCashByCurrency(state: State, fundId: string, resolvedOnly = false): Record<CurrencyCode, number> {
   const result = zeroByCurrency(state);
-  const fund = findFund(state, fundId);
-  if (!fund) return result;
-  for (const m of state.fundMovements) {
-    if (m.fundId !== fundId) continue;
-    const currency = m.currency ?? fund.currency;
-    result[currency] = addIn(result[currency], m.amount, currency);
+  if (!findFund(state, fundId)) return result;
+  for (const m of fundMovementRows(state)) {
+    if (m.fundId !== fundId || (resolvedOnly && m.unresolved)) continue;
+    result[m.currency] = addIn(result[m.currency], m.amount, m.currency);
   }
   return result;
 }
 
 export function fundAllocatedIn(state: State, fundId: string, currency: CurrencyCode): number {
   return fundCashByCurrency(state, fundId)[currency];
+}
+
+// The part of the fund's cash that is a real reservation on an account (what can be released).
+export function fundReservedIn(state: State, fundId: string, currency: CurrencyCode): number {
+  return fundCashByCurrency(state, fundId, true)[currency];
 }
 
 // Cash allocated to the fund, in the fund's currency: each currency's cash at TODAY's rate.
@@ -417,27 +518,19 @@ export function fundProgress(state: State, fundId: string): number {
 // monthly review, month totals): its own currency is returned unchanged, otherwise converted
 // with its own rate snapshot.
 export function movementAmountIn(
-  state: Pick<State, 'funds' | 'rateSnapshots'>,
-  movement: Pick<FundMovement, 'fundId' | 'amount' | 'currency' | 'rateSnapshotId'>,
+  state: Pick<State, 'rateSnapshots'>,
+  movement: Pick<FundMovementRow, 'amount' | 'currency' | 'rateSnapshotId'>,
   currency: CurrencyCode
 ): number {
-  const from = movementCurrency(state, movement);
-  if (!from) return 0;
-  return roundIn(projectAmount(state.rateSnapshots, movement.rateSnapshotId, movement.amount, from, currency), currency);
+  return roundIn(projectAmount(state.rateSnapshots, movement.rateSnapshotId, movement.amount, movement.currency, currency), currency);
 }
 
 // A movement's CURRENT value in its fund's currency (today's rate): what it adds to
 // fundAllocated.
-export function movementValueInFund(
-  state: State,
-  movement: Pick<FundMovement, 'fundId' | 'amount' | 'currency'>
-): number {
+export function movementValueInFund(state: State, movement: Pick<FundMovementRow, 'fundId' | 'amount' | 'currency'>): number {
   const fund = findFund(state, movement.fundId);
   if (!fund) return 0;
-  return roundIn(
-    convertCurrency(movement.amount, movement.currency ?? fund.currency, fund.currency, state.settings.rates),
-    fund.currency
-  );
+  return roundIn(convertCurrency(movement.amount, movement.currency, fund.currency, state.settings.rates), fund.currency);
 }
 
 // When the target must be reached: the deadline for goals, the next due date for sinking funds.
@@ -507,8 +600,8 @@ function monthPace(state: State, fundId: string, now: Date): MonthPace | null {
   if (!fund || !due) return null;
   const month = toMonthKey(now);
   const allocatedThisMonth = sumIn(
-    state.fundMovements
-      .filter((m) => m.fundId === fundId && monthOf(m.date) === month)
+    fundMovementRows(state)
+      .filter((m) => m.fundId === fundId && monthOf(m.date) === month && countsAsSaving(m.kind))
       .map((m) => movementValueInFund(state, m)),
     fund.currency
   );
@@ -557,61 +650,21 @@ export interface UnassignedSummary {
   deficitEGP: number;
 }
 
-// Liquid money not yet set aside by any fund, per currency (linked holdings are not cash).
-// Account balances are summed in their own currency and a movement takes its own currency's
-// money, so nothing is converted until display: 1000 SAR stays 1000 SAR whatever the rates do.
-//
-// A movement without a `currency` (saved before currencies, or made by the fund edit sheet) has
-// no source currency. It is covered by the money in its fund's currency first, then by what is
-// left in the other currencies at today's rate (EGP → SAR → USD), and any rest is a shortfall in
-// its own currency. So data from before currencies shows exactly the totals it always did.
-export function unassignedByCurrency(state: State): Record<CurrencyCode, number> {
-  const rates = state.settings.rates;
+// Liquid money not yet reserved for a fund, per currency, each in its own currency (linked holdings are not cash):
+// Σ over the accounts of that currency of balance − reserved. Nothing is converted, so 1000 SAR stays 1000 SAR
+// whatever the rates do, and a SAR reservation never takes EGP money. (The v7 "implicit FX" of movements that
+// had no currency is gone: the migration assigned them to an account or left them unresolved.) Unresolved
+// migrated movements count toward their fund's total but never against any account's available money.
+// Negative means more is reserved than the accounts hold (INV-5 prevents it; shown, never hidden).
+export function unassignedByCurrency(
+  state: LiquidByCurrencyState & Pick<State, 'reservationMovements'>
+): Record<CurrencyCode, number> {
   const pool = liquidByCurrency(state);
-  const need = zeroByCurrency(state);
-  for (const m of state.fundMovements) {
-    const fund = findFund(state, m.fundId);
-    if (!fund) continue;
-    if (m.currency) pool[m.currency] = addIn(pool[m.currency], -m.amount, m.currency);
-    else need[fund.currency] = addIn(need[fund.currency], m.amount, fund.currency);
+  const reserved = new Map<CurrencyCode, number[]>();
+  for (const account of state.accounts) {
+    reserved.set(account.currency, [...(reserved.get(account.currency) ?? []), accountReserved(state, account.id)]);
   }
-  // 1. Each currency's currency-less movements take from the same currency's money first.
-  for (const c of currencyList(state)) {
-    if (need[c] <= 0) {
-      // A net release (withdrawals beyond the allocations) gives the money back to its currency.
-      pool[c] -= need[c];
-      need[c] = 0;
-      continue;
-    }
-    const take = Math.min(need[c], Math.max(0, pool[c]));
-    pool[c] -= take;
-    need[c] -= take;
-  }
-  // 2. What is still uncovered takes from the other currencies' leftovers at today's rate.
-  // (v7's implicit FX; it goes away with account-backed funds. Currencies it touches are left unrounded:
-  // a half-cent of SAR would otherwise become 0.06 EGP when shown in EGP.)
-  const converted = new Set<CurrencyCode>();
-  for (const c of currencyList(state)) {
-    for (const d of currencyList(state)) {
-      if (d === c || need[c] <= MONEY_EPSILON) continue;
-      const available = Math.max(0, pool[d]);
-      if (available <= 0) continue;
-      const wanted = convertCurrency(need[c], c, d, rates);
-      converted.add(c).add(d);
-      if (wanted <= available) {
-        pool[d] -= wanted;
-        need[c] = 0;
-      } else {
-        pool[d] -= available;
-        need[c] -= convertCurrency(available, d, c, rates);
-      }
-    }
-  }
-  // 3. Anything left over is short in its own currency.
-  for (const c of currencyList(state)) {
-    const left = pool[c] - Math.max(0, need[c]);
-    pool[c] = converted.has(c) ? left : roundIn(left, c);
-  }
+  for (const [currency, amounts] of reserved) pool[currency] = roundIn(pool[currency] - sumIn(amounts, currency), currency);
   return pool;
 }
 
@@ -692,7 +745,7 @@ export function withdrawalPlan(
   const fund = findFund(state, fundId);
   if (!fund) return { withdrawals: [], shortfall: amount };
   const rates = state.settings.rates;
-  const cash = fundCashByCurrency(state, fundId);
+  const cash = fundCashByCurrency(state, fundId, true);
   const order = [currency, fund.currency, ...currencyList(state)].filter((c, i, all) => all.indexOf(c) === i);
   const withdrawals: FundAmount[] = [];
   let left = amount;
@@ -782,7 +835,7 @@ export function planCover(state: State, fundIds: string[], only?: CurrencyCode):
     let deficit = Math.max(0, -unassigned[currency]);
     for (const fund of chosen) {
       if (deficit <= MONEY_EPSILON) break;
-      const cash = fundAllocatedIn(state, fund.id, currency);
+      const cash = fundReservedIn(state, fund.id, currency);
       const take = Math.min(cash, deficit);
       if (take <= MONEY_EPSILON) continue;
       // Round up to the cent so the cover never falls a fraction short.
@@ -798,7 +851,7 @@ export function planCover(state: State, fundIds: string[], only?: CurrencyCode):
 export function defaultCoverFundId(state: State, currency?: CurrencyCode): string | undefined {
   return [...fundsByPriority(state)]
     .reverse()
-    .find((f) => (currency ? fundAllocatedIn(state, f.id, currency) : fundAllocated(state, f.id)) > 0)?.id;
+    .find((f) => (currency ? fundReservedIn(state, f.id, currency) : fundAllocated(state, f.id)) > 0)?.id;
 }
 // --- Transaction lists ------------------------------------------------------
 
@@ -948,7 +1001,12 @@ export function monthFlows(state: State, month: string, to: CurrencyCode = repor
   return {
     income,
     expense,
-    savedToFunds: sumIn(state.fundMovements.filter((m) => inMonth(m.date)).map((m) => movementAmountIn(state, m, to)), to),
+    savedToFunds: sumIn(
+      fundMovementRows(state)
+        .filter((m) => inMonth(m.date) && countsAsSaving(m.kind))
+        .map((m) => movementAmountIn(state, m, to)),
+      to
+    ),
     invested: sumIn(
       state.transactions
         .filter((tx): tx is AssetPurchaseTransaction => tx.type === 'asset_purchase' && inMonth(tx.date))

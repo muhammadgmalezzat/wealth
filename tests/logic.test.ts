@@ -65,6 +65,7 @@ import {
 } from '@/store/migrations';
 import * as nba from '@/store/nextActions';
 import * as reviewLogic from '@/store/review';
+import { assertInvariants, invariantViolations } from '@/store/invariants';
 import * as analyticsUi from '@/components/analytics/analyticsUi';
 import * as exchangeUi from '@/components/transactions/exchangeUi';
 import * as sankeyLayout from '@/components/analytics/sankeyLayout';
@@ -104,7 +105,7 @@ import {
   unassignedEGP,
   unassignedEGPWithFundCash,
 } from '@/store/selectors';
-import type { FinanceState, Fund, RecurringRule, Transaction } from '@/store/types';
+import type { FinanceState, Fund, RecurringRule, ReservationKind, ReservationMovement, Transaction } from '@/store/types';
 import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
 import { currencyNameAr } from '@/constants/currencies';
@@ -146,6 +147,17 @@ const amountOf = (t: Transaction | undefined): number | undefined => (t && 'amou
 const MIGRATION_CTX = { now: '2026-10-15T09:00:00.000Z', newId: () => 'migrated-device' };
 // updatedAt for hand-built fixtures.
 const T0 = '2026-01-01T00:00:00.000Z';
+// A reservation of `fundId` on account `accountId` (amount in the account's currency).
+const resv = (id: string, fundId: string, accountId: string, amount: number, date = '2026-09-01', kind: ReservationKind = 'reserve'): ReservationMovement => ({
+  id,
+  fundId,
+  accountId,
+  amount,
+  kind,
+  date,
+  rateSnapshotId: S125.id,
+  updatedAt: T0,
+});
 
 function makeCtx(): ops.OpContext {
   let seq = 0;
@@ -158,7 +170,8 @@ function emptyState(): FinanceState {
     categories: DEFAULT_CATEGORIES,
     transactions: [],
     funds: [],
-    fundMovements: [],
+    reservationMovements: [],
+    unresolvedMovements: [],
     holdings: [],
     liabilities: [],
     recurringRules: [],
@@ -186,8 +199,14 @@ function emptyState(): FinanceState {
 
 // A data-v7 state (what the frozen migration chain reads): v7 settings, no rate snapshots.
 function emptyStateV7() {
-  const { rateSnapshots: _snapshots, settings: { rates: _rates, enabledCurrencies: _enabled, v8Step: _step, ...settings }, ...rest } = emptyState();
-  return { ...rest, settings: { ...settings, exchangeRates: RATES_V7 } };
+  const {
+    rateSnapshots: _snapshots,
+    reservationMovements: _reservations,
+    unresolvedMovements: _unresolved,
+    settings: { rates: _rates, enabledCurrencies: _enabled, v8Step: _step, ...settings },
+    ...rest
+  } = emptyState();
+  return { ...rest, fundMovements: [], settings: { ...settings, exchangeRates: RATES_V7 } };
 }
 
 const apply = (state: FinanceState, patch: Partial<FinanceState>): FinanceState => ({
@@ -309,11 +328,15 @@ describe('migration', () => {
     const { state: v2, clampedBy } = migratePersistedState(LEGACY_V1, 1, MIGRATION_CTX);
     // g-big wants 100,000 − 56,875 = 43,125 but only 28,750 cash exists;
     // g-small wants 30,000 and nothing is left.
-    assert.equal(v2.fundMovements.length, 1);
-    assert.equal(v2.fundMovements[0].fundId, 'g-big');
-    approx(v2.fundMovements[0].amount, liquid);
+    const rows = sel.fundMovementRows(v2);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].fundId, 'g-big');
+    approx(rows[0].amount, liquid);
     approx(clampedBy, 43125 - liquid + 30000);
-    approx(unassignedEGP(v2), 0);
+    // Two EGP accounts could hold it, so the migration does not pick one: it waits, unresolved, and counts
+    // toward the fund but not against any account's available money.
+    assert.deepEqual([rows[0].unresolved, v2.unresolvedMovements[0].reason], [true, 'insufficient']);
+    approx(unassignedEGP(v2), liquid);
     approx(fundCurrent(v2, 'g-big'), goldMarket + liquid);
     approx(fundCurrent(v2, 'g-small'), 0);
   });
@@ -327,13 +350,15 @@ describe('migration', () => {
     const { state: v2, clampedBy } = migratePersistedState(rich, 1, MIGRATION_CTX);
     assert.equal(clampedBy, 0);
     assert.deepEqual(
-      v2.fundMovements.map((m) => [m.fundId, Math.round(m.amount)]),
+      sel.fundMovementRows(v2).map((m) => [m.fundId, Math.round(m.amount)]),
       [
         ['g-big', 100000 - goldMarket],
         ['g-small', 30000],
       ]
     );
     approx(fundCurrent(v2, 'g-big'), 100000);
+    // Only the bank can hold either amount, so both are reservations on it.
+    assert.deepEqual(v2.unresolvedMovements, []);
     approx(unassignedEGP(v2), 1000 * 12.5 + 200000 - (100000 - goldMarket) - 30000);
   });
 
@@ -365,7 +390,7 @@ describe('migration', () => {
       holdings: 1,
       funds: 2,
       netWorthEGP: liquid + goldMarket,
-      unassignedEGP: 0,
+      unassignedEGP: liquid,
     });
   });
 });
@@ -412,6 +437,8 @@ describe('netWorthEGP', () => {
 describe('funds', () => {
   const withGold = (): FinanceState => ({
     ...emptyState(),
+    // Plenty of money, so reservations always fit.
+    accounts: [account('egp', 'EGP', 1000000), account('sar', 'SAR', 1000000)],
     holdings: [{ id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCost: { amount: 50000, currency: 'EGP' }, purchaseRateSnapshotId: S125.id, country: 'EG' }],
   });
 
@@ -421,9 +448,9 @@ describe('funds', () => {
       fund({ id: 'egp', linkedHoldingIds: ['gold'] }),
       fund({ id: 'sar', currency: 'SAR', targetAmount: 10000, linkedHoldingIds: ['gold'] }),
     ];
-    s.fundMovements = [
-      { id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'egp', amount: 10000, date: '2026-09-01' },
-      { id: 'm2', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'sar', amount: 200, date: '2026-09-01' },
+    s.reservationMovements = [
+      resv('m1', 'egp', 'egp', 10000, '2026-09-01'),
+      resv('m2', 'sar', 'sar', 200, '2026-09-01'),
     ];
     approx(fundCurrent(s, 'egp'), 60000 + 10000);
     approx(fundProgress(s, 'egp'), 0.7);
@@ -437,7 +464,7 @@ describe('funds', () => {
       fund({ id: 'open' }),
       fund({ id: 'overdue', deadline: '2026-01-31' }),
     ];
-    s.fundMovements = [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'dated', amount: 10000, date: '2026-09-01' }];
+    s.reservationMovements = [resv('m1', 'dated', 'egp', 10000, '2026-09-01')];
     approx(fundRequiredMonthly(s, 'dated', NOW), (100000 - 70000) / 3); // Oct, Nov, Dec
     assert.equal(fundRequiredMonthly(s, 'open', NOW), null);
     approx(fundRequiredMonthly(s, 'overdue', NOW), 100000); // everything due now
@@ -447,7 +474,7 @@ describe('funds', () => {
     const ctx = makeCtx();
     const base = withGold();
     base.funds = [fund({ id: 'f', deadline: '2026-12-31', linkedHoldingIds: ['gold'] }), fund({ id: 'open' })];
-    base.fundMovements = [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'f', amount: 10000, date: '2026-09-01' }];
+    base.reservationMovements = [resv('m1', 'f', 'egp', 10000, '2026-09-01')];
     // At month start: 70,000 of 100,000 → 10,000/month required.
     const allocate = (amount: number) => apply(base, ops.allocateToFund(base, 'f', amount, undefined, ctx));
 
@@ -468,7 +495,7 @@ describe('funds', () => {
     const ctx = makeCtx();
     const s = withGold();
     s.funds = [fund({ id: 'f', linkedHoldingIds: ['gold'] })];
-    s.fundMovements = [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'f', amount: 1000, date: '2026-09-01' }];
+    s.reservationMovements = [resv('m1', 'f', 'egp', 1000, '2026-09-01')];
     assert.throws(() => ops.withdrawFromFund(s, 'f', 1500, undefined, ctx), ops.FinanceValidationError);
     const after = apply(s, ops.withdrawFromFund(s, 'f', 400, 'repair', ctx));
     approx(fundCurrent(after, 'f'), 60000 + 600);
@@ -481,9 +508,9 @@ describe('unassignedEGP', () => {
     s.accounts = [account('egp', 'EGP', 50000), account('sar', 'SAR', 2000)];
     s.holdings = [{ id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCost: { amount: 0, currency: 'EGP' }, purchaseRateSnapshotId: S125.id, country: 'EG' }];
     s.funds = [fund({ id: 'egp-fund', linkedHoldingIds: ['gold'] }), fund({ id: 'sar-fund', currency: 'SAR' })];
-    s.fundMovements = [
-      { id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'egp-fund', amount: 30000, date: '2026-09-01' },
-      { id: 'm2', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'sar-fund', amount: 400, date: '2026-09-01' },
+    s.reservationMovements = [
+      resv('m1', 'egp-fund', 'egp', 30000, '2026-09-01'),
+      resv('m2', 'sar-fund', 'sar', 400, '2026-09-01'),
     ];
     approx(unassignedEGP(s), 50000 + 2000 * 12.5 - 30000 - 400 * 12.5);
   });
@@ -725,7 +752,7 @@ describe('action validation', () => {
     const arabic = /[؀-ۿ]/;
     const error = new FinanceValidationError('NOT_POSITIVE', { field: 'weightGrams' });
     assert.equal(errorMessage(error), 'الوزن يجب أن يكون أكبر من صفر');
-    assert.match(errorMessage(new FinanceValidationError('INSUFFICIENT_UNASSIGNED')), arabic);
+    assert.match(errorMessage(new FinanceValidationError('RESERVE_EXCEEDS_AVAILABLE')), arabic);
     assert.match(errorMessage(new Error('boom')), arabic);
   });
 });
@@ -786,7 +813,7 @@ describe('editFund', () => {
     ...emptyState(),
     accounts: [account('egp', 'EGP', 50000)],
     funds: [fund({ id: 'f', deadline: '2026-12-31' })],
-    fundMovements: [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'f', amount: 30000, date: '2026-09-01' }],
+    reservationMovements: [resv('m1', 'f', 'egp', 30000, '2026-09-01')],
   });
   const edit = (cashAllocation: number): ops.FundEdit => ({
     name: ' Wedding ',
@@ -800,8 +827,8 @@ describe('editFund', () => {
     assert.equal(f.name, 'Wedding');
     assert.equal(f.targetAmount, 120000);
     assert.equal(f.deadline, undefined); // cleared
-    assert.equal(s.fundMovements.length, 2);
-    assert.equal(s.fundMovements[1].amount, 15000);
+    assert.equal(s.reservationMovements.length, 2);
+    assert.equal(s.reservationMovements[1].amount, 15000);
     approx(fundAllocated(s, 'f'), 45000);
     approx(unassignedEGP(s), 5000);
   });
@@ -809,7 +836,7 @@ describe('editFund', () => {
   it('previews and enforces unassigned money', () => {
     const s = state();
     approx(unassignedEGPWithFundCash(s, 'f', 60000), -10000);
-    assert.throws(() => ops.editFund(s, 'f', edit(60000), makeCtx()), { code: 'INSUFFICIENT_UNASSIGNED' });
+    assert.throws(() => ops.editFund(s, 'f', edit(60000), makeCtx()), { code: 'RESERVE_EXCEEDS_AVAILABLE' });
     assert.throws(() => ops.editFund(s, 'f', edit(-1), makeCtx()), { code: 'NEGATIVE' });
   });
 
@@ -821,7 +848,7 @@ describe('editFund', () => {
 
   it('adds no movement when the allocation is unchanged', () => {
     const s = apply(state(), ops.editFund(state(), 'f', edit(30000), makeCtx()));
-    assert.equal(s.fundMovements.length, 1);
+    assert.equal(s.reservationMovements.length, 1);
   });
 });
 
@@ -996,7 +1023,7 @@ describe('fund allocation', () => {
       fund({ id: 'D', priority: 4, targetAmount: 50000 }), // no deadline, no plan → nothing suggested
       fund({ id: 'F', priority: 5, targetAmount: 1000, monthlyContribution: 500 }), // only 100 left to reach
     ],
-    fundMovements: [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'F', amount: 900, date: '2026-09-01' }],
+    reservationMovements: [resv('m1', 'F', 'egp', 900, '2026-09-01')],
   });
 
   it('suggestAllocation follows priority and caps each fund', () => {
@@ -1020,7 +1047,7 @@ describe('fund allocation', () => {
     const ctx = makeCtx();
     assert.throws(
       () => ops.allocateMany(s, [{ fundId: 'A', amount: 60000 }, { fundId: 'B', amount: 40000 }], undefined, ctx),
-      { code: 'INSUFFICIENT_UNASSIGNED' }
+      { code: 'RESERVE_EXCEEDS_AVAILABLE' }
     );
     assert.throws(() => ops.allocateMany(s, [{ fundId: 'A', amount: 10 }, { fundId: 'B', amount: -1 }], undefined, ctx), {
       code: 'NOT_POSITIVE',
@@ -1028,7 +1055,7 @@ describe('fund allocation', () => {
     assert.throws(() => ops.allocateMany(s, [], undefined, ctx), { code: 'NOTHING_SELECTED' });
 
     const after = apply(s, ops.allocateMany(s, suggestAllocation(s, unassignedEGP(s), NOW), 'توزيع', ctx));
-    assert.equal(after.fundMovements.length, 1 + 4);
+    assert.equal(after.reservationMovements.length, 1 + 4);
     approx(unassignedEGP(after), 99100 - 9300);
   });
 
@@ -1060,9 +1087,9 @@ describe('covering overspent fund money', () => {
       ...emptyState(),
       accounts: [account('egp', 'EGP', 10000)],
       funds: [fund({ id: 'A', priority: 1 }), fund({ id: 'B', priority: 2 })],
-      fundMovements: [
-        { id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'A', amount: 6000, date: '2026-09-01' },
-        { id: 'm2', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'B', amount: 3000, date: '2026-09-01' },
+      reservationMovements: [
+        resv('m1', 'A', 'egp', 6000, '2026-09-01'),
+        resv('m2', 'B', 'egp', 3000, '2026-09-01'),
       ],
     };
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 5000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-bills', date: '2026-10-10' }, makeCtx()));
@@ -1104,7 +1131,7 @@ describe('covering overspent fund money', () => {
     const s = state();
     const after = apply(s, ops.deleteFund(s, 'A', makeCtx()));
     approx(unassignedEGP(after), unassignedEGP(s) + 6000);
-    assert.equal(after.fundMovements.some((m) => m.fundId === 'A'), false);
+    assert.equal(after.reservationMovements.some((m) => m.fundId === 'A'), false);
   });
 });
 
@@ -1116,7 +1143,7 @@ describe('paySinkingFund', () => {
       fund({ id: 'S', type: 'sinking', targetAmount: 2400, frequency: 'yearly', nextDueDate: '2026-10-20' }),
       fund({ id: 'G', priority: 2 }),
     ],
-    fundMovements: [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'S', amount: 2000, date: '2026-09-01' }],
+    reservationMovements: [resv('m1', 'S', 'egp', 2000, '2026-09-01')],
   });
   const payment = (overrides: Partial<ops.SinkingPayment> = {}): ops.SinkingPayment => ({
     fundId: 'S',
@@ -1147,11 +1174,21 @@ describe('paySinkingFund', () => {
     approx(unassignedEGP(after), unassignedEGP(s) - 400);
   });
 
-  it('converts when paying from an account in another currency', () => {
+  it('paying from an account in another currency spends none of the fund’s reservation on the other account', () => {
     const s = state();
     const after = apply(s, ops.paySinkingFund(s, payment({ accountId: 'sar', amount: 100 }), makeCtx()));
     approx(accountBalance(after, 'sar'), 900);
-    approx(fundAllocated(after, 'S'), 2000 - 100 * 12.5);
+    // The fund's 2,000 EGP stays reserved on the EGP account: no conversion, no spend movement.
+    approx(fundAllocated(after, 'S'), 2000);
+    assert.ok(!after.reservationMovements.some((m) => m.kind === 'spend'));
+  });
+
+  it('the part of the bill the paying account has reserved for the fund is a spend movement on it', () => {
+    const s = state();
+    const after = apply(s, ops.paySinkingFund(s, payment(), makeCtx()));
+    const spend = after.reservationMovements.find((m) => m.kind === 'spend')!;
+    assert.deepEqual([spend.fundId, spend.accountId, spend.amount], ['S', 'egp', -1500]);
+    assert.equal(spend.sourceTransactionId, after.transactions[0].id);
   });
 
   it('is all-or-nothing on failure', () => {
@@ -1522,7 +1559,7 @@ describe('sync bookkeeping', () => {
     s = apply(s, ops.addFund(s, { name: 'F', type: 'goal', targetAmount: 100, currency: 'EGP', priority: 1 }, ctx));
     advance();
     s = apply(s, ops.allocateToFund(s, s.funds[0].id, 50, undefined, ctx));
-    assert.equal(s.fundMovements[0].updatedAt, iso());
+    assert.equal(s.reservationMovements[0].updatedAt, iso());
     advance();
     s = apply(s, ops.editFund(s, s.funds[0].id, { name: 'F2', targetAmount: 200, cashAllocation: 50 }, ctx));
     assert.equal(s.funds[0].updatedAt, iso());
@@ -1533,13 +1570,13 @@ describe('sync bookkeeping', () => {
     let s = richState();
     const before = s.tombstones.length;
     const fundId = s.funds[0].id;
-    const movementIds = s.fundMovements.map((m) => m.id);
+    const movementIds = s.reservationMovements.map((m) => m.id);
 
     // Fund + its movements.
     s = apply(s, ops.deleteFund(s, fundId, ctx));
     assert.deepEqual(
       s.tombstones.slice(before).map((t) => [t.entity, t.id]),
-      [['fund', fundId], ...movementIds.map((id) => ['fundMovement', id])]
+      [['fund', fundId], ...movementIds.map((id) => ['reservationMovement', id])]
     );
     assert.ok(s.tombstones.slice(before).every((t) => t.deletedAt === iso()));
 
@@ -1590,7 +1627,7 @@ describe('migration v3 → v4', () => {
       categories: strip(s.categories),
       transactions: strip(s.transactions),
       funds: strip(s.funds),
-      fundMovements: strip(s.fundMovements),
+      fundMovements: strip(s.reservationMovements),
       holdings: strip(s.holdings),
       liabilities: [],
       recurringRules: [],
@@ -1605,7 +1642,7 @@ describe('migration v3 → v4', () => {
     migrated.accounts.forEach((a, i) => assert.equal(a.updatedAt, source.accounts[i].createdAt));
     migrated.transactions.forEach((t, i) => assert.equal(t.updatedAt, source.transactions[i].createdAt));
     // No createdAt on movements/holdings/categories → migration time.
-    assert.ok(migrated.fundMovements.every((m) => m.updatedAt === MIGRATION_CTX.now));
+    assert.ok((migrated as unknown as { fundMovements: { updatedAt: string }[] }).fundMovements.every((m) => m.updatedAt === MIGRATION_CTX.now));
     assert.ok(migrated.holdings.every((h) => h.updatedAt === MIGRATION_CTX.now));
     assert.ok(migrated.categories.every((c) => c.updatedAt === MIGRATION_CTX.now));
     assert.deepEqual(migrated.tombstones, []);
@@ -1947,7 +1984,7 @@ describe('plan currency conversion', () => {
   it('keeps fund allocations of the month at their own rates (plan progress, review, month flows)', () => {
     const before = recordedAt13_5();
     const after = withSarRate(before, 14);
-    approx(snapRate(after, after.fundMovements[0], 'SAR'), 13.5);
+    approx(snapRate(after, after.reservationMovements[0], 'SAR'), 13.5);
     approx(planProgress(after, '2026-10')!.contributions[0].allocated, 100);
     approx(reviewLogic.monthReview(after, '2026-10', NOW).funds[0].allocated, 100);
     assert.equal(monthFlows(after, '2026-10').savedToFunds, 1350);
@@ -1981,7 +2018,7 @@ describe('plan currency conversion', () => {
     );
     s = apply(s, ops.allocateToFund(s, 'S', 500, undefined, ctx));
     s = apply(s, ops.paySinkingFund(s, { fundId: 'S', accountId: 'sar', categoryId: 'cat-essentials-bills', amount: 200.1, date: '2026-10-15' }, ctx));
-    assert.equal(s.fundMovements.at(-1)!.amount, -200.1);
+    assert.equal(s.reservationMovements.at(-1)!.amount, -200.1);
   });
 });
 
@@ -2669,7 +2706,7 @@ describe('next best actions: rules and ordering', () => {
       ...emptyState(),
       accounts: [account('egp', 'EGP', 1000)],
       funds: [fund({ id: 'goal', name: 'جواز', deadline: '2027-09-30' })],
-      fundMovements: [{ id: 'm', fundId: 'goal', amount: 5000, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 }],
+      reservationMovements: [resv('m', 'goal', 'egp', 5000, '2026-09-01')],
       recurringRules: [rule({ id: 'r', startDate: '2026-10-05' })],
     };
     assert.deepEqual(ids(s), ['due', 'cover', 'plan-2026-10', 'emergency', 'backup']);
@@ -2684,7 +2721,7 @@ describe('next best actions: rules and ordering', () => {
     const s: FinanceState = {
       ...busy(),
       funds: [...busy().funds, fund({ id: 'big', deadline: '2027-09-30', priority: 9 })],
-      fundMovements: [{ id: 'm', fundId: 'big', amount: 500000, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 }],
+      reservationMovements: [resv('m', 'big', 'egp', 500000, '2026-09-01')],
     };
     for (const a of nba.allActions(s, OCT_26)) {
       assert.equal(a.dismissible, !['due', 'cover'].includes(a.id), a.id);
@@ -2716,7 +2753,7 @@ describe('next best actions: rules and ordering', () => {
       ...emptyState(),
       accounts: [account('egp', 'EGP', 100000)],
       funds: [fund({ id: 'car', type: 'sinking', targetAmount: 5000, frequency: 'yearly', nextDueDate })],
-      fundMovements: saved ? [{ id: 'm', fundId: 'car', amount: saved, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 }] : [],
+      reservationMovements: saved ? [resv('m', 'car', 'egp', saved, '2026-09-01')] : [],
     });
     assert.ok(ids(sinking('2026-10-29')).includes('sinking-car')); // 14 days
     assert.ok(!ids(sinking('2026-10-30')).includes('sinking-car')); // 15 days
@@ -2734,7 +2771,7 @@ describe('next best actions: rules and ordering', () => {
       accounts: [account('egp', 'EGP', 100000)],
       transactions: history,
       funds: [fund({ id: 'em', type: 'emergency', targetAmount: 18000 })],
-      fundMovements: [{ id: 'm', fundId: 'em', amount: saved, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 }],
+      reservationMovements: [resv('m', 'em', 'egp', saved, '2026-09-01')],
     });
     const thin = nba.nextActions(withFund(1000), NOW).find((a) => a.id === 'emergency')!;
     assert.equal(thin.title, 'ابدأ صندوق الطوارئ');
@@ -2983,9 +3020,9 @@ describe('monthly review', () => {
     ],
     holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCost: { amount: 4000, currency: 'EGP' }, purchaseRateSnapshotId: S125.id, country: 'EG', updatedAt: T0 }],
     funds: [fund({ id: 'goal', name: 'جواز', targetAmount: 50000 }), fund({ id: 'done', targetAmount: 100, priority: 2 })],
-    fundMovements: [
-      { id: 'm1', fundId: 'goal', amount: 1000, date: '2026-09-15', rateSnapshotId: S125.id, updatedAt: T0 },
-      { id: 'm2', fundId: 'done', amount: 100, date: '2026-08-15', rateSnapshotId: S125.id, updatedAt: T0 },
+    reservationMovements: [
+      resv('m1', 'goal', 'egp', 1000, '2026-09-15'),
+      resv('m2', 'done', 'egp', 100, '2026-08-15'),
     ],
     monthlyPlans: [
       {
@@ -3100,7 +3137,7 @@ describe('home: homeFunds', () => {
         fund({ id: 'okNear', priority: 4, targetAmount: 100, deadline: '2026-12-01' }),
         fund({ id: 'okNoDue', priority: 5 }),
       ],
-      fundMovements: [{ id: 'm', fundId: 'okNear', amount: 100, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }],
+      reservationMovements: [resv('m', 'okNear', 'egp', 100, '2026-10-02')],
     };
     assert.deepEqual(
       home.homeFunds(s, NOW, 5).map((f) => f.id),
@@ -3268,12 +3305,12 @@ describe('plan UI: statuses and plan inputs', () => {
 describe('A1: fundStatus pending vs behind', () => {
   // daysLeftInMonth counts today: in October (31 days) day d leaves 31 − d + 1 days.
   const at = (day: number) => new Date(2026, 9, day, 12);
-  const state = (fundOverrides: Partial<Fund> = {}, movements: FinanceState['fundMovements'] = []): FinanceState => ({
+  const state = (fundOverrides: Partial<Fund> = {}, movements: FinanceState['reservationMovements'] = []): FinanceState => ({
     ...emptyState(),
     accounts: [account('egp', 'EGP', 1000000)],
     // 30,000 by 31 Dec → 10,000 required each of Oct, Nov, Dec.
     funds: [fund({ id: 'f', targetAmount: 30000, deadline: '2026-12-31', ...fundOverrides })],
-    fundMovements: movements,
+    reservationMovements: movements,
   });
 
   it('day 1 with nothing allocated → pending', () => {
@@ -3287,7 +3324,7 @@ describe('A1: fundStatus pending vs behind', () => {
   });
 
   it('partially allocated with 10 days left → pending', () => {
-    const partial = state({}, [{ id: 'm', fundId: 'f', amount: 4000, date: '2026-10-05', rateSnapshotId: S125.id, updatedAt: T0 }]);
+    const partial = state({}, [resv('m', 'f', 'egp', 4000, '2026-10-05')]);
     assert.equal(fundStatus(partial, 'f', at(22)), 'pending'); // 10 days left
   });
 
@@ -3298,7 +3335,7 @@ describe('A1: fundStatus pending vs behind', () => {
   });
 
   it('ahead / on_track / no_deadline are unchanged', () => {
-    const done = (amount: number) => state({}, [{ id: 'm', fundId: 'f', amount, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }]);
+    const done = (amount: number) => state({}, [resv('m', 'f', 'egp', amount, '2026-10-02')]);
     assert.equal(fundStatus(done(10000), 'f', at(26)), 'on_track');
     assert.equal(fundStatus(done(12000), 'f', at(26)), 'ahead');
     assert.equal(fundStatus(state({ deadline: undefined }), 'f', at(26)), 'no_deadline');
@@ -3313,7 +3350,7 @@ describe('A1: fundStatus pending vs behind', () => {
         fund({ id: 'behind', priority: 2, targetAmount: 30000, deadline: '2027-06-30' }),
         fund({ id: 'okNear', priority: 3, targetAmount: 100, deadline: '2026-11-30' }),
       ],
-      fundMovements: [{ id: 'm', fundId: 'okNear', amount: 100, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }],
+      reservationMovements: [resv('m', 'okNear', 'egp', 100, '2026-10-02')],
     };
     assert.deepEqual(
       home.homeFunds(s, at(26), 3).map((f) => f.id),
@@ -3377,11 +3414,11 @@ describe('A4: zero-limit line with spending', () => {
 
 describe('funds UI helpers', () => {
   const at = (day: number) => new Date(2026, 9, day, 12);
-  const state = (funds: Fund[], movements: FinanceState['fundMovements'] = []): FinanceState => ({
+  const state = (funds: Fund[], movements: FinanceState['reservationMovements'] = []): FinanceState => ({
     ...emptyState(),
-    accounts: [account('egp', 'EGP', 1000000)],
+    accounts: [account('egp', 'EGP', 1000000), account('sar', 'SAR', 1000000, 'SA')],
     funds,
-    fundMovements: movements,
+    reservationMovements: movements,
   });
 
   it('fundsSummary sums current and required in EGP at current rates', () => {
@@ -3392,8 +3429,8 @@ describe('funds UI helpers', () => {
         fund({ id: 'open', targetAmount: 1000 }),
       ],
       [
-        { id: 'm1', fundId: 'egp', amount: 6000, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 },
-        { id: 'm2', fundId: 'sar', amount: 600, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 },
+        resv('m1', 'egp', 'egp', 6000, '2026-09-01'),
+        resv('m2', 'sar', 'sar', 600, '2026-09-01'),
       ]
     );
     const summary = fundsUi.fundsSummary(s, at(15));
@@ -3409,19 +3446,19 @@ describe('funds UI helpers', () => {
     assert.ok(fundsUi.fundNextStep(state([goal]), goal, at(26)).text.startsWith('خصص '));
     assert.equal(fundsUi.fundNextStep(state([goal]), goal, at(10)).tone, 'neutral'); // pending
     assert.ok(fundsUi.fundNextStep(state([goal]), goal, at(10)).text.endsWith(' الشهر ده.'));
-    const paid = state([goal], [{ id: 'm', fundId: 'g', amount: 10000, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }]);
+    const paid = state([goal], [resv('m', 'g', 'egp', 10000, '2026-10-02')]);
     assert.deepEqual(fundsUi.fundNextStep(paid, goal, at(26)), { tone: 'ok', text: 'ماشي على الخطة.' });
     const open = fund({ id: 'o', targetAmount: 1000 });
     assert.ok(fundsUi.fundNextStep(state([open]), open, at(26)).text.startsWith('لسه محتاج '));
-    const reached = state([open], [{ id: 'm', fundId: 'o', amount: 1000, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }]);
+    const reached = state([open], [resv('m', 'o', 'egp', 1000, '2026-10-02')]);
     assert.deepEqual(fundsUi.fundNextStep(reached, open, at(26)), { tone: 'ok', text: 'وصلت للهدف.' });
   });
 
   it('movementKind tells allocations, withdrawals and sinking payments apart', () => {
-    assert.equal(fundsUi.movementKind({ amount: 100 }), 'allocation');
-    assert.equal(fundsUi.movementKind({ amount: -100, note: 'سحب' }), 'withdrawal');
-    assert.equal(fundsUi.movementKind({ amount: -100 }), 'withdrawal');
-    assert.equal(fundsUi.movementKind({ amount: -100, note: 'اتدفعت: تأمين' }), 'payment');
+    assert.equal(fundsUi.movementKind({ amount: 100, kind: 'reserve' }), 'allocation');
+    assert.equal(fundsUi.movementKind({ amount: -100, kind: 'release' }), 'withdrawal');
+    assert.equal(fundsUi.movementKind({ amount: -100, kind: 'cover' }), 'withdrawal');
+    assert.equal(fundsUi.movementKind({ amount: -100, kind: 'spend' }), 'payment');
   });
 });
 
@@ -3856,13 +3893,14 @@ describe('native amounts never drift with the rates', () => {
 
   it('a SAR allocation to an EGP fund: the fund’s value follows the rate, SAR unassigned does not', () => {
     const s = withFund();
-    assert.throws(() => allocate(s, 1001, 'SAR'), { code: 'INSUFFICIENT_UNASSIGNED' }); // only 1000 SAR exist
-    assert.throws(() => allocate(s, 5001, 'EGP'), { code: 'INSUFFICIENT_UNASSIGNED' }); // only 5000 EGP exist
+    assert.throws(() => allocate(s, 1001, 'SAR'), { code: 'RESERVE_EXCEEDS_AVAILABLE' }); // only 1000 SAR exist
+    assert.throws(() => allocate(s, 5001, 'EGP'), { code: 'RESERVE_EXCEEDS_AVAILABLE' }); // only 5000 EGP exist
     const funded = allocate(s, 400, 'SAR');
     const later = at(funded, 15);
 
-    assert.equal(funded.fundMovements[0].amount, 400);
-    assert.equal(funded.fundMovements[0].currency, 'SAR');
+    assert.equal(funded.reservationMovements[0].amount, 400);
+    // Reserved on the SAR account (a reservation is money of one account, in its currency).
+    assert.equal(funded.reservationMovements[0].accountId, 'sar');
     assert.equal(sel.fundAllocatedIn(later, 'F', 'SAR'), 400);
     approx(fundAllocated(funded, 'F'), 400 * 13);
     approx(fundAllocated(later, 'F'), 400 * 15);
@@ -3878,42 +3916,29 @@ describe('native amounts never drift with the rates', () => {
     assert.deepEqual(summary.deficits, []);
   });
 
-  it('old movements (no currency) behave exactly as before', () => {
-    const legacy = (amount: number): FinanceState['fundMovements'] => [
-      { id: 'm', updatedAt: T0, fundId: 'F', amount, date: '2026-09-01', rateSnapshotId: S125.id },
-    ];
-    // Everything in EGP: the sum of the movements, the old unassigned figure.
-    const egp: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 10000)], funds: [fund({ id: 'F' })], fundMovements: legacy(6000) };
+  it('money is per account and per currency: no other currency ever covers a reservation', () => {
+    const legacy = (amount: number): FinanceState['reservationMovements'] => [resv('m', 'F', 'egp', amount)];
+    // Everything in EGP: the sum of the reservations.
+    const egp: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 10000)], funds: [fund({ id: 'F' })], reservationMovements: legacy(6000) };
     assert.equal(fundAllocated(egp, 'F'), 6000);
     assert.deepEqual(sel.fundCashByCurrency(egp, 'F'), { EGP: 6000, SAR: 0, USD: 0 });
     assert.deepEqual(sel.unassignedByCurrency(egp), { EGP: 4000, SAR: 0, USD: 0 });
     assert.equal(unassignedEGP(egp), 4000);
 
-    // Mixed: EGP movements against SAR money have no source currency, so they take EGP first
-    // and then SAR at today's rate. Totals are the old totals and nothing is falsely "short".
-    const mixed: FinanceState = { ...base(13), funds: [fund({ id: 'F' })], fundMovements: legacy(10000) };
-    approx(unassignedEGP(mixed), 13000 + 5000 - 10000);
-    approx(unassignedEGP(at(mixed, 15)), 15000 + 5000 - 10000);
-    const by = sel.unassignedByCurrency(mixed);
-    approx(by.EGP, 0);
-    approx(by.SAR, 1000 - 5000 / 13);
-    assert.deepEqual(sel.unassignedSummary(mixed).deficits, []);
-    approx(fundAllocated(at(mixed, 15), 'F'), 10000);
+    // 10,000 EGP reserved on an account holding 5,000: the 5,000 short is EGP's, whatever SAR money exists
+    // (v7 covered it with SAR at today's rate; there is no implicit FX any more).
+    const broken: FinanceState = { ...base(13), funds: [fund({ id: 'F' })], reservationMovements: legacy(10000) };
+    const by = sel.unassignedByCurrency(broken);
+    assert.deepEqual([by.EGP, by.SAR], [-5000, 1000]);
+    assert.deepEqual(sel.unassignedSummary(broken).deficits, [{ currency: 'EGP', amount: 5000 }]);
+    approx(fundAllocated(at(broken, 15), 'F'), 10000);
 
-    // More than all the money: the rest is short in the fund's currency.
-    const over: FinanceState = { ...base(13), funds: [fund({ id: 'F' })], fundMovements: legacy(20000) };
-    approx(unassignedEGP(over), 13000 + 5000 - 20000);
-    const deficits = sel.unassignedSummary(over).deficits;
-    assert.equal(deficits.length, 1);
-    assert.equal(deficits[0].currency, 'EGP');
-    approx(deficits[0].amount, 2000);
-
-    // The fund edit sheet still sets the total cash: any currency's money may back an increase.
-    const edited = apply(mixed, ops.editFund(mixed, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 12000 }, makeCtx()));
-    assert.equal(edited.fundMovements.at(-1)!.currency, undefined);
-    approx(fundAllocated(edited, 'F'), 12000);
-    assert.throws(() => ops.editFund(mixed, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 30000 }, makeCtx()), {
-      code: 'INSUFFICIENT_UNASSIGNED',
+    // The fund edit sheet sets the total by reserving or releasing on the accounts: more than is available is refused.
+    const funded: FinanceState = { ...base(13), funds: [fund({ id: 'F' })], reservationMovements: legacy(3000) };
+    const edited = apply(funded, ops.editFund(funded, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 5000 }, makeCtx()));
+    approx(fundAllocated(edited, 'F'), 5000);
+    assert.throws(() => ops.editFund(funded, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 6000 }, makeCtx()), {
+      code: 'RESERVE_EXCEEDS_AVAILABLE',
     });
   });
 
@@ -3981,7 +4006,7 @@ describe('native amounts never drift with the rates', () => {
     assert.equal(sel.unassignedByCurrency(after).SAR, 0);
   });
 
-  it('paying a sinking fund uses cash in the payment’s currency first, with no conversion', () => {
+  it('paying a sinking fund spends its reservation on the paying account, with no conversion', () => {
     const s: FinanceState = {
       ...base(),
       funds: [fund({ id: 'S', type: 'sinking', targetAmount: 5000, frequency: 'yearly', nextDueDate: '2026-10-20' })],
@@ -3995,15 +4020,17 @@ describe('native amounts never drift with the rates', () => {
     // The fund paid for it, so SAR unassigned is untouched.
     assert.equal(sel.unassignedByCurrency(small).SAR, sel.unassignedByCurrency(funded).SAR);
 
-    // More than its SAR cash: the rest comes out of the EGP cash at today's rate.
+    // More than its SAR reservation: only that part is spent; the rest of the bill is paid from the account's
+    // available money, and the EGP reservation is never converted.
     const big = pay(400);
     const cash = sel.fundCashByCurrency(big, 'S');
     assert.equal(cash.SAR, 0);
-    approx(cash.EGP, 2000 - 100 * 13);
+    assert.equal(cash.EGP, 2000);
+    assert.equal(sel.unassignedByCurrency(big).SAR, sel.unassignedByCurrency(funded).SAR - 100);
   });
 
   it('editing a fund’s total cash takes from its own currency first, then the others', () => {
-    const funded = allocate({ ...base(), funds: [fund({ id: 'F', targetAmount: 100000 })], fundMovements: [{ id: 'm0', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'F', amount: 1000, date: '2026-09-01' }] }, 100, 'SAR');
+    const funded = allocate({ ...base(), funds: [fund({ id: 'F', targetAmount: 100000 })], reservationMovements: [resv('m0', 'F', 'egp', 1000, '2026-09-01')] }, 100, 'SAR');
     approx(fundAllocated(funded, 'F'), 2300);
     const small = apply(funded, ops.editFund(funded, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 1500 }, makeCtx()));
     assert.deepEqual(sel.fundCashByCurrency(small, 'F'), { EGP: 200, SAR: 100, USD: 0 });
@@ -4089,13 +4116,8 @@ describe('analytics', () => {
       createdAt: `${date}T10:00:00.000Z`,
       updatedAt: T0,
     }) as Transaction;
-  const movement = (id: string, fundId: string, amount: number, date: string, extra: Record<string, unknown> = {}) => ({
-    id,
-    fundId,
-    amount,
-    date,
-    rateSnapshotId: S125.id,
-    updatedAt: T0,
+  const movement = (id: string, fundId: string, amount: number, date: string, extra: Partial<ReservationMovement> = {}): ReservationMovement => ({
+    ...resv(id, fundId, 'egp', amount, date, 'adjust'),
     ...extra,
   });
   const at = (s: FinanceState, SAR_EGP: number): FinanceState => withSar(s, SAR_EGP);
@@ -4111,7 +4133,7 @@ describe('analytics', () => {
     settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' },
     holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 0.5, karat: 21, purchaseCost: { amount: 3000, currency: 'EGP' }, purchaseRateSnapshotId: S125.id, country: 'EG', updatedAt: T0 }],
     funds: [fund({ id: 'F', targetAmount: 20000, priority: 1 })],
-    fundMovements: [
+    reservationMovements: [
       movement('m1', 'F', 1000, '2026-08-10'),
       movement('m2', 'F', 1000, '2026-09-10'),
       movement('m3', 'F', 1000, '2026-10-10'),
@@ -4332,7 +4354,7 @@ describe('analytics', () => {
     it('income sources: راتب · فري لانس · دخل تاني; money released from funds is a source', () => {
       let s = withTx(ledger(), tx('i1', 'income', CATEGORY_IDS.otherIncome, 700, '2026-09-25'));
       // September put 1,000 into the fund; taking 1,500 out leaves 500 released.
-      s = { ...s, fundMovements: [...s.fundMovements, movement('w1', 'F', -1500, '2026-09-26')] };
+      s = { ...s, reservationMovements: [...s.reservationMovements, movement('w1', 'F', -1500, '2026-09-26')] };
       const flow = analytics.spendingFlow(s, { period: SEP, currency: 'EGP', includeOneTime: true });
       assert.deepEqual(
         flow.nodes.filter((n) => n.kind === 'source').map((n) => [n.label, n.value]),
@@ -4666,8 +4688,8 @@ describe('analytics', () => {
           fund({ id: 'done', targetAmount: 1000, priority: 3 }),
           fund({ id: 'fresh', targetAmount: 3000, priority: 4 }),
         ],
-        fundMovements: [
-          ...ledger().fundMovements,
+        reservationMovements: [
+          ...ledger().reservationMovements,
           movement('d1', 'done', 1000, '2026-09-01'),
           movement('n1', 'fresh', 500, '2026-10-02'),
           // Stuck once had money, then gave it back.
@@ -4690,9 +4712,9 @@ describe('analytics', () => {
         accounts: [account('egp', 'EGP', 10000), account('sar', 'SAR', 1000, 'SA')],
         holdings: [{ id: 'g1', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCost: { amount: 5000, currency: 'EGP' }, purchaseRateSnapshotId: S125.id, country: 'EG', updatedAt: T0 }],
         funds: [fund({ id: 'G', targetAmount: 100000, deadline: '2027-01-31', linkedHoldingIds: ['g1'] })],
-        fundMovements: [
+        reservationMovements: [
           movement('a', 'G', 1000, '2026-08-05'),
-          movement('b', 'G', 100, '2026-09-05', { currency: 'SAR' }),
+          movement('b', 'G', 100, '2026-09-05', { accountId: 'sar' }),
         ],
       };
       s = at(s, 12.5);
@@ -5501,6 +5523,9 @@ const PER_ROW_SECTIONS = ['accounts', 'transactions', 'movements', 'holdings', '
 function assertRoundingOnly(v7: ReturnType<typeof richV7>, v8: FinanceState) {
   const rows = v7.transactions.length + v7.fundMovements.length + v7.accounts.length + v7.holdings.length + v7.liabilities.length;
   const beyond = diffReports(oracleReport(v7, ORACLE_NOW), reportV8(v8, ORACLE_NOW), 1e-9).filter((d) => {
+    // The one documented difference (tested below): money of migrated movements nobody could assign to an account
+    // yet is unassigned, and v7's implicit FX between currencies is gone.
+    if (d.path.startsWith('unassignedByCurrency.') || d.path === 'analytics.runwayEGP.unassigned') return false;
     const delta = Math.abs(Number(d.v8) - Number(d.oracle));
     const bound = PER_ROW_SECTIONS.includes(d.path.split('.')[0]) ? 0.005 : 0.005 * rows;
     return !(delta <= bound + 1e-9);
@@ -5587,7 +5612,7 @@ describe('v7 → v8: rates become a USD table, records point at immutable snapsh
 
   it('every record points at a stored snapshot; the old fields are gone', () => {
     const v8 = rich();
-    for (const r of [...v8.transactions, ...v8.fundMovements, ...v8.netWorthSnapshots]) {
+    for (const r of [...v8.transactions, ...v8.reservationMovements, ...v8.netWorthSnapshots]) {
       assert.ok(snapshotById(v8.rateSnapshots, r.rateSnapshotId), r.id);
       assert.ok(!('rateToEGP' in r) && !('ratesSnapshot' in r), r.id);
     }
@@ -5624,8 +5649,8 @@ describe('v7 → v8: rates become a USD table, records point at immutable snapsh
     assert.equal(quality('t-rent-sep'), 'recorded');
     assert.equal(quality('t-custom'), 'recorded');
     // Fund movements and net-worth snapshots follow the same rule.
-    assert.equal(snapOfRecord(v8, v8.fundMovements.find((m) => m.id === 'm2')!).quality, 'estimated');
-    assert.equal(snapOfRecord(v8, v8.fundMovements.find((m) => m.id === 'm1')!).quality, 'recorded');
+    assert.equal(snapOfRecord(v8, v8.reservationMovements.find((m) => m.id === 'm2')!).quality, 'estimated');
+    assert.equal(snapOfRecord(v8, v8.reservationMovements.find((m) => m.id === 'm1')!).quality, 'recorded');
     assert.equal(snapOfRecord(v8, v8.netWorthSnapshots.find((s) => s.month === '2026-08')!).quality, 'estimated');
     assert.equal(snapOfRecord(v8, v8.netWorthSnapshots.find((s) => s.month === '2026-09')!).quality, 'recorded');
     // The estimated table is the migration's current table (no drift from now on).
@@ -5678,7 +5703,7 @@ describe('v7 → v8: rates become a USD table, records point at immutable snapsh
     assert.equal(bought.holdings[0].purchaseRateSnapshotId, snapshotId(rateTable(13)));
     approx(sel.holdingCost(bought, bought.holdings[0]), 13000);
     const moved = apply(s0, ops.allocateToFund(s0, 'F', 100, undefined, ctx));
-    assert.equal(moved.fundMovements[0].rateSnapshotId, snapshotId(rateTable(13)));
+    assert.equal(moved.reservationMovements[0].rateSnapshotId, snapshotId(rateTable(13)));
     assert.ok(moved.rateSnapshots.some((x) => x.id === snapshotId(rateTable(13))));
   });
 
@@ -5752,7 +5777,7 @@ describe('rounding: writes are rounded to the currency, sums are exact', () => {
   const ctx = makeCtx();
 
   it('every stored amount is rounded half away from zero, then validated', () => {
-    const s = { ...emptyState(), accounts: [account('egp', 'EGP', 0), account('sar', 'SAR', 0)], funds: [fund({ id: 'F' })] };
+    const s = { ...emptyState(), accounts: [account('egp', 'EGP', 1000), account('sar', 'SAR', 1000)], funds: [fund({ id: 'F' })] };
     const a = apply(s, ops.addTransaction(s, { type: 'expense', amount: 10.005, currency: 'EGP', accountId: 'egp', categoryId: 'cat-lifestyle-dining', date: '2026-10-01' }, ctx));
     assert.equal(amountOf(a.transactions[0]), 10.01);
     // Rounds to zero → not positive.
@@ -5764,7 +5789,7 @@ describe('rounding: writes are rounded to the currency, sums are exact', () => {
     assert.equal(tx.type === 'exchange' && tx.receivedAmount, 1250.56);
     // An opening balance, a fund movement, a plan, a holding and a liability too.
     assert.equal(apply(s, ops.addAccount(s, { name: 'x', type: 'cash', currency: 'USD', openingBalance: 99.995, country: 'EG' }, ctx)).accounts.at(-1)!.openingBalance, 100);
-    assert.equal(apply(s, ops.allocateToFund(s, 'F', 12.345, undefined, ctx)).fundMovements[0].amount, 12.35);
+    assert.equal(apply(s, ops.allocateToFund(s, 'F', 12.345, undefined, ctx)).reservationMovements[0].amount, 12.35);
     assert.throws(() => ops.allocateToFund(s, 'F', 0.001, undefined, ctx), { code: 'NOT_POSITIVE' });
     const plan = apply(s, ops.savePlan(s, { month: '2026-10', currency: 'SAR', expectedIncome: 1000.004, lines: [{ categoryId: 'cat-essentials-rent', limit: 99.995, kind: 'fixed' }], fundContributions: [] }, ctx)).monthlyPlans[0];
     assert.deepEqual([plan.expectedIncome, plan.lines[0].limit], [1000, 100]);
@@ -5830,9 +5855,9 @@ describe('v7 → v8 sub-steps: any intermediate v8 shape is completed, twice is 
     return { ...state, settings } as unknown as FinanceState;
   };
 
-  it('has the seven steps, in order', () => {
-    assert.deepEqual(V8_STEPS.map((s) => s.name), ['countries', 'rates', 'currencies', 'rounding', 'holdings', 'preferences', 'ledger']);
-    assert.equal(LATEST_V8_STEP, 7);
+  it('has the eight steps, in order', () => {
+    assert.deepEqual(V8_STEPS.map((s) => s.name), ['countries', 'rates', 'currencies', 'rounding', 'holdings', 'preferences', 'ledger', 'reservations']);
+    assert.equal(LATEST_V8_STEP, 8);
   });
 
   for (const [name, make] of sources) {
@@ -6344,5 +6369,217 @@ describe('exchange form helpers: the implied rate and the market suggestion', ()
     assert.equal(exchangeUi.formatRate(0.0803), '0.0803');
     assert.equal(exchangeUi.formatRate(1250.5555), '1250.6');
     assert.equal(exchangeUi.rateLine('SAR', 'EGP', 12.4), '1 ر.س = 12.4 ج.م');
+  });
+});
+
+describe('v7 → v8 funds: account-backed reservations (D9)', () => {
+  const ctx = MIGRATION_CTX;
+  const unresolvedByCurrency = (s: FinanceState) =>
+    s.unresolvedMovements.reduce<Record<string, number>>((m, u) => ({ ...m, [u.currency]: roundTo((m[u.currency] ?? 0) + u.amount, 2) }), {});
+
+  it('every fund total, per currency, is exactly what v7 said (assigned + unresolved)', () => {
+    for (const v7 of [richV7(), ...(localSeedV7() ? [localSeedV7()!] : [])]) {
+      const v8 = applyV8Steps(v7, ctx);
+      const oracle = oracleReport(v7, ORACLE_NOW).funds;
+      for (const fund of v8.funds) {
+        const old = oracle[fund.id];
+        assert.deepEqual(sel.fundCashByCurrency(v8, fund.id), old.cash, fund.id);
+        assert.ok(Math.abs(sel.fundAllocated(v8, fund.id) - old.allocated) <= 0.005, fund.id);
+        assert.ok(Math.abs(sel.fundCurrent(v8, fund.id) - old.current) <= 0.005 * 5, fund.id);
+      }
+      assert.ok(!('fundMovements' in v8));
+    }
+  });
+
+  it('unassigned money differs from v7 only by the unresolved movements, per currency', () => {
+    const v7 = richV7();
+    const v8 = applyV8Steps(v7, ctx);
+    const old = oracleReport(v7, ORACLE_NOW).unassignedByCurrency;
+    const now = sel.unassignedByCurrency(v8);
+    const unresolved = unresolvedByCurrency(v8);
+    assert.ok(Object.keys(unresolved).length > 0, 'the fixture has unresolved movements');
+    for (const c of Object.keys(now)) assert.ok(Math.abs(now[c] - old[c] - (unresolved[c] ?? 0)) <= 0.005, c);
+  });
+
+  it('assigned movements keep their id, date, note and rates, as kind adjust on one account; the reasons are listed', () => {
+    const v8 = applyV8Steps(richV7(), ctx);
+    for (const m of v8.reservationMovements) assert.equal(m.kind, 'adjust');
+    for (const u of v8.unresolvedMovements) assert.ok(['ambiguous', 'insufficient', 'negative', 'no_account'].includes(u.reason));
+    // INV-5 holds on everything the migration assigned.
+    assert.deepEqual(invariantViolations(v8), []);
+    assert.deepEqual(applyV8Steps(v8, ctx), v8);
+  });
+
+  it('a group is assigned only when exactly one active account of that currency can hold it', () => {
+    const s0 = {
+      ...emptyStateV7(),
+      accounts: [accountV7('a', 'EGP', 5000), accountV7('b', 'EGP', 5000), accountV7('only', 'SAR', 800), accountV7('usd', 'USD', 10)],
+      funds: [
+        { ...fund({ id: 'one' }), currency: 'SAR' },
+        { ...fund({ id: 'two', priority: 2 }) },
+        { ...fund({ id: 'neg', priority: 3 }) },
+        { ...fund({ id: 'big', priority: 4, currency: 'USD' }) },
+        { ...fund({ id: 'none', priority: 5, currency: 'KWD' }) },
+      ],
+      fundMovements: [
+        { id: 'm1', fundId: 'one', amount: 500, date: '2026-09-01', rateToEGP: 1, updatedAt: T0 },
+        { id: 'm2', fundId: 'two', amount: 1000, date: '2026-09-01', updatedAt: T0 },
+        { id: 'm3', fundId: 'neg', amount: -50, date: '2026-09-01', updatedAt: T0 },
+        { id: 'm4', fundId: 'big', amount: 500, date: '2026-09-01', updatedAt: T0 },
+      ],
+    } as never;
+    const v8 = applyV8Steps(s0, ctx);
+    const where = (id: string) => v8.reservationMovements.find((m) => m.id === id)?.accountId ?? v8.unresolvedMovements.find((m) => m.id === id)?.reason;
+    assert.equal(where('m1'), 'only'); // exactly one SAR account holds 500
+    assert.equal(where('m2'), 'ambiguous'); // two EGP accounts could hold 1,000
+    assert.equal(where('m3'), 'negative');
+    assert.equal(where('m4'), 'insufficient'); // the USD account holds 10
+  });
+
+  it('later groups see what earlier ones already reserved (funds in priority order)', () => {
+    const s0 = {
+      ...emptyStateV7(),
+      accounts: [accountV7('a', 'EGP', 1000)],
+      funds: [fund({ id: 'first', priority: 1 }), fund({ id: 'second', priority: 2 })],
+      fundMovements: [
+        { id: 'x', fundId: 'second', amount: 600, date: '2026-09-01', updatedAt: T0 },
+        { id: 'y', fundId: 'first', amount: 700, date: '2026-09-01', updatedAt: T0 },
+      ],
+    } as never;
+    const v8 = applyV8Steps(s0, ctx);
+    assert.equal(v8.reservationMovements.find((m) => m.id === 'y')?.accountId, 'a');
+    assert.equal(v8.unresolvedMovements.find((m) => m.id === 'x')?.reason, 'insufficient');
+  });
+
+  it('running it on a state that already has reservations changes nothing', () => {
+    const v8 = applyV8Steps(richV7(), ctx);
+    assert.deepEqual(applyV8Steps({ ...v8, settings: { ...v8.settings, v8Step: 7 } } as never, ctx), v8);
+  });
+});
+
+describe('reservations: money of one account set aside for a fund (D1, D10)', () => {
+  // Two SAR accounts (the older one first) and an EGP one.
+  const setup = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [
+      { ...account('bank', 'SAR', 600, 'SA'), createdAt: '2026-01-01T00:00:00.000Z' },
+      { ...account('cash', 'SAR', 800, 'SA'), createdAt: '2026-02-01T00:00:00.000Z' },
+      account('egp', 'EGP', 5000),
+    ],
+    funds: [fund({ id: 'F', currency: 'EGP', targetAmount: 100000 }), fund({ id: 'G', currency: 'SAR', priority: 2, targetAmount: 5000 })],
+  });
+  const reserve = (s: FinanceState, fundId: string, amount: number, currency?: 'EGP' | 'SAR', accountId?: string) =>
+    apply(s, ops.allocateToFund(s, fundId, amount, undefined, makeCtx(), currency, accountId));
+
+  it('takes the account with the most available money, and splits across accounts when one cannot hold it', () => {
+    const s = setup();
+    const one = reserve(s, 'G', 500);
+    assert.deepEqual(one.reservationMovements.map((m) => [m.accountId, m.amount, m.kind]), [['cash', 500, 'reserve']]);
+    // 1,000 SAR: cash (800 available) first, then the bank takes the other 200.
+    const split = reserve(s, 'G', 1000);
+    assert.deepEqual(split.reservationMovements.map((m) => [m.accountId, m.amount]), [['cash', 800], ['bank', 200]]);
+    assert.equal(sel.reservation(split, 'G', 'cash'), 800);
+    assert.equal(sel.accountAvailable(split, 'bank'), 400);
+    assert.deepEqual(invariantViolations(split), []);
+    // Equal availability: the older account.
+    const tie = { ...s, accounts: s.accounts.map((a) => (a.id === 'cash' ? { ...a, openingBalance: 600 } : a)) };
+    assert.equal(reserve(tie, 'G', 100).reservationMovements[0].accountId, 'bank');
+  });
+
+  it('Q13: reserving beyond what is available is refused, whole; a chosen account is the only one used', () => {
+    const s = setup();
+    assert.throws(() => ops.allocateToFund(s, 'G', 1401, undefined, makeCtx()), { code: 'RESERVE_EXCEEDS_AVAILABLE' });
+    assert.throws(() => ops.allocateToFund(s, 'G', 700, undefined, makeCtx(), 'SAR', 'bank'), { code: 'RESERVE_EXCEEDS_AVAILABLE' });
+    assert.equal(reserve(s, 'G', 500, 'SAR', 'bank').reservationMovements[0].accountId, 'bank');
+    assert.throws(() => ops.allocateToFund(s, 'G', 1, undefined, makeCtx(), 'USD'), { code: 'NO_ACCOUNT_IN_CURRENCY' });
+    // An archived account holds no new reservation.
+    const archived = { ...s, accounts: s.accounts.map((a) => (a.id === 'cash' ? { ...a, archived: true } : a)) };
+    assert.throws(() => ops.allocateToFund(archived, 'G', 700, undefined, makeCtx()), { code: 'RESERVE_EXCEEDS_AVAILABLE' });
+  });
+
+  it('D1: 1,000 SAR reserved for an EGP fund stays 1,000 SAR whatever the rates do; only its value moves', () => {
+    const s = reserve(setup(), 'F', 1000, 'SAR');
+    for (const sar of [10, 12.5, 40]) {
+      const rated = withSar(s, sar);
+      assert.equal(sel.fundAllocatedIn(rated, 'F', 'SAR'), 1000);
+      assert.deepEqual(rated.reservationMovements.map((m) => m.amount), s.reservationMovements.map((m) => m.amount));
+      assert.equal(sel.fundAllocated(rated, 'F'), roundTo(1000 * sar, 2));
+    }
+  });
+
+  it('release gives back the largest reservation first (an over-reserved account first), never more than the fund holds', () => {
+    let s = reserve(reserve(setup(), 'G', 300, 'SAR', 'bank'), 'G', 500, 'SAR', 'cash');
+    const out = apply(s, ops.withdrawFromFund(s, 'G', 600, undefined, makeCtx()));
+    // The cash reservation (500) is the largest, then 100 from the bank.
+    assert.deepEqual(out.reservationMovements.slice(2).map((m) => [m.accountId, m.amount, m.kind]), [['cash', -500, 'release'], ['bank', -100, 'release']]);
+    assert.throws(() => ops.withdrawFromFund(s, 'G', 801, undefined, makeCtx()), { code: 'WITHDRAW_EXCEEDS_FUND' });
+    // Spending 400 of the bank's 600 leaves it 100 over-reserved: that account is released first.
+    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 400, currency: 'SAR', accountId: 'bank', categoryId: 'cat-essentials-bills', date: '2026-10-10' }, makeCtx()));
+    assert.equal(sel.accountAvailable(s, 'bank'), -100);
+    const fixed = apply(s, ops.withdrawFromFund(s, 'G', 100, undefined, makeCtx()));
+    assert.equal(fixed.reservationMovements.at(-1)!.accountId, 'bank');
+    assert.deepEqual(invariantViolations(fixed), []);
+  });
+
+  it('allocateMany and withdrawMany are all or nothing, each step seeing the ones before it', () => {
+    const s = setup();
+    const both = apply(s, ops.allocateMany(s, [{ fundId: 'G', amount: 800, currency: 'SAR' }, { fundId: 'F', amount: 500, currency: 'SAR' }], 'distribute', makeCtx()));
+    assert.deepEqual(both.reservationMovements.map((m) => [m.fundId, m.accountId, m.amount]), [['G', 'cash', 800], ['F', 'bank', 500]]);
+    // 800 + 700 > 1,400 available: the second does not fit after the first, so NOTHING is applied.
+    assert.throws(() => ops.allocateMany(s, [{ fundId: 'G', amount: 800, currency: 'SAR' }, { fundId: 'F', amount: 700, currency: 'SAR' }], undefined, makeCtx()), { code: 'RESERVE_EXCEEDS_AVAILABLE' });
+    assert.throws(() => ops.withdrawMany(both, [{ fundId: 'G', amount: 500, currency: 'SAR' }, { fundId: 'G', amount: 400, currency: 'SAR' }], undefined, makeCtx()), { code: 'WITHDRAW_EXCEEDS_FUND' });
+    assert.equal(both.reservationMovements.length, 2);
+  });
+
+  it('D10 / INV-8: net worth and every invariant survive any sequence of reserve and release', () => {
+    let s = setup();
+    const worth = sel.netWorth(s, 'EGP');
+    let seed = 7;
+    const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    for (let i = 0; i < 120; i++) {
+      const fundId = rand() < 0.5 ? 'F' : 'G';
+      const currency = rand() < 0.5 ? 'SAR' : 'EGP';
+      const amount = roundTo(rand() * 600 + 0.01, 2);
+      try {
+        s = apply(s, rand() < 0.6 ? ops.allocateToFund(s, fundId, amount, undefined, makeCtx(), currency) : ops.withdrawFromFund(s, fundId, amount, undefined, makeCtx(), currency));
+      } catch (e) {
+        // Refused operations (beyond available / beyond the fund) change nothing.
+        assert.ok(e instanceof ops.FinanceValidationError);
+      }
+      assert.deepEqual(invariantViolations(s), []);
+      assert.equal(sel.netWorth(s, 'EGP'), worth);
+    }
+    assert.ok(s.reservationMovements.length > 10);
+  });
+
+  it('deleting a fund makes its money available again and logs one tombstone per movement', () => {
+    const s = reserve(reserve(setup(), 'G', 700), 'F', 1000, 'EGP');
+    const after = apply(s, ops.deleteFund(s, 'G', makeCtx()));
+    assert.equal(sel.accountAvailable(after, 'cash'), 800);
+    assert.ok(!after.reservationMovements.some((m) => m.fundId === 'G'));
+    assert.deepEqual([...new Set(after.tombstones.map((x) => x.entity))].sort(), ['fund', 'reservationMovement']);
+  });
+
+  it('migrated movements nobody could assign count toward the fund, not against any account', () => {
+    const s: FinanceState = {
+      ...setup(),
+      unresolvedMovements: [{ id: 'u1', fundId: 'G', amount: 300, currency: 'SAR', date: '2026-09-01', rateSnapshotId: S125.id, reason: 'ambiguous', updatedAt: T0 }],
+    };
+    assert.equal(sel.fundAllocated(s, 'G'), 300);
+    assert.deepEqual(sel.unassignedByCurrency(s), { EGP: 5000, SAR: 1400, USD: 0 });
+    // It cannot be released (it is not on an account) and the total cannot be edited below it.
+    assert.throws(() => ops.withdrawFromFund(s, 'G', 100, undefined, makeCtx()), { code: 'WITHDRAW_EXCEEDS_FUND' });
+    assert.throws(() => ops.editFund(s, 'G', { name: 'G', targetAmount: 5000, cashAllocation: 100 }, makeCtx()), { code: 'WITHDRAW_EXCEEDS_FUND' });
+  });
+
+  it('invariantViolations names an over-reserved account, a negative reservation and a vanished account', () => {
+    const s = setup();
+    const over = { ...s, reservationMovements: [resv('r1', 'G', 'bank', 700)] };
+    assert.deepEqual(invariantViolations(over).map((v) => [v.code, v.accountId]), [['OVER_RESERVED', 'bank']]);
+    const negative = { ...s, reservationMovements: [resv('r1', 'G', 'bank', -5)] };
+    assert.ok(invariantViolations(negative).some((v) => v.code === 'NEGATIVE_RESERVATION'));
+    const gone = { ...s, reservationMovements: [resv('r1', 'G', 'nope', 5)] };
+    assert.ok(invariantViolations(gone).some((v) => v.code === 'UNKNOWN_ACCOUNT'));
+    assert.throws(() => assertInvariants(over), { name: 'InvariantError' });
   });
 });
