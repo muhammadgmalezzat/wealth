@@ -5,6 +5,9 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { describe, it } from 'node:test';
 
+import { create } from 'zustand';
+import { persist, type StateStorage } from 'zustand/middleware';
+
 import * as home from '@/components/dashboard/homeInsights';
 import * as fundsUi from '@/components/funds/fundsUi';
 import * as planUi from '@/components/plan/planUi';
@@ -15,6 +18,16 @@ import * as txUi from '@/components/transactions/transactionUi';
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
 import { FinanceValidationError } from '@/store/errors';
+import {
+  classifyHydrationError,
+  createPersistOptions,
+  createWriteGuard,
+  MigrationFailedError,
+  normalizeStoredPayload,
+  StoredDataUnreadableError,
+  UnsupportedVersionError,
+  type HydrationFailure,
+} from '@/store/hydration';
 import {
   BackupError,
   backupFileName,
@@ -4855,5 +4868,227 @@ describe('dark theme contrast', () => {
     assert.equal(new Set(chart).size, chart.length);
     // Axis labels and gridlines on the card.
     assert.ok(contrast(c.textSecondary, card) >= 4.5);
+  });
+});
+
+// --- Fail-closed hydration -------------------------------------------------------
+// The real zustand `persist`, with the app's options (createPersistOptions), against a fake storage
+// that records every write.
+
+describe('hydration fails closed', () => {
+  const KEY = '@test_state';
+  type S = { n: number; ready: boolean };
+  const stored = (n: number, version: number) => JSON.stringify({ state: { n, ready: false }, version });
+
+  function harness(options: {
+    initial?: string;
+    version?: number;
+    migrate?: (persisted: unknown, version: number) => S;
+    failRead?: boolean;
+  }) {
+    const data = new Map<string, string>(options.initial === undefined ? [] : [[KEY, options.initial]]);
+    const writes: string[] = [];
+    const base: StateStorage = {
+      getItem: async (name) => {
+        if (options.failRead) throw new Error('disk read failed');
+        return data.get(name) ?? null;
+      },
+      setItem: async (name, value) => {
+        writes.push(name);
+        data.set(name, value);
+      },
+      removeItem: async (name) => {
+        writes.push(name);
+        data.delete(name);
+      },
+    };
+    const guard = createWriteGuard();
+    const failures: HydrationFailure[] = [];
+    const logged: HydrationFailure[] = [];
+    const migrated: { persisted: unknown; version: number }[] = [];
+    const persistOptions = createPersistOptions<S, S>({
+      name: KEY,
+      version: options.version ?? 7,
+      baseStorage: base,
+      guard,
+      migrate: (persisted, version) => {
+        migrated.push({ persisted, version });
+        return (options.migrate ?? ((p) => p as S))(persisted, version);
+      },
+      partialize: (s) => ({ n: s.n, ready: s.ready }),
+      // Like the app's callbacks: they DO call setState (which persists) on success and on failure.
+      onSuccess: () => store.setState({ ready: true }),
+      onFailure: (failure) => {
+        failures.push(failure);
+        store.setState({ n: -1 });
+      },
+      skipHydration: true,
+      log: (failure) => logged.push(failure),
+    });
+    const store = create<S>()(persist(() => ({ n: 0, ready: false }), persistOptions));
+    return { store, data, writes, guard, failures, logged, migrated, base };
+  }
+
+  it('a throwing migration writes nothing and leaves the stored payload byte-for-byte', async () => {
+    const payload = stored(5, 6);
+    const h = harness({ initial: payload, migrate: () => { throw new Error('boom'); } });
+    await h.store.persist.rehydrate();
+    assert.deepEqual(h.writes, []);
+    assert.equal(h.data.get(KEY), payload);
+    assert.equal(h.failures.length, 1);
+    assert.equal(h.failures[0].kind, 'migration_failed');
+    assert.equal(h.failures[0].storedVersion, 6);
+    assert.equal(h.logged.length, 1, 'the failure is logged');
+    assert.equal(h.store.getState().ready, false, 'hasHydrated-style flag is never set');
+    // The failure callback itself called setState (the seed state); the guard swallowed that write.
+    assert.ok(h.guard.blockedWrites() >= 1);
+  });
+
+  it('a payload from a newer version is refused: migrate is not called and nothing is written', async () => {
+    const payload = stored(5, 8);
+    const h = harness({ initial: payload, version: 7 });
+    await h.store.persist.rehydrate();
+    assert.deepEqual(h.migrated, []);
+    assert.deepEqual(h.writes, []);
+    assert.equal(h.data.get(KEY), payload);
+    assert.equal(h.failures[0].kind, 'unsupported_version');
+    assert.equal(h.failures[0].storedVersion, 8);
+    assert.equal(h.failures[0].supportedVersion, 7);
+  });
+
+  it('unreadable stored data is refused and left alone', async () => {
+    const cases: [string, string][] = [
+      ['not JSON', 'not json {'],
+      ['a JSON array', '[1,2,3]'],
+      ['no state object', JSON.stringify({ state: 'x', version: 7 })],
+      ['no version', JSON.stringify({ state: { n: 1 } })],
+      ['a fractional version', JSON.stringify({ state: { n: 1 }, version: 7.5 })],
+    ];
+    for (const [label, payload] of cases) {
+      const h = harness({ initial: payload });
+      await h.store.persist.rehydrate();
+      assert.deepEqual(h.writes, [], label);
+      assert.equal(h.data.get(KEY), payload, label);
+      assert.equal(h.failures[0]?.kind, 'unreadable', label);
+    }
+  });
+
+  it('a failing storage read is a failure, not an empty install', async () => {
+    const h = harness({ initial: stored(1, 7), failRead: true });
+    await h.store.persist.rehydrate();
+    assert.deepEqual(h.writes, []);
+    assert.equal(h.failures[0].kind, 'unreadable');
+    assert.equal(h.store.getState().ready, false);
+  });
+
+  it('after a failure nothing can write, however often setState is called', async () => {
+    const payload = stored(5, 6);
+    const h = harness({ initial: payload, migrate: () => { throw new Error('boom'); } });
+    await h.store.persist.rehydrate();
+    h.store.setState({ n: 99 });
+    h.store.setState({ n: 100, ready: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(h.writes, []);
+    assert.equal(h.data.get(KEY), payload);
+  });
+
+  it('a good older payload still migrates and is saved at the new version', async () => {
+    const h = harness({ initial: stored(5, 6), migrate: (p) => ({ ...(p as S), n: (p as S).n + 1 }) });
+    await h.store.persist.rehydrate();
+    assert.equal(h.failures.length, 0);
+    assert.deepEqual(h.migrated.map((m) => m.version), [6]);
+    const saved = JSON.parse(h.data.get(KEY)!);
+    assert.equal(saved.version, 7);
+    assert.equal(saved.state.n, 6);
+    assert.equal(h.store.getState().ready, true);
+  });
+
+  it('the pre-Zustand bare payload is wrapped as version 0 and migrated', async () => {
+    const h = harness({ initial: JSON.stringify({ n: 3 }), migrate: (p) => ({ ...(p as S), ready: false }) });
+    await h.store.persist.rehydrate();
+    assert.equal(h.failures.length, 0);
+    assert.deepEqual(h.migrated.map((m) => m.version), [0]);
+    assert.deepEqual(h.migrated[0].persisted, { n: 3 });
+    assert.equal(JSON.parse(h.data.get(KEY)!).version, 7);
+  });
+
+  it('a current-version payload and a fresh install load normally and keep saving', async () => {
+    const current = harness({ initial: stored(5, 7) });
+    await current.store.persist.rehydrate();
+    assert.equal(current.failures.length, 0);
+    assert.equal(current.store.getState().n, 5);
+    assert.equal(current.migrated.length, 0);
+
+    const fresh = harness({});
+    await fresh.store.persist.rehydrate();
+    assert.equal(fresh.failures.length, 0);
+    assert.equal(fresh.store.getState().ready, true);
+    fresh.store.setState({ n: 42 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(JSON.parse(fresh.data.get(KEY)!).state.n, 42);
+  });
+
+  it('retry: writes are re-enabled for the attempt, and a second failure blocks them again', async () => {
+    let broken = true;
+    const payload = stored(5, 6);
+    const h = harness({
+      initial: payload,
+      migrate: (p) => {
+        if (broken) throw new Error('still broken');
+        return { ...(p as S), n: 50 };
+      },
+    });
+    await h.store.persist.rehydrate();
+    assert.equal(h.failures.length, 1);
+
+    // Retry while still broken: fails again, storage still untouched.
+    h.guard.reset();
+    await h.store.persist.rehydrate();
+    assert.equal(h.failures.length, 2);
+    assert.deepEqual(h.writes, []);
+    assert.equal(h.data.get(KEY), payload);
+
+    // Retry once the cause is gone: migrated and saved.
+    broken = false;
+    h.guard.reset();
+    await h.store.persist.rehydrate();
+    assert.equal(h.failures.length, 2);
+    const saved = JSON.parse(h.data.get(KEY)!);
+    assert.equal(saved.version, 7);
+    assert.equal(saved.state.n, 50);
+    assert.equal(h.guard.failure(), null);
+  });
+
+  it('classifies errors and normalizes payloads', () => {
+    assert.equal(classifyHydrationError(new UnsupportedVersionError(9, 7)).kind, 'unsupported_version');
+    assert.equal(classifyHydrationError(new MigrationFailedError(3, new Error('x'))).kind, 'migration_failed');
+    assert.equal(classifyHydrationError(new StoredDataUnreadableError('x')).kind, 'unreadable');
+    assert.equal(classifyHydrationError('weird').kind, 'unreadable');
+    assert.equal(normalizeStoredPayload(null), null);
+    assert.equal(normalizeStoredPayload(''), '');
+    assert.deepEqual(JSON.parse(normalizeStoredPayload('{"a":1}')!), { state: { a: 1 }, version: 0 });
+    const ok = JSON.stringify({ state: {}, version: 7 });
+    assert.equal(normalizeStoredPayload(ok), ok);
+    assert.throws(() => normalizeStoredPayload('{'), StoredDataUnreadableError);
+  });
+
+  it('the write guard passes writes through until it blocks', async () => {
+    const calls: string[] = [];
+    const guard = createWriteGuard();
+    const wrapped = guard.wrap({
+      getItem: () => 'x',
+      setItem: (name) => void calls.push(`set:${name}`),
+      removeItem: (name) => void calls.push(`remove:${name}`),
+    });
+    await wrapped.setItem('a', '1');
+    guard.block({ kind: 'unreadable', message: 'm' });
+    await wrapped.setItem('b', '2');
+    await wrapped.removeItem('c');
+    assert.deepEqual(calls, ['set:a']);
+    assert.equal(guard.blockedWrites(), 2);
+    assert.equal(wrapped.getItem('a'), 'x', 'reads are never blocked');
+    guard.reset();
+    await wrapped.setItem('d', '4');
+    assert.deepEqual(calls, ['set:a', 'set:d']);
   });
 });

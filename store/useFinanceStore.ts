@@ -1,10 +1,11 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { create } from 'zustand';
-import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
+import { persist, type StateStorage } from 'zustand/middleware';
 
 import { newId } from '@/utils/id';
 import { fetchLivePrices, priceSourceOf, shouldAutoFetch } from '@/utils/prices/fetchPrices';
+import { createPersistOptions, createWriteGuard, type HydrationFailure } from './hydration';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import * as ops from './operations';
 import { stateSummary, type FundAmount } from './selectors';
@@ -162,27 +163,38 @@ export type FinanceStore = FinanceState &
     hasHydrated: boolean;
   };
 
-// Before Zustand, the store wrote the bare state JSON to the same key.
-// Wrap that legacy shape as version 0 so `migrate` can upgrade it instead of discarding it.
-const legacyAwareStorage: StateStorage = {
+// The raw device storage. The pre-Zustand bare state JSON (wrapped as version 0) and the refusal of
+// unreadable payloads happen in hydration.ts (normalizeStoredPayload).
+const deviceStorage: StateStorage = {
   getItem: async (name) => {
     const raw = await AsyncStorage.getItem(name);
     // Only a read that succeeded and found nothing counts as a fresh install.
     storageWasEmpty = !raw;
-    if (!raw) return raw;
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !('state' in parsed)) {
-        return JSON.stringify({ state: parsed, version: 0 });
-      }
-    } catch {
-      // corrupted data — let persist fail hydration and keep the seed
-    }
     return raw;
   },
   setItem: (name, value) => AsyncStorage.setItem(name, value),
   removeItem: (name) => AsyncStorage.removeItem(name),
 };
+
+// Blocks all writes to the stored data once hydration has failed (see hydration.ts).
+const hydrationGuard = createWriteGuard();
+
+// Why the stored data could not be opened, or null. A separate non-persisted store: setting it must
+// never write the finance state (which is the seed while hydration is failing).
+export const useHydrationFailure = create<{ failure: HydrationFailure | null }>(() => ({ failure: null }));
+
+// The stored JSON exactly as it is on the device (for "صدّر البيانات الخام"); null when nothing is stored.
+export function readRawStoredData(): Promise<string | null> {
+  return AsyncStorage.getItem(STORAGE_KEY);
+}
+
+// "حاول تاني": read and migrate the stored data again. Writes are re-enabled only for this attempt;
+// if it fails again the guard blocks them again before anything can be written.
+export async function retryHydration(): Promise<void> {
+  useHydrationFailure.setState({ failure: null });
+  hydrationGuard.reset();
+  await useFinanceStore.persist.rehydrate();
+}
 
 // expo-router renders web pages in Node, where `window` (and so AsyncStorage's localStorage)
 // doesn't exist. Native always defines `window`, so this is only true during web server rendering.
@@ -309,16 +321,21 @@ export const useFinanceStore = create<FinanceStore>()(
       setAppLock: (enabled) => set(ops.setAppLock(get(), enabled)),
       setDueNotifications: (enabled) => set(ops.setDueNotifications(get(), enabled)),
     }),
-    {
+    // Fail-closed: data that is unreadable, newer than CURRENT_VERSION, or whose migration throws is
+    // never overwritten (see hydration.ts). `hasHydrated` stays false then, so every screen keeps
+    // showing its loading state and the root HydrationErrorGate shows the error.
+    createPersistOptions<FinanceStore, FinanceState>({
       name: STORAGE_KEY,
       version: CURRENT_VERSION,
-      storage: createJSONStorage(() => (isServer ? noopStorage : legacyAwareStorage)),
+      baseStorage: isServer ? noopStorage : deviceStorage,
+      guard: hydrationGuard,
       // persist hydrates while the store is created (i.e. at import). On the server, skip that
       // so nothing reads storage, migrates, or calls setState; `hasHydrated` stays false and the
       // server renders the loading state, matching the client's first render.
       skipHydration: isServer,
       // Persist data only — never actions or hydration flags.
       partialize: (s: FinanceStore) => dataOf(s),
+      onFailure: (failure) => useHydrationFailure.setState({ failure }),
       migrate: async (persisted, version) => {
         // Keep the untouched pre-migration payload so a failed or wrong migration never
         // loses data. It is written before the migrated state can overwrite the main key.
@@ -338,7 +355,7 @@ export const useFinanceStore = create<FinanceStore>()(
         }
         return migrated;
       },
-      onRehydrateStorage: () => () => {
+      onSuccess: () => {
         // A fresh install starts from the seed, which has no device id yet, and gets live
         // prices; saved data from before live prices keeps its typed prices (manual).
         const state = useFinanceStore.getState();
@@ -346,6 +363,6 @@ export const useFinanceStore = create<FinanceStore>()(
         const settings = ops.ensurePriceSource(withDevice, storageWasEmpty).settings ?? withDevice.settings;
         useFinanceStore.setState({ settings, hasHydrated: true });
       },
-    }
+    })
   )
 );

@@ -159,6 +159,7 @@ store/                      ALL business logic lives here (pure, no React)
   analytics.ts              Analytics tab numbers (periods, Sankey, trend, breakdown, net worth series, money map, runway, funds, insights, drill-down)
   errors.ts                 FinanceValidationError + typed codes
   migrations.ts             v0 → v7 migration chain
+  hydration.ts              Fail-closed hydration: persist options, write guard, refusal of unreadable / newer data
   backup.ts                 Backup file format, AES-GCM/PBKDF2, open/validate/preview
   defaultCategories.ts      20 default categories (stable ids), FIXED_CATEGORY_IDS
   useFinanceStore.ts        Zustand store + persist config (the only RN-aware store file)
@@ -183,7 +184,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencies.ts (DEFAULT_RATES), market.ts
-tests/logic.test.ts         274 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         285 tests over store/*, utils/* and the pure UI helpers
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
 .easignore                  EAS upload filter (keeps store/seed.local.ts)
@@ -962,14 +963,32 @@ erDiagram
   `FinanceValidationError`; UI wraps them with `runAction` (Arabic alert).
 - `persist` middleware: key **`@wealth_finance_state`**, `version: CURRENT_VERSION` (7),
   `partialize` = `dataOf()` (data only; no actions or `hasHydrated`).
-- Storage: `legacyAwareStorage` wraps AsyncStorage; if the stored JSON has no `state` envelope
-  (pre-Zustand data) it is presented as `{ state, version: 0 }` so it migrates instead of being
+- Storage: `deviceStorage` wraps AsyncStorage (and records whether the read found nothing = a fresh
+  install). The persist options come from `createPersistOptions` in `store/hydration.ts` (pure, no React
+  Native imports, so the tests drive the real zustand `persist` through it). `normalizeStoredPayload`
+  presents pre-Zustand data (no `state` envelope) as `{ state, version: 0 }` so it migrates instead of being
   discarded.
+- **Fail-closed hydration** (`store/hydration.ts`): if the stored payload is unreadable (not JSON, not an
+  object, no `state` object, no integer `version`, or the read itself fails), is **newer** than
+  `CURRENT_VERSION` (`UnsupportedVersionError`, refused before anything else runs), or its migration throws
+  (`MigrationFailedError`), then **nothing is ever written to the stored data**. `createWriteGuard` blocks every
+  `setItem`/`removeItem` of the main key from the moment the failure is classified (defense in depth: even a
+  late `setState` cannot reach storage); `hasHydrated` stays `false`, so every screen keeps its `<LoadingView/>`;
+  the failure goes to `console.error` and to `useHydrationFailure` (a separate, non-persisted store, so
+  reporting it cannot write the seed); and `components/HydrationErrorGate.tsx` (a `Modal` in `app/_layout.tsx`)
+  shows the Arabic error screen with **صدّر البيانات الخام** (`readRawStoredData()` → `saveBackupFile`, file
+  `wealth-raw-YYYY-MM-DD.backup.json`, the stored JSON unmodified and not encrypted) and **حاول تاني**
+  (`retryHydration()`: re-enables writes for that attempt only and calls `persist.rehydrate()`; a second
+  failure blocks again before anything is written). Before this, a throwing `migrate` ended in zustand's
+  `.catch`, the old `onRehydrateStorage` callback ignored the error and called `setState`, and zustand
+  persisted the seed over the real data at launch (reproduced in a scratch script). The pre-migration copy
+  `@wealth_finance_state_backup_v<N>` is still written before each migration (not for refused newer data).
 - **SSR guard:** `isServer = Platform.OS === 'web' && typeof window === 'undefined'` → a no-op
   storage and `skipHydration: true`, so nothing touches AsyncStorage during web server rendering.
   (`web.output` is `"single"` today, so there is no server rendering, but the guard stays.)
-- **Hydration:** screens render `<LoadingView/>` until `hasHydrated`. `onRehydrateStorage`
-  sets `hasHydrated` and calls `ensureDeviceId` (creates `settings.deviceId` on first launch).
+- **Hydration:** screens render `<LoadingView/>` until `hasHydrated`. On success (`onSuccess`, called by the
+  rehydrate handler in `createPersistOptions`) the store sets `hasHydrated` and calls `ensureDeviceId`
+  (creates `settings.deviceId` on first launch) and `ensurePriceSource`.
 - **Seed:** `loadSeed()` → `require('./seed.local')` in try/catch, falling back to
   `seed.example` (Expo's Metro enables optional dependencies). Seeds are written in the v3
   shape and passed through `migratePersistedState(seed, 3, …)`.
@@ -1257,7 +1276,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts` (274 tests, ~20 s; the encrypted round
+`npm run test:logic` → `tsx --test tests/logic.test.ts` (285 tests, ~20 s; the encrypted round
 trip uses the real 200k-iteration KDF). Suites: migrations (v0–v7), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,

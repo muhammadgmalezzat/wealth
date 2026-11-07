@@ -3,6 +3,7 @@ import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
 import { AppLockGate } from '@/components/AppLockGate';
+import { HydrationErrorGate } from '@/components/HydrationErrorGate';
 import { PriceRunner } from '@/components/PriceRunner';
 import { RecurringRunner } from '@/components/RecurringRunner';
 import { SnapshotRunner } from '@/components/SnapshotRunner';
@@ -54,6 +55,8 @@ export default function RootLayout() {
       <PriceRunner />
       <SnapshotRunner />
       <AppLockGate />
+      {/* Stored data could not be opened: error screen over the (still loading) app; nothing is written. */}
+      <HydrationErrorGate />
       {/* Dark only: light status-bar icons on the dark background. */}
       <StatusBar style="light" />
     </ThemeProvider>

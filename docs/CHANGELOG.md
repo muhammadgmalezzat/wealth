@@ -6,6 +6,44 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased (2026-11-07) — 1.2.0 · data v7 · JS only (`eas update`) · Fail-closed hydration
+
+> No native module, no native config, no data-model or migration change; `app.json` `version` not bumped. Safe to
+> ship with the 1.2.0 build or later as an `eas update`.
+
+**For users**
+- If the stored data can't be opened (unreadable file, data saved by a newer version of the app, or a failed data
+  upgrade), the app no longer replaces it with demo data. It shows **مش قادرين نفتح بياناتك** with two buttons:
+  **صدّر البيانات الخام** (saves the stored data exactly as it is) and **حاول تاني**. Nothing is written or
+  deleted in the meantime.
+- Housekeeping: backups exported from the app (`wealth-backup-*.json`, `*.backup.json`) are git-ignored.
+
+**Technical**
+- Bug fixed: a throwing `migrate` ended in zustand's `.catch`; the old `onRehydrateStorage` callback ignored the
+  error and called `setState`, which persists immediately, so the in-memory seed was written over the real data at
+  launch (labelled with the current version). A stored version newer than `CURRENT_VERSION` was also passed to
+  `migratePersistedState`, which applies no step to it.
+- New `store/hydration.ts` (pure): `createPersistOptions` (shared by the store and the tests), `guardedMigrate`
+  (refuses `version > supported` before anything runs; wraps errors as `MigrationFailedError`),
+  `normalizeStoredPayload` (refuses non-JSON, non-objects, missing `state` / integer `version`; wraps the bare
+  pre-Zustand shape as version 0), `createWriteGuard` (blocks all writes to the main key after a failure),
+  `classifyHydrationError`.
+- `useFinanceStore.ts`: `deviceStorage` (replaces `legacyAwareStorage`), `useHydrationFailure` (non-persisted),
+  `readRawStoredData`, `retryHydration`; `hasHydrated` stays `false` on failure.
+- New `components/HydrationErrorGate.tsx` (Modal in `app/_layout.tsx`; export file
+  `wealth-raw-YYYY-MM-DD.backup.json`).
+- Tests: 11 new (285 total) running the real zustand `persist` against a fake storage: throwing migration → no
+  writes and the payload byte-for-byte; newer version → refused, `migrate` not called, no writes (including no
+  pre-migration copy); unreadable payloads (5 shapes); failing read; writes blocked after the failure however often
+  `setState` is called; good older payload and bare pre-Zustand payload still migrate; current-version and fresh
+  installs load and keep saving; retry (still broken → untouched; fixed → migrated and saved); classification and
+  normalization; the guard itself.
+- Verified in a browser (web, 390 px): corrupted JSON and a version-99 payload each show the screen with
+  `localStorage` unchanged, retry while broken keeps it, the exported file is identical to the stored text, and an
+  empty storage still opens the app.
+
+---
+
 ## Unreleased (2026-10-27) — 1.2.0 · data v7 · **needs a new build** · App name, icon and splash
 
 > Part of the same unbuilt 1.2.0 (`app.json` `version` **not** bumped). Name, icon and splash are native config,

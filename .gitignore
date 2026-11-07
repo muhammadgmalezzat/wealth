@@ -44,3 +44,7 @@ store/seed.local.ts
 # generated native folders
 /ios
 /android
+
+# personal backups exported from the app (contain real financial data)
+wealth-backup-*.json
+*.backup.json

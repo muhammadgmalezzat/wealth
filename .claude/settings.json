@@ -1,4 +1,19 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(npx tsx *)",
+      "Bash(cd \"P:/personal projects/wealth\" && mkdir -p docs/architecture && ls docs)",
+      "Bash(awk '{print $5, $6, $7, $8}')",
+      "Bash(git check-ignore *)",
+      "Bash(NODE_PATH=\"P:/personal projects/wealth/node_modules\" npx tsx \"C:/Users/YOGA/AppData/Local/Temp/claude/17054bdf5a30f31e/79f8d63b-0193-4abf-a426-61f08ad9ea9e/scratchpad/oldBehavior.ts\")",
+      "Bash(node C:/Users/YOGA/.claude/skills/browser-automation/browser.mjs http://localhost:8099/ --timeout 400000 --script \"C:/Users/YOGA/AppData/Local/Temp/claude/17054bdf5a30f31e/79f8d63b-0193-4abf-a426-61f08ad9ea9e/scratchpad/hydrationQa.mjs\")",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 8099 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force }; \"stopped\"; Set-Location \"P:\\\\personal projects\\\\wealth\"; Select-String -Path docs/TECHNICAL.md -Pattern \"legacyAware|hasHydrated|274|^## 7|^## 15|store/migrations.ts  |migrations.ts   \" -Encoding utf8 | ForEach-Object { \"$\\($_.LineNumber\\): $\\($_.Line.Substring\\(0,[Math]::Min\\(150,$_.Line.Length\\)\\)\\)\" }; Select-String -Path docs/USER_GUIDE.md -Pattern \"^## |^### \" -Encoding utf8 | Select-Object -Last 12 | ForEach-Object { \"$\\($_.LineNumber\\): $\\($_.Line\\)\" })",
+      "Bash(grep -v \"^$\")"
+    ],
+    "additionalDirectories": [
+      "P:\\personal projects\\wealth\\docs"
+    ]
+  },
   "enabledPlugins": {
     "expo@claude-plugins-official": true
   }
