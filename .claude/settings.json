@@ -16,7 +16,9 @@
       "Bash(node -e \"const p=require\\('./node_modules/expo-router/package.json'\\);console.log\\(p.version, p.dependencies['query-string']\\)\")",
       "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\).on\\('end',\\(\\)=>{const j=JSON.parse\\(s\\);const r=j.report||j;console.log\\(Object.keys\\(j\\)\\);const a=j.actions||[];console.log\\('added',j.added,'changed',j.changed,'removed',j.removed\\);console.log\\(JSON.stringify\\(j.audit?.metadata?.vulnerabilities||''\\)\\);}\\)\")",
       "Bash(node __TRACKED_VAR__/bundlePkgs.cjs __TRACKED_VAR__/export7/_expo/static/js/android/entry-9327ae0487675df62f801f231b425436.hbc.map)",
-      "Bash(npm explain *)"
+      "Bash(npm explain *)",
+      "Bash(git add *)",
+"Bash(git commit *)"
     ],
     "additionalDirectories": [
       "P:\\personal projects\\wealth\\docs"
