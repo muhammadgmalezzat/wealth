@@ -15,6 +15,7 @@ import {
   fundsByPriority,
   fundStatus,
   goldPricePerGram,
+  holdingCostEGP,
   holdingValueEGP,
   liquidByCurrency,
   movementAmountIn,
@@ -739,7 +740,7 @@ export function moneyMap(state: State, currency: DisplayCurrency): MoneyMap {
     const row = karats.get(h.karat) ?? { grams: 0, valueEGP: 0, costEGP: 0 };
     row.grams += h.weightGrams;
     row.valueEGP = addIn(row.valueEGP, holdingValueEGP(state, h), 'EGP');
-    row.costEGP = addIn(row.costEGP, h.purchaseCostEGP, 'EGP');
+    row.costEGP = addIn(row.costEGP, holdingCostEGP(state, h), 'EGP');
     karats.set(h.karat, row);
   }
   const goldRows: GoldRow[] = ([24, 21, 18] as GoldKarat[])
@@ -749,7 +750,7 @@ export function moneyMap(state: State, currency: DisplayCurrency): MoneyMap {
       return { karat, grams: r.grams, value: show(r.valueEGP), cost: show(r.costEGP), pnl: show(roundIn(r.valueEGP - r.costEGP, 'EGP')) };
     });
   const goldValueEGP = sumIn(state.holdings.filter((h) => h.type === 'gold').map((h) => holdingValueEGP(state, h)), 'EGP');
-  const goldCostEGP = sumIn(state.holdings.filter((h) => h.type === 'gold').map((h) => h.purchaseCostEGP), 'EGP');
+  const goldCostEGP = sumIn(state.holdings.filter((h) => h.type === 'gold').map((h) => holdingCostEGP(state, h)), 'EGP');
   const net = netWorthEGP(state);
   return {
     liquid,

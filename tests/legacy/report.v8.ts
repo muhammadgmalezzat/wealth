@@ -37,7 +37,7 @@ export function reportV8(state: FinanceState, now: Date): OracleReport {
   };
 
   for (const a of state.accounts) report.accounts[a.id] = { currency: a.currency, balance: sel.accountBalance(state, a.id) };
-  for (const h of state.holdings) report.holdings[h.id] = { valueEGP: sel.holdingValueEGP(state, h), costEGP: h.purchaseCostEGP };
+  for (const h of state.holdings) report.holdings[h.id] = { valueEGP: sel.holdingValueEGP(state, h), costEGP: sel.holdingCostEGP(state, h) };
 
   for (const tx of state.transactions) {
     if (tx.type === 'transfer') continue;

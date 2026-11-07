@@ -27,6 +27,7 @@ import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { Segment } from '@/components/ui/Segment';
 import { StatusChip } from '@/components/ui/StatusChip';
+import { currencyNameAr } from '@/constants/currencies';
 import { colors, opacity, space } from '@/constants/theme';
 import { openBackup, parseBackup, type BackupFile, type OpenedBackup } from '@/store/backup';
 import { daysSinceBackup, needsBackupReminder } from '@/store/nextActions';
@@ -276,6 +277,13 @@ export default function SettingsScreen() {
       <View>
         <SectionHeader title="التخطيط" />
         <Card>
+          <FormField label="عملة الخطة الشهرية" helper="العملة اللي بتبدأ بيها أي خطة جديدة. كل خطة بتحتفظ بعملتها.">
+            <Segment
+              options={settings.enabledCurrencies.map((code) => ({ label: currencyNameAr(code), value: code }))}
+              value={settings.planCurrency}
+              onChange={(code) => runAction('تعذّر الحفظ', () => state.setCurrencyPreferences({ planCurrency: code }))}
+            />
+          </FormField>
           <FormField label="بداية التتبع" helper="المعاملات قبل التاريخ ده مش بتدخل في ملخص الشهر.">
             <FutureDateField value={trackingStart} onChange={setTrackingStart} />
           </FormField>

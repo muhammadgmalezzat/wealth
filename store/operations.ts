@@ -39,6 +39,7 @@ import type {
   GoldHolding,
   GoldKarat,
   Holding,
+  Money,
   IncomeExpenseTransaction,
   LastUsedSelection,
   Liability,
@@ -92,7 +93,7 @@ const ratePatch = (use: RateSnapshotUse): { rateSnapshots?: RateSnapshot[] } =>
 export type NewFund = Omit<Fund, 'id' | 'createdAt' | 'updatedAt' | 'linkedHoldingIds'> & {
   linkedHoldingIds?: string[];
 };
-export type NewHolding = DistributiveOmit<Holding, 'id' | 'updatedAt'>;
+export type NewHolding = DistributiveOmit<Holding, 'id' | 'updatedAt' | 'purchaseRateSnapshotId'>;
 export type NewLiability = Omit<Liability, 'id' | 'updatedAt'>;
 export type NewRecurringRule = Omit<RecurringRule, 'id' | 'updatedAt' | 'createdAt' | 'nextDate' | 'skippedDates'> & {
   skippedDates?: string[];
@@ -411,7 +412,7 @@ function validateTransaction(state: State, tx: Transaction) {
   else validateIncomeExpense(state, tx);
 }
 
-// The holding's cost basis always mirrors its purchase: the amount in EGP at the purchase's own rates.
+// The holding's cost basis always mirrors its purchase: the amount it was paid in, and the purchase's own rates.
 function syncPurchaseCost(
   holdings: Holding[],
   snapshots: readonly RateSnapshot[],
@@ -420,7 +421,10 @@ function syncPurchaseCost(
 ): Holding[] {
   return holdings.map((h) =>
     h.id === tx.holdingId
-      ? stamp({ ...h, purchaseCostEGP: projectAmount(snapshots, tx.rateSnapshotId, tx.amount, tx.currency, 'EGP') }, ctx)
+      ? stamp(
+          { ...h, purchaseCost: { amount: tx.amount, currency: tx.currency }, purchaseRateSnapshotId: tx.rateSnapshotId },
+          ctx
+        )
       : h
   );
 }
@@ -491,7 +495,8 @@ export interface GoldPurchase {
 function goldHoldingFor(
   input: GoldPurchase,
   id: string,
-  purchaseCostEGP: number,
+  purchaseCost: Money,
+  purchaseRateSnapshotId: string,
   defaultCountry: CountryCode,
   ctx: OpContext
 ): GoldHolding {
@@ -503,7 +508,8 @@ function goldHoldingFor(
     name: holding.name.trim(),
     weightGrams: holding.weightGrams,
     karat: holding.karat,
-    purchaseCostEGP,
+    purchaseCost,
+    purchaseRateSnapshotId,
     purchaseDate: holding.purchaseDate ?? input.date,
     country: holding.country ?? defaultCountry,
     ...(holding.note?.trim() ? { note: holding.note.trim() } : {}),
@@ -518,8 +524,8 @@ export function buyGold(state: State, purchase: GoldPurchase, ctx: OpContext): P
   const input = { ...purchase, amount: money(purchase.amount, account.currency) };
   assertPositive(input.amount, 'amount');
   const use = snapshotForNow(state, ctx.now());
-  const costEGP = money(convertCurrency(input.amount, account.currency, 'EGP', state.settings.rates), 'EGP');
-  const holding = goldHoldingFor(input, ctx.newId(), costEGP, account.country, ctx);
+  // The cost is what was paid, in the currency it was paid in.
+  const holding = goldHoldingFor(input, ctx.newId(), { amount: input.amount, currency: account.currency }, use.id, account.country, ctx);
   validateHolding(holding);
 
   const tx: AssetPurchaseTransaction = {
@@ -551,14 +557,15 @@ export function updateGoldPurchase(state: State, txId: string, purchase: GoldPur
   assertPositive(input.amount, 'amount');
   const keepRates = account.currency === existing.currency;
   const use = keepRates ? undefined : snapshotForNow(state, ctx.now());
-  const costEGP = money(
-    keepRates
-      ? projectAmount(state.rateSnapshots, existing.rateSnapshotId, input.amount, account.currency, 'EGP')
-      : convertCurrency(input.amount, account.currency, 'EGP', state.settings.rates),
-    'EGP'
-  );
   const holding: GoldHolding = {
-    ...goldHoldingFor(input, previousHolding.id, costEGP, previousHolding.country, ctx),
+    ...goldHoldingFor(
+      input,
+      previousHolding.id,
+      { amount: input.amount, currency: account.currency },
+      use ? use.id : existing.rateSnapshotId,
+      previousHolding.country,
+      ctx
+    ),
   };
   validateHolding(holding);
 
@@ -921,7 +928,8 @@ export function deleteFundMovement(state: State, id: string, ctx: OpContext): Pa
 function validateHolding(holding: NewHolding) {
   assertName(holding.name, 'holding');
   assertCountry(holding.country);
-  assertNonNegative(holding.purchaseCostEGP, 'purchaseCostEGP');
+  assertNonNegative(holding.purchaseCost.amount, 'purchaseCost');
+  assertCurrency(holding.purchaseCost.currency);
   if (holding.purchaseDate !== undefined) assertDate(holding.purchaseDate, 'purchaseDate');
   if (holding.type === 'gold') {
     assertPositive(holding.weightGrams, 'weightGrams');
@@ -932,24 +940,29 @@ function validateHolding(holding: NewHolding) {
   }
 }
 
-// A holding's cost is in EGP; a currency holding's quantity is in that currency.
+// A holding's cost is in the currency it was paid in; a currency holding's quantity is in that currency.
 const roundHolding = <T extends NewHolding | Editable<Holding>>(holding: T): T => ({
   ...holding,
-  purchaseCostEGP: money(holding.purchaseCostEGP, 'EGP'),
+  purchaseCost: { ...holding.purchaseCost, amount: money(holding.purchaseCost.amount, holding.purchaseCost.currency) },
   ...(holding.type === 'currency' ? { quantity: money(holding.quantity, holding.currency) } : {}),
 });
 
 export function addHolding(state: State, raw: NewHolding, ctx: OpContext): Patch {
   const input = roundHolding(raw);
   validateHolding(input);
-  const holding = stamp({ ...input, id: ctx.newId() }, ctx) as Holding;
-  return { holdings: [...state.holdings, holding] };
+  const use = snapshotForNow(state, ctx.now());
+  const holding = stamp({ ...input, id: ctx.newId(), purchaseRateSnapshotId: use.id }, ctx) as Holding;
+  return { ...ratePatch(use), holdings: [...state.holdings, holding] };
 }
 
 export function updateHolding(state: State, raw: Editable<Holding>, ctx: OpContext): Patch {
   const holding = roundHolding(raw);
   validateHolding(holding);
-  return { holdings: replaceById(state.holdings, stamp(holding, ctx) as Holding, 'holding') };
+  const existing = requireById(state.holdings, holding.id, 'holding');
+  // The purchase rates are kept unless the cost moved to another currency.
+  const use = existing.purchaseCost.currency === holding.purchaseCost.currency ? undefined : snapshotForNow(state, ctx.now());
+  const updated = stamp({ ...holding, purchaseRateSnapshotId: use ? use.id : existing.purchaseRateSnapshotId }, ctx) as Holding;
+  return { ...(use ? ratePatch(use) : {}), holdings: replaceById(state.holdings, updated, 'holding') };
 }
 
 // Removes a holding (logging a tombstone) and unlinks it from any fund.
@@ -1469,6 +1482,25 @@ export function updateSettings(state: State, update: SettingsUpdate, ctx: OpCont
   if (update.trackingStartDate !== undefined) {
     assertDate(update.trackingStartDate, 'date');
     settings.trackingStartDate = update.trackingStartDate;
+  }
+  return { settings };
+}
+
+export interface CurrencyPreferences {
+  reportingCurrency?: CurrencyCode;
+  planCurrency?: CurrencyCode;
+}
+
+// The currency totals are shown in, and the one a new monthly plan starts in. Either must be one the app
+// offers (enabled); neither changes a stored amount.
+export function setCurrencyPreferences(state: State, prefs: CurrencyPreferences, _ctx: OpContext): Patch {
+  const settings = { ...state.settings };
+  for (const key of ['reportingCurrency', 'planCurrency'] as const) {
+    const code = prefs[key];
+    if (code === undefined) continue;
+    assertCurrency(code);
+    if (!settings.enabledCurrencies.includes(code)) fail('UNKNOWN_CURRENCY');
+    settings[key] = code;
   }
   return { settings };
 }

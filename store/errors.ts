@@ -63,7 +63,7 @@ export type FinanceField =
   | 'cashAllocation'
   | 'weightGrams'
   | 'quantity'
-  | 'purchaseCostEGP'
+  | 'purchaseCost'
   | 'principal'
   | 'monthlyPayment'
   | 'expectedIncome'

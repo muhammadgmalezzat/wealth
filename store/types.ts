@@ -134,6 +134,12 @@ export interface FundMovement extends Synced {
   rateSnapshotId: string;
 }
 
+// An amount in its own currency.
+export interface Money {
+  amount: number;
+  currency: CurrencyCode;
+}
+
 export type GoldKarat = 18 | 21 | 24;
 
 export interface GoldHolding extends Synced {
@@ -142,7 +148,10 @@ export interface GoldHolding extends Synced {
   name: string;
   weightGrams: number;
   karat: GoldKarat;
-  purchaseCostEGP: number;
+  // What it cost, in the currency it was paid in (native: it never changes with the rates)…
+  purchaseCost: Money;
+  // …and the rates then, to show the cost in another currency as it was worth.
+  purchaseRateSnapshotId: string;
   purchaseDate?: string;
   country: CountryCode;
   note?: string;
@@ -154,7 +163,8 @@ export interface CurrencyHolding extends Synced {
   name: string;
   currency: CurrencyCode;
   quantity: number;
-  purchaseCostEGP: number;
+  purchaseCost: Money;
+  purchaseRateSnapshotId: string;
   purchaseDate?: string;
   country: CountryCode;
   note?: string;
@@ -302,6 +312,11 @@ export interface Settings {
   // The currencies offered in pickers and kept in rate tables (settings order). Any currency the data
   // already uses is listed too, whether or not it is here.
   enabledCurrencies: CurrencyCode[];
+  // The currency Home, Assets, Review and Analytics show totals in by default. A screen may override it for
+  // itself; changing it changes no stored amount.
+  reportingCurrency: CurrencyCode;
+  // The currency a new monthly plan starts in (each plan keeps its own).
+  planCurrency: CurrencyCode;
   // How many of the v7 → v8 migration's sub-steps this data has had (store/migrateV8.ts). A payload stored
   // at version 8 by an earlier build has fewer (or none) and is completed on hydration.
   v8Step: number;

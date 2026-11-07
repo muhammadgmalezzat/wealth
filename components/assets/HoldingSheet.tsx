@@ -78,8 +78,8 @@ function details(state: FinanceState, holding: Holding) {
       : [{ label: 'الكمية', value: formatMoney(holding.quantity, holding.currency) }]),
     { label: 'المكان', value: countryName(holding.country) },
   ];
-  if (holding.purchaseCostEGP > 0) {
-    rows.push({ label: 'تكلفة الشراء', value: formatMoney(holding.purchaseCostEGP, 'EGP') });
+  if (holding.purchaseCost.amount > 0) {
+    rows.push({ label: 'تكلفة الشراء', value: formatMoney(holding.purchaseCost.amount, holding.purchaseCost.currency) });
     rows.push({ label: 'فرق القيمة', value: signedDifference(holdingPnlEGP(state, holding)), muted: true });
   }
   return rows;

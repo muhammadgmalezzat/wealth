@@ -31,7 +31,7 @@ const FIELD_LABELS: Record<FinanceField, string> = {
   cashAllocation: 'المبلغ المخصص نقداً',
   weightGrams: 'الوزن',
   quantity: 'الكمية',
-  purchaseCostEGP: 'سعر الشراء',
+  purchaseCost: 'سعر الشراء',
   principal: 'أصل المبلغ',
   monthlyPayment: 'القسط الشهري',
   expectedIncome: 'الدخل المتوقع',

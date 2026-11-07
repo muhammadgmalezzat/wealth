@@ -99,8 +99,14 @@ export function holdingValueEGP(state: Pick<State, 'settings'>, holding: Holding
   return roundIn(toEGP(holding.quantity, holding.currency, state.settings.rates), 'EGP');
 }
 
+// What the holding cost, in EGP at the rates of its purchase (the cost itself is native).
+export function holdingCostEGP(state: Pick<State, 'rateSnapshots'>, holding: Holding): number {
+  const { amount, currency } = holding.purchaseCost;
+  return roundIn(projectAmount(state.rateSnapshots, holding.purchaseRateSnapshotId, amount, currency, 'EGP'), 'EGP');
+}
+
 export function holdingPnlEGP(state: State, holding: Holding): number {
-  return roundIn(holdingValueEGP(state, holding) - holding.purchaseCostEGP, 'EGP');
+  return roundIn(holdingValueEGP(state, holding) - holdingCostEGP(state, holding), 'EGP');
 }
 
 export function holdingsTotalEGP(state: State): number {
@@ -227,13 +233,13 @@ export interface GoldTotals {
   totalCostEGP: number;
 }
 
-export function goldTotals(state: Pick<State, 'holdings'>): GoldTotals {
+export function goldTotals(state: Pick<State, 'holdings' | 'rateSnapshots'>): GoldTotals {
   const totals: GoldTotals = { totalGrams: 0, gramsByKarat: { 18: 0, 21: 0, 24: 0 }, totalCostEGP: 0 };
   for (const h of state.holdings) {
     if (h.type !== 'gold') continue;
     totals.totalGrams += h.weightGrams;
     totals.gramsByKarat[h.karat] += h.weightGrams;
-    totals.totalCostEGP += h.purchaseCostEGP;
+    totals.totalCostEGP = addIn(totals.totalCostEGP, holdingCostEGP(state, h), 'EGP');
   }
   return totals;
 }

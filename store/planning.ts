@@ -27,7 +27,6 @@ import type {
 
 type State = FinanceState;
 
-export const DEFAULT_PLAN_CURRENCY: CurrencyCode = 'SAR';
 const EXPENSE_BUCKETS: ExpenseBucket[] = ['essentials', 'lifestyle', 'giving'];
 // How many completed months the suggestion looks back at (at most).
 const SUGGESTION_MONTHS = 3;
@@ -127,7 +126,7 @@ export function recurringMonthly(state: State, currency: CurrencyCode, now: Date
 export function planSuggestion(
   state: State,
   month: string,
-  currency: CurrencyCode = DEFAULT_PLAN_CURRENCY,
+  currency: CurrencyCode = state.settings.planCurrency,
   now: Date = new Date()
 ): PlanInput {
   const window = suggestionWindow(state, month);
@@ -196,7 +195,7 @@ export function suggestedContributions(
 }
 
 // "ابدأ من الصفر": no lines or income yet; fund contributions prefilled.
-export function emptyPlan(state: State, month: string, currency: CurrencyCode = DEFAULT_PLAN_CURRENCY, now?: Date): PlanInput {
+export function emptyPlan(state: State, month: string, currency: CurrencyCode = state.settings.planCurrency, now?: Date): PlanInput {
   return {
     month,
     currency,

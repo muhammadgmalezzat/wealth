@@ -39,7 +39,6 @@ import { countryName } from '@/constants/countries';
 import { COUNTRY_OPTIONS, DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
 import type { Account, CountryCode, CurrencyCode, GoldKarat, Holding } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { toEGP } from '@/utils/currency';
 import { showMessage } from '@/utils/dialogs';
 import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
@@ -124,12 +123,8 @@ export default function AssetsScreen() {
               weightGrams: num(form.weightGrams) ?? 0,
               karat: Number(form.karat) as GoldKarat,
               country: form.country,
-              // Entered in the selected currency; holdings store cost in EGP.
-              purchaseCostEGP: toEGP(
-                num(form.purchasePrice) ?? 0,
-                form.currency,
-                state.settings.rates
-              ),
+              // Entered in the selected currency and kept in it.
+              purchaseCost: { amount: num(form.purchasePrice) ?? 0, currency: form.currency },
             })
           )
         : runAction('تعذّر الحفظ', () =>
@@ -174,7 +169,7 @@ export default function AssetsScreen() {
 
   const holdingRow = (holding: Holding) => {
     const fundName = fundOf(holding.id);
-    const hasCost = holding.purchaseCostEGP > 0;
+    const hasCost = holding.purchaseCost.amount > 0;
     return (
       <ListRow
         key={holding.id}
@@ -192,7 +187,7 @@ export default function AssetsScreen() {
             <View style={styles.holdingMeta}>
               {hasCost && (
                 <AppText variant="caption" color="textSecondary" style={styles.tabular}>
-                  تكلفة الشراء {formatMoney(holding.purchaseCostEGP, 'EGP')} · فرق القيمة{' '}
+                  تكلفة الشراء {formatMoney(holding.purchaseCost.amount, holding.purchaseCost.currency)} · فرق القيمة{' '}
                   {signedDifference(holdingPnlEGP(state, holding))}
                 </AppText>
               )}

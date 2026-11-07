@@ -174,7 +174,9 @@ function stepRounding(s: Draft): Draft {
     })),
     holdings: s.holdings.map((h: Draft) => ({
       ...h,
-      purchaseCostEGP: egp(h.purchaseCostEGP),
+      // Step 5 replaces purchaseCostEGP; a state that already had it has the native cost instead.
+      ...('purchaseCostEGP' in h ? { purchaseCostEGP: egp(h.purchaseCostEGP) } : {}),
+      ...(h.purchaseCost ? { purchaseCost: { ...h.purchaseCost, amount: money(h.purchaseCost.amount, h.purchaseCost.currency) } } : {}),
       ...(h.type === 'currency' ? { quantity: money(h.quantity, h.currency) } : {}),
     })),
     liabilities: s.liabilities.map((l: Draft) => ({
@@ -212,6 +214,38 @@ function stepRounding(s: Draft): Draft {
   };
 }
 
+// --- 5. a holding's cost is native, with the rates of its purchase ------------------------------------------
+
+// v7 stored the cost in EGP, so that IS its native currency: the amount is unchanged and nothing it feeds
+// moves. The rates are today's stored table, marked 'estimated' (v7 never kept the purchase's own rates).
+function stepHoldings(s: Draft): Draft {
+  if (!s.holdings.some((h: Draft) => 'purchaseCostEGP' in h)) return s;
+  const book = new SnapshotBook(s.rateSnapshots ?? []);
+  const table: RateTable = { base: 'USD', perUsd: s.settings.rates.perUsd };
+  const holdings = s.holdings.map(({ purchaseCostEGP, ...h }: Draft) =>
+    purchaseCostEGP === undefined
+      ? h
+      : {
+          ...h,
+          purchaseCost: { amount: purchaseCostEGP, currency: 'EGP' },
+          purchaseRateSnapshotId: book.add(table, 'estimated', h.updatedAt ?? s.settings.rates.updatedAt),
+        }
+  );
+  return { ...s, holdings, rateSnapshots: book.list() };
+}
+
+// --- 6. display preferences ----------------------------------------------------------------------------
+
+// v7 showed everything in EGP and started every plan in SAR; those become the defaults, so nothing moves.
+function stepPreferences(s: Draft): Draft {
+  const { reportingCurrency, planCurrency } = s.settings;
+  if (reportingCurrency !== undefined && planCurrency !== undefined) return s;
+  return {
+    ...s,
+    settings: { ...s.settings, reportingCurrency: reportingCurrency ?? 'EGP', planCurrency: planCurrency ?? 'SAR' },
+  };
+}
+
 // --- the runner -----------------------------------------------------------------------------------------
 
 // In order; a step's position + 1 is its number in `settings.v8Step`. Only ever append.
@@ -220,6 +254,8 @@ export const V8_STEPS: { name: string; run: (state: Draft) => Draft }[] = [
   { name: 'rates', run: stepRates },
   { name: 'currencies', run: stepCurrencies },
   { name: 'rounding', run: stepRounding },
+  { name: 'holdings', run: stepHoldings },
+  { name: 'preferences', run: stepPreferences },
 ];
 
 export const LATEST_V8_STEP = V8_STEPS.length;
