@@ -36,6 +36,8 @@ const isIncomeExpense = (tx: Transaction): tx is IncomeExpenseTransaction =>
 // --- Accounts ---------------------------------------------------------------
 
 type LiquidState = Pick<State, 'accounts' | 'transactions' | 'settings'>;
+// What per-currency liquid money needs: every currency the data uses, not just the accounts'.
+type LiquidByCurrencyState = LiquidState & Pick<State, 'funds' | 'holdings' | 'fundMovements'>;
 
 // Net effect of all transactions on the account, in its own currency. Added in integer minor units, so
 // a thousand 0.01s are exactly 10.00.
@@ -211,7 +213,7 @@ export function netWorthByCountry(state: State): Record<CountryCode, number> {
 }
 
 // Account balances summed per currency, in that currency (no conversion).
-export function liquidByCurrency(state: LiquidState): Record<CurrencyCode, number> {
+export function liquidByCurrency(state: LiquidByCurrencyState): Record<CurrencyCode, number> {
   const result = zeroByCurrency(state);
   for (const account of state.accounts) {
     result[account.currency] = addIn(result[account.currency], accountBalance(state, account.id), account.currency);
@@ -242,7 +244,7 @@ function findFund(state: State, fundId: string): Fund | undefined {
   return state.funds.find((f) => f.id === fundId);
 }
 
-type CurrencyListState = Pick<State, 'settings' | 'accounts'> & Partial<Pick<State, 'funds' | 'holdings' | 'fundMovements'>>;
+type CurrencyListState = Pick<State, 'settings' | 'accounts' | 'funds' | 'holdings' | 'fundMovements'>;
 
 // Every currency the data uses: the enabled ones first (settings order), then any other currency an
 // account, fund, currency holding or fund movement is in. What per-currency lists and loops run over.
@@ -251,9 +253,9 @@ export function currencyList(state: CurrencyListState): CurrencyCode[] {
     ...new Set<CurrencyCode>([
       ...state.settings.enabledCurrencies,
       ...state.accounts.map((a) => a.currency),
-      ...(state.funds ?? []).map((f) => f.currency),
-      ...(state.holdings ?? []).flatMap((h) => (h.type === 'currency' ? [h.currency] : [])),
-      ...(state.fundMovements ?? []).flatMap((m) => (m.currency ? [m.currency] : [])),
+      ...state.funds.map((f) => f.currency),
+      ...state.holdings.flatMap((h) => (h.type === 'currency' ? [h.currency] : [])),
+      ...state.fundMovements.flatMap((m) => (m.currency ? [m.currency] : [])),
     ]),
   ];
 }

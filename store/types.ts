@@ -302,6 +302,9 @@ export interface Settings {
   // The currencies offered in pickers and kept in rate tables (settings order). Any currency the data
   // already uses is listed too, whether or not it is here.
   enabledCurrencies: CurrencyCode[];
+  // How many of the v7 → v8 migration's sub-steps this data has had (store/migrateV8.ts). A payload stored
+  // at version 8 by an earlier build has fewer (or none) and is completed on hydration.
+  v8Step: number;
   goldPrice24kEGP: number;
   // Market price of 21k, stored separately (it isn't exactly 24k × 21/24). 18k derives from 24k.
   goldPrice21kEGP: number;

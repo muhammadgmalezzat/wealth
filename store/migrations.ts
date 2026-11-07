@@ -3,7 +3,7 @@ import { fromEGP, rateToEGP, toEGP } from './legacy/currency.v7';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from './defaultCategories';
 import { holdingValueEGP, liquidTotalEGP } from './legacy/selectors.v7';
 import { missingPastSnapshots } from './legacy/snapshots.v7';
-import { migrateV7toV8 } from './migrateV8';
+import { applyV8Steps, migrateV7toV8 } from './migrateV8';
 import type { FinanceState as FinanceStateV8 } from './types';
 import type {
   Account,
@@ -473,7 +473,9 @@ export function migratePersistedState(
   version: number,
   ctx: MigrationContext
 ): MigrationResult {
-  const { state, clampedBy } = migrateToV7(persisted, Math.min(version, 7), ctx);
-  // Data already at v8 (or newer, which the hydration guard refuses before it gets here) is not re-migrated.
-  return { state: version >= 8 ? (persisted as FinanceStateV8) : migrateV7toV8(state, ctx), clampedBy };
+  // Data already at v8 may come from an earlier build with fewer v8 sub-steps: applyV8Steps completes it
+  // (and leaves a current one alone). Newer than v8 never gets here: the hydration guard refuses it.
+  if (version >= 8) return { state: applyV8Steps(persisted, ctx), clampedBy: 0 };
+  const { state, clampedBy } = migrateToV7(persisted, version, ctx);
+  return { state: migrateV7toV8(state, ctx), clampedBy };
 }

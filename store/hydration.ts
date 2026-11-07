@@ -160,6 +160,10 @@ export interface PersistSetup<S, P> {
   baseStorage: StateStorage;
   guard: WriteGuard;
   migrate: (persisted: unknown, version: number) => P | Promise<P>;
+  // Completes a payload that is already at the current version but was stored by an earlier build with
+  // less in it (data v8 grew over several builds): runs on EVERY hydration, must return the state
+  // unchanged when it is complete, and must be idempotent. If it throws, hydration fails closed.
+  normalize?: (persisted: unknown) => unknown;
   partialize: (state: S) => P;
   // Hydration finished normally (including "nothing stored yet").
   onSuccess: () => void;
@@ -196,6 +200,18 @@ export function createPersistOptions<S, P>(setup: PersistSetup<S, P>): PersistOp
     storage: createJSONStorage<P>(() => storage),
     ...(setup.skipHydration ? { skipHydration: true } : {}),
     partialize: setup.partialize,
+    ...(setup.normalize
+      ? {
+          merge: (persisted: unknown, current: S) => {
+            if (typeof persisted !== 'object' || persisted === null) return current;
+            try {
+              return { ...current, ...(setup.normalize!(persisted) as object) };
+            } catch (error) {
+              throw new MigrationFailedError(setup.version, error);
+            }
+          },
+        }
+      : {}),
     migrate: guardedMigrate(setup.version, setup.migrate) as PersistOptions<S, P>['migrate'],
     onRehydrateStorage: () => (_state, error) => {
       if (error !== undefined) {

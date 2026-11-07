@@ -20,6 +20,7 @@ import { oracleReport } from './legacy/oracle.v7';
 import { diffReports, reportV8 } from './legacy/report.v8';
 import * as planning from '@/store/planning';
 import { COUNTRY_REGISTRY, countryCodes, countryName, isKnownCountry } from '@/constants/countries';
+import { applyV8Steps, LATEST_V8_STEP, V8_STEPS } from '@/store/migrateV8';
 import { CURRENCY_REGISTRY, decimalsOf, isKnownCurrency, UnknownCurrencyError } from '@/constants/currencyRegistry';
 import * as legacyCurrency from '@/store/legacy/currency.v7';
 import { roundMoney, roundTo, splitMoney, splitTo, sumTo } from '@/utils/money';
@@ -166,6 +167,7 @@ function emptyState(): FinanceState {
     settings: {
       rates: RATES,
       enabledCurrencies: ['EGP', 'SAR', 'USD'],
+      v8Step: LATEST_V8_STEP,
       goldPrice24kEGP: 6000,
       goldPrice21kEGP: 6000 * (21 / 24),
       goldPriceUpdatedAt: '2026-10-01T00:00:00.000Z',
@@ -179,7 +181,7 @@ function emptyState(): FinanceState {
 
 // A data-v7 state (what the frozen migration chain reads): v7 settings, no rate snapshots.
 function emptyStateV7() {
-  const { rateSnapshots: _snapshots, settings: { rates: _rates, enabledCurrencies: _enabled, ...settings }, ...rest } = emptyState();
+  const { rateSnapshots: _snapshots, settings: { rates: _rates, enabledCurrencies: _enabled, v8Step: _step, ...settings }, ...rest } = emptyState();
   return { ...rest, settings: { ...settings, exchangeRates: RATES_V7 } };
 }
 
@@ -5676,5 +5678,131 @@ describe('rounding: writes are rounded to the currency, sums are exact', () => {
     const s: FinanceState = { ...emptyState(), accounts: [account('k', 'KWD', 10.005)] };
     assert.equal(accountBalance(s, 'k'), 10.01);
     assert.deepEqual(sel.liquidByCurrency(s).KWD, 10.01);
+  });
+});
+
+// --- v7 → v8 as ordered, idempotent sub-steps --------------------------------------------------
+
+describe('v7 → v8 sub-steps: any intermediate v8 shape is completed, twice is once', () => {
+  const sources: [string, () => ReturnType<typeof richV7>][] = [['rich', richV7], ['example seed', exampleSeedV7]];
+  const local = localSeedV7();
+  if (local) sources.push(['local seed', () => localSeedV7()!]);
+  const ctx = MIGRATION_CTX;
+  const drop = (state: FinanceState): FinanceState => {
+    // What builds from before the marker stored: no v8Step.
+    const { v8Step: _step, ...settings } = state.settings;
+    return { ...state, settings } as unknown as FinanceState;
+  };
+
+  it('has the four steps, in order', () => {
+    assert.deepEqual(V8_STEPS.map((s) => s.name), ['countries', 'rates', 'currencies', 'rounding']);
+    assert.equal(LATEST_V8_STEP, 4);
+  });
+
+  for (const [name, make] of sources) {
+    it(`${name}: apply only the first k sub-steps for every k, hydrate with the current code → the full migration`, () => {
+      const full = applyV8Steps(make(), ctx);
+      assert.equal(full.settings.v8Step, LATEST_V8_STEP);
+      for (let k = 0; k <= LATEST_V8_STEP; k++) {
+        const partial = applyV8Steps(make(), ctx, k);
+        // With the marker (this build's intermediate states)…
+        assert.deepEqual(applyV8Steps(partial, ctx), full, `k=${k}, marker kept`);
+        // …and without it (payloads an earlier build stored at version 8).
+        assert.deepEqual(applyV8Steps(drop(partial), ctx), full, `k=${k}, marker dropped`);
+        // The same through the entry point the store and backups use.
+        assert.deepEqual(migratePersistedState(partial, 8, ctx).state, full, `k=${k}, migratePersistedState`);
+      }
+    });
+
+    it(`${name}: migrating twice is migrating once, and migratePersistedState(v7) is the same`, () => {
+      const once = applyV8Steps(make(), ctx);
+      assert.deepEqual(applyV8Steps(once, ctx), once);
+      assert.deepEqual(applyV8Steps(applyV8Steps(once, ctx), ctx), once);
+      assert.deepEqual(migratePersistedState(make(), 7, ctx).state, once);
+      assert.equal(applyV8Steps(once, ctx), once, 'a current state comes back as the very same object');
+    });
+
+    it(`${name}: each step on its own is idempotent`, () => {
+      let state: unknown = make();
+      for (const step of V8_STEPS) {
+        state = step.run(state as never);
+        assert.deepEqual(step.run(state as never), state, step.name);
+      }
+    });
+  }
+
+  it('the rounding step rounds stored amounts to their currency (≤ half a minor unit) and only that', () => {
+    const v7 = richV7();
+    v7.transactions = v7.transactions.map((t) => (t.id === 't-groc-oct' && t.type === 'expense' ? { ...t, amount: 200.004 } : t.id === 't-fx' && t.type === 'transfer' ? { ...t, toAmount: 12400.005 } : t));
+    v7.accounts = v7.accounts.map((a) => (a.id === 'a-usd' ? { ...a, openingBalance: 399.996 } : a));
+    const v8 = applyV8Steps(v7, ctx);
+    assert.equal(v8.transactions.find((t) => t.id === 't-groc-oct')!.amount, 200);
+    assert.equal((v8.transactions.find((t) => t.id === 't-fx') as { toAmount: number }).toAmount, 12400.01);
+    assert.equal(v8.accounts.find((a) => a.id === 'a-usd')!.openingBalance, 400);
+    // Everything else is untouched by it.
+    assert.deepEqual(v8.holdings.map((h) => h.purchaseCostEGP), richV7().holdings.map((h) => h.purchaseCostEGP));
+  });
+
+  it('selectors do not hide missing data: a state without its fields fails loudly', () => {
+    const broken = { ...applyV8Steps(richV7(), ctx), settings: { ...applyV8Steps(richV7(), ctx).settings, enabledCurrencies: undefined as never } };
+    assert.throws(() => sel.currencyList(broken), TypeError);
+    assert.throws(() => sel.unassignedSummary(broken), TypeError);
+  });
+
+  describe('hydration completes a stale v8 payload', () => {
+    const KEY = '@test_v8';
+    type Data = FinanceState;
+    function hydrate(storedState: unknown, version = 8, normalize: (p: unknown) => unknown = (p) => applyV8Steps(p, ctx)) {
+      const initial = {} as Data;
+      const data = new Map<string, string>([[KEY, JSON.stringify({ state: storedState, version })]]);
+      const writes: string[] = [];
+      const guard = createWriteGuard();
+      const failures: HydrationFailure[] = [];
+      const base: StateStorage = {
+        getItem: async (n) => data.get(n) ?? null,
+        setItem: async (n, v) => { writes.push(n); data.set(n, v); },
+        removeItem: async (n) => { data.delete(n); },
+      };
+      const options = createPersistOptions<Data, Data>({
+        name: KEY, version: 8, baseStorage: base, guard, skipHydration: true, log: () => {},
+        migrate: (p, v) => migratePersistedState(p, v, ctx).state,
+        normalize,
+        partialize: (s) => s,
+        onSuccess: () => {},
+        onFailure: (f) => failures.push(f),
+      });
+      const store = create<Data>()(persist(() => initial, options));
+      return { store, data, writes, failures, raw: data.get(KEY)! };
+    }
+
+    for (const [name, make] of sources) {
+      it(`${name}: a payload stored at version 8 after step k completes to the full migration`, async () => {
+        const full = applyV8Steps(make(), ctx);
+        for (let k = 0; k <= 3; k++) {
+          const stale = drop(applyV8Steps(make(), ctx, k));
+          const h = hydrate(stale);
+          await h.store.persist.rehydrate();
+          assert.equal(h.failures.length, 0, `k=${k}`);
+          assert.deepEqual(h.store.getState(), full, `k=${k}`);
+        }
+      });
+    }
+
+    it('a current payload is loaded as it is', async () => {
+      const full = applyV8Steps(richV7(), ctx);
+      const h = hydrate(full);
+      await h.store.persist.rehydrate();
+      assert.deepEqual(h.store.getState(), full);
+      assert.equal(h.failures.length, 0);
+    });
+
+    it('a sub-step that throws fails closed: the stored payload is not touched', async () => {
+      const stale = { ...drop(applyV8Steps(richV7(), ctx, 1)), transactions: 'not a list' };
+      const h = hydrate(stale);
+      await h.store.persist.rehydrate();
+      assert.equal(h.failures[0]?.kind, 'migration_failed');
+      assert.deepEqual(h.writes, []);
+      assert.equal(h.data.get(KEY), h.raw);
+    });
   });
 });

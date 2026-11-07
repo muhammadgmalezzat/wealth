@@ -112,7 +112,7 @@ export interface Upcoming {
 // Unhandled occurrences of active rules in the next `days` days (after today, up to today +
 // days), soonest first, with totals per currency.
 export function upcoming(
-  state: State & Pick<FinanceState, 'settings' | 'accounts'>,
+  state: State & Pick<FinanceState, 'settings' | 'accounts' | 'funds' | 'holdings' | 'fundMovements'>,
   days: number,
   today: string
 ): Upcoming {

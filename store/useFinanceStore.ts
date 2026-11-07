@@ -6,6 +6,7 @@ import { persist, type StateStorage } from 'zustand/middleware';
 import { newId } from '@/utils/id';
 import { fetchLivePrices, priceSourceOf, shouldAutoFetch } from '@/utils/prices/fetchPrices';
 import { createPersistOptions, createWriteGuard, type HydrationFailure } from './hydration';
+import { applyV8Steps, LATEST_V8_STEP } from './migrateV8';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import * as ops from './operations';
 import { stateSummary, type FundAmount } from './selectors';
@@ -333,6 +334,17 @@ export const useFinanceStore = create<FinanceStore>()(
       // so nothing reads storage, migrates, or calls setState; `hasHydrated` stays false and the
       // server renders the loading state, matching the client's first render.
       skipHydration: isServer,
+      // A payload stored at version 8 by an earlier build (data v8 grew over several builds) is completed here.
+      // The untouched copy is kept first, so a wrong completion can always be undone by hand.
+      normalize: (persisted) => {
+        const done = (persisted as { settings?: { v8Step?: number } }).settings?.v8Step ?? 0;
+        if (done >= LATEST_V8_STEP) return persisted;
+        void AsyncStorage.setItem(
+          `${BACKUP_KEY_PREFIX}8_before_step_${done}`,
+          JSON.stringify({ state: persisted, version: CURRENT_VERSION })
+        );
+        return applyV8Steps(persisted, { now: new Date().toISOString(), newId });
+      },
       // Persist data only — never actions or hydration flags.
       partialize: (s: FinanceStore) => dataOf(s),
       onFailure: (failure) => useHydrationFailure.setState({ failure }),
