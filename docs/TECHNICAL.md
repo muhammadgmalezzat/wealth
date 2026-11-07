@@ -2,9 +2,9 @@
 
 > Written from the code as of persisted-state **version 8** (`store/migrations.ts → CURRENT_VERSION`), on branch
 > `currency-v8` (Phase B of `docs/architecture/CURRENCY_AND_FUNDS_DESIGN.md`: currency engine and precision). `main`
-> is still data v7 until Phase D ships. Exchange transactions, fees, same-currency transfers and account-backed fund
-> reservations (Phases C–D) are **not built**: the Funds and unassigned-money sections still describe the v7 rules,
-> which v8 keeps (in EGP).
+> is still data v7 until Phase D ships. Phase C (transfers vs exchanges, fees, recurring exchanges) is built too.
+> Account-backed fund reservations (Phase D) are **not built**: the Funds and unassigned-money sections still
+> describe the v7 rules, which v8 keeps (in EGP).
 > Examples use the fake data in `store/seed.example.ts`. **Never copy figures from
 > `store/seed.local.ts` (the owner's real data) into docs, tests or issues.**
 
@@ -164,7 +164,7 @@ store/                      ALL business logic lives here (pure, no React)
   analytics.ts              Analytics tab numbers (periods, Sankey, trend, breakdown, net worth series, money map, runway, funds, insights, drill-down)
   errors.ts                 FinanceValidationError + typed codes
   migrations.ts             v0 → v7 chain (frozen, via migrateToV7) + migratePersistedState; CURRENT_VERSION = 8
-  migrateV8.ts              v7 → v8 as ordered idempotent sub-steps (V8_STEPS, applyV8Steps, settings.v8Step)
+  migrateV8.ts              v7 → v8 as ordered idempotent sub-steps (V8_STEPS, applyV8Steps, settings.v8Step; step 7 = the ledger)
   rateSnapshots.ts          snapshotForNow / ratePatch: the rate snapshot a write uses
   legacy/                   FROZEN v7 code (types, currency, selectors, planning, recurring, snapshots, analytics): the test oracle only
   hydration.ts              Fail-closed hydration: persist options, write guard, refusal of unreadable / newer data
@@ -194,7 +194,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencyRegistry.ts, countries.ts, currencies.ts (names, v7-shaped DEFAULT_RATES for the seeds), market.ts
-tests/logic.test.ts         362 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         390 tests over store/*, utils/* and the pure UI helpers
 tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
@@ -884,7 +884,9 @@ ListGroup draws separators) on `ListRow`:
 | Subtitle (1 line) | account · note · date* | same | "تحويل بين حساباتك" · note · date* | account · note · date* |
 | Amount | text color, no sign | green "+" | text color (source currency) | text color |
 
-\* date only with `showDate` (Home). Chips under the subtitle: لمرة واحدة (oneTime), متكرر
+\An **exchange** row is the transfer row with subtitle "تحويل عملة", the sent amount in the source currency and "≈ received amount" in the target currency (what actually arrived, not a rate conversion); both rows add one chip per fee ("رسوم {amount}", in the fee account's currency).
+
+* date only with `showDate` (Home). Chips under the subtitle: لمرة واحدة (oneTime), متكرر
 (`recurringRuleId`), مؤرشف (archived category). Non-EGP amounts show "≈ X ج.م" from the stored
 `rateToEGP` snapshot (never current rates). minHeight 56; accessibilityLabel = title, amount, date.
 
@@ -902,8 +904,14 @@ copy of three validation messages was added); the parts are presentational:
    أساسيات / رفاهيات / عطاء for expense categories (quick chips stay flat). Also used by
    AddLineSheet (with `forceExpanded` while searching and `label={null}`).
 4. `AccountPicker`: one line "من / في / دفعت من {account} · {currency}" that expands account
-   chips; transfers have من and إلى; a cross-currency transfer adds the "المبلغ المستلم" FormField
-   pre-filled with the converted amount (as before).
+   chips; transfers have من and إلى. One "تحويل" tab serves both: the same currency saves a **transfer**,
+   two currencies an **exchange** (`ExchangeFields`): "المبلغ المستلم" is **required and typed** (never
+   pre-filled), under it "سعر الصرف الفعلي: 1 ر.س = 12.4 ج.م" (received ÷ sent, `components/transactions/exchangeUi.ts`),
+   and the market rate as a labelled suggestion ("اقتراح بسعر السوق الحالي … مش بيتحفظ لوحده") with a button
+   that fills the field only when tapped; a soft warning when the implied rate is more than 5% from the market's
+   (never blocks saving). `FeeFields`: "إضافة رسوم" adds any number of fees, each charged to the sender or the
+   receiver (in that account's currency); for a new record their impact on the رسوم plan line shows in the
+   amount hint (`feeSpendImpact`). Editing a transfer or exchange keeps its fees; the row shows a chip per fee.
 5. Date (`PastDateField`; other dates now in Arabic via `formatDateAr`).
 6. `GoldFields` (ذهب only): weight, karat Segment, location Segment, optional name (auto-name as
    placeholder); gold accent on the section label. Cost = the amount.
@@ -934,13 +942,16 @@ Every synced entity has `updatedAt` (set only by operations).
   - `rateSnapshotId` — the rate snapshot of the moment it was recorded; a dangling id is corrupt data and throws `RateSnapshotMissingError` (never today's rates)
   - common optional `recurringRuleId?`, `occurrenceDate?` (the rule occurrence this transaction records; any type)
   - `income | expense`: `currency` (= account currency), `accountId`, `categoryId`, `liabilityId?`, `oneTime?`
-  - `transfer`: `fromAccountId`, `toAccountId`, `toAmount` (in the target account's currency)
+  - `transfer` (**same currency only**): `fromAccountId`, `toAccountId`, `amount` (leaves the source, arrives in the target), `fees: Fee[]`
+  - `exchange` (two currencies): `fromAccountId`, `toAccountId`, `sentAmount` (source currency), `receivedAmount` (target currency — typed by the user, never computed; the rate is implied and not stored), `fees: Fee[]`
+  - **Fee** `{ accountId (the source or the target of the move), amount (> 0, in that account's currency), categoryId? (an expense category; default the fees category) }` — stored on the record, so editing or deleting an exchange is one atomic change
+  - (a transaction's `amount` is on `income | expense | transfer | asset_purchase`; an exchange has sent / received instead)
   - `asset_purchase`: `accountId`, `currency`, `holdingId` — cash turned into a holding
 - **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), updatedAt }`
 - **FundMovement** `{ id, fundId, amount (+allocate / −withdraw, in `currency`), currency? (the money's currency; missing = the fund's currency, covered by any currency's money — see Funds below), date, note?, rateSnapshotId, updatedAt }`
 - **Holding** (union): `gold { weightGrams, karat: 18|21|24 }` or `currency { currency, quantity }`; common `id, name, purchaseCost: Money` (what it cost, in the currency it was paid in; never changes with rates), `purchaseRateSnapshotId` (the rates of the purchase, to show the cost in another currency as it was then), `purchaseDate?, country, note?, updatedAt`
 - **Liability** `{ id, name, principal, currency, country, monthlyPayment?, startDate, notes?, updatedAt }` (no interest)
-- **RecurringRule** `{ id, name, kind: income|expense|transfer, amount, currency (= account currency), accountId, categoryId? (income/expense), toAccountId?, toAmount? (transfers; required when currencies differ), frequency: weekly|monthly|yearly, interval ≥ 1, dayOfMonth? 1–31 (clamped to month end), startDate, endDate?, nextDate ('' when nothing is left), mode: auto|confirm, variableAmount, active, skippedDates[], note?, createdAt, updatedAt }`
+- **RecurringRule** `{ id, name, kind: income|expense|transfer|exchange, amount (the amount sent), currency (= account currency), accountId, categoryId? (income/expense), toAccountId? (transfer / exchange), toAmount? (exchange: the amount received each time, required), frequency: weekly|monthly|yearly, interval ≥ 1, dayOfMonth? 1–31 (clamped to month end), startDate, endDate?, nextDate ('' when nothing is left), mode: auto|confirm, variableAmount, active, skippedDates[], note?, createdAt, updatedAt }`
 - **MonthlyPlan** `{ id = plan-YYYY-MM, month, currency, expectedIncome, lines: PlanLine[], fundContributions: PlannedContribution[], createdAt, updatedAt }`
   - `PlanLine { categoryId, limit, kind: fixed|flexible }`, `PlannedContribution { fundId, amount }` (plan currency)
 - **Settings** `{ rates: CurrentRates { base: 'USD', perUsd, updatedAt, source }, enabledCurrencies, reportingCurrency, planCurrency, v8Step, goldPrice24kEGP, goldPrice21kEGP, goldPriceUpdatedAt, trackingStartDate, deviceId, lastBackupAt?, appLockEnabled?, dueNotificationsEnabled?, lastUsed?, priceSource? ('auto' | 'manual', missing = manual; a fresh install is set to 'auto' on first launch), localPremiumPct? (missing = 0), lastPriceFetchAt?, lastPriceFetchError? ('network' | 'fx' | 'gold'), fxSource? ('open.er-api' | 'exchangerate.fun'), lastGoldUsdPerOunce? }`
@@ -1034,7 +1045,7 @@ greater than the stored one. Used by `persist.migrate` **and** by backup restore
 | v5 → v6 | Legacy rules `{ type, nextDate, … }` → `RecurringRule`: `kind = type`, `interval: 1`, `dayOfMonth` = day of `nextDate` (not for weekly), `startDate = nextDate`, `mode: 'confirm'` (nothing is recorded without the user), `variableAmount: false`, `skippedDates: []`, `createdAt = updatedAt ?? now`. Rules that already have `kind` pass through unchanged. |
 | v6 → v7 | `netWorthSnapshots ??= []`, `actionDismissals ??= []`, `monthlyReviews ??= []`; then every past month from `trackingStartDate`'s month (at most 36) up to the month before `now` that has no snapshot gets an `estimated` one from `netWorthAsOf(month end)` at the current rates/prices, `takenAt = now`. The current month is left to the SnapshotRunner. Existing snapshots are never changed. |
 
-| v7 → v8 | `applyV8Steps`: six ordered, idempotent sub-steps (below). v0 → v7 are frozen in `migrateToV7` and run first for older data. |
+| v7 → v8 | `applyV8Steps`: seven ordered, idempotent sub-steps (below). v0 → v7 are frozen in `migrateToV7` and run first for older data. |
 
 Idempotence rules: v2→v3 … v6→v7 only fill missing values and keep existing ones, so
 running them twice yields the same result (tested). Before migrating, the raw payload is
@@ -1054,6 +1065,7 @@ version-8 state from any earlier step, or a current one; migrating twice equals 
 | 4 | rounding | every stored amount rounded to its currency's decimals (INV-7) |
 | 5 | holdings | `purchaseCostEGP` → `purchaseCost { amount, currency: 'EGP' }` (unchanged) + `purchaseRateSnapshotId` (an `estimated` snapshot of the stored rates) |
 | 6 | preferences | `reportingCurrency: 'EGP'`, `planCurrency: 'SAR'` (what v7 did) |
+| 7 | ledger | a v7 `transfer` (`amount` out, `toAmount` in): **different currencies → `exchange`** (`sentAmount = amount`, `receivedAmount = toAmount`, no invented amount, every balance unchanged); same currency and equal amounts → plain `transfer` (`fees: []`); same currency with **unequal amounts** (never offered by the v7 UI): sent > received → a transfer of the *received* amount plus a fee of the difference on the source account (category رسوم), received > sent → a transfer of the *sent* amount plus an income "تسوية" of the difference on the target (`<id>-adjustment`; the category is created only then, or a same-named one of the user's is reused) — balances identical, the difference now shows as spending / income. A recurring cross-currency transfer becomes an `exchange` rule forced to `confirm`; a same-currency rule drops `toAmount`. The default category "رسوم" (`cat-essentials-fees`, essentials) is added unless one of that name exists. |
 
 Acceptance (tests): applying the first k steps for every k and then hydrating equals the full migration; the full
 migration twice equals once; a step that throws fails closed (stored payload untouched); and the frozen-v7 oracle
@@ -1075,10 +1087,10 @@ Key validation rules:
 - Names required; amounts `> 0`; non-negative fields `≥ 0`; dates `YYYY-MM-DD`; months `YYYY-MM`.
 - Income/expense: account & category exist; `currency === account.currency`; category kind = type;
   liability payments must be expenses in the liability's currency.
-- Transfer: both accounts exist and differ; `toAmount` defaults to the converted amount.
+- Transfer (`addTransfer`): both accounts exist and differ, **same currency** (`TRANSFER_CURRENCY_MISMATCH`), amount > 0. Exchange (`addExchange`): accounts differ, **currencies differ** (`EXCHANGE_SAME_CURRENCY`), sent and received > 0 — no operation supplies a default received amount. Fees (both): each `amount > 0` (field `fee`), on the source or target account (`FEE_ACCOUNT_INVALID`), in an expense category (default the fees category, `feeCategoryId`: the default one or a user-made "رسوم"). Every leg and fee is rounded in its account's currency; `lastUsed.exchange` remembers the accounts. One record, one patch: a failing operation changes nothing.
 - `updateTransaction`: keeps `createdAt`; keeps `rateToEGP` unless the currency changes
   (then re-snapshots at the current rate) — for transfers the currency is the from-account's, so
-  moving a transfer to a from-account in another currency re-snapshots too; a gold purchase can't change type (`ASSET_PURCHASE_TYPE_LOCKED`).
+  moving a transfer to a from-account in another currency re-snapshots too; a transfer can become an exchange (and back) when its accounts' currencies change, as long as the new record validates (the UI picks the type from the accounts); a gold purchase can't change type (`ASSET_PURCHASE_TYPE_LOCKED`). Deleting an exchange or transfer removes the one record, so both legs and its fees go together (one tombstone).
 - Accounts: currency locked once used; delete refused when referenced (`ACCOUNT_IN_USE`).
 - Categories: name trimmed, required and **unique among active categories** (case-insensitive,
   `CATEGORY_NAME_TAKEN`; archived names are free); income kind ⇔ income bucket; `updateCategory`
@@ -1096,7 +1108,7 @@ Key validation rules:
   removed by deleting the purchase (`HOLDING_HAS_PURCHASE`).
 - Recurring rules: name, amount `> 0`, interval integer ≥ 1, dayOfMonth 1–31, valid start/end
   (end ≥ start), mode auto|confirm; account exists and `currency === account.currency`; transfers
-  need a different target account and `toAmount > 0` when currencies differ; income/expense need a
+  need a different target account in the **same** currency; an exchange rule needs a different currency, `toAmount > 0` and `mode: 'confirm'` (an unknown executed rate is never recorded by itself, so `processDue` never creates one; a confirmed occurrence uses the rule's received amount, and a different amount sent needs its own received amount); income/expense need a
   category of the same kind. `nextDate` is always recomputed by operations.
 - Plans: valid month/currency; lines use existing **expense** categories, no duplicates, limit ≥ 0;
   contributions reference existing funds, no duplicates.
@@ -1129,7 +1141,7 @@ entity/field labels interpolated (e.g. `NOT_POSITIVE` + field `weightGrams` → 
 
 `NAME_REQUIRED, NOT_FOUND, NOT_POSITIVE, NEGATIVE, NOT_A_NUMBER, INVALID_DATE, INVALID_MONTH,
 INVALID_KARAT, INVALID_FREQUENCY, INVALID_MODE, CURRENCY_MISMATCH, CATEGORY_KIND_MISMATCH,
-CATEGORY_BUCKET_MISMATCH, LIABILITY_PAYMENT_NOT_EXPENSE, SAME_ACCOUNT_TRANSFER, ACCOUNT_IN_USE,
+CATEGORY_BUCKET_MISMATCH, LIABILITY_PAYMENT_NOT_EXPENSE, SAME_ACCOUNT_TRANSFER, TRANSFER_CURRENCY_MISMATCH, EXCHANGE_SAME_CURRENCY, FEE_ACCOUNT_INVALID, ACCOUNT_IN_USE,
 ACCOUNT_CURRENCY_LOCKED, CATEGORY_IN_USE, LIABILITY_IN_USE, LIABILITY_CURRENCY_LOCKED,
 WITHDRAW_EXCEEDS_FUND, HOLDING_ALREADY_LINKED, INSUFFICIENT_UNASSIGNED, NOTHING_SELECTED,
 SINKING_SCHEDULE_REQUIRED, NOT_A_SINKING_FUND, HOLDING_HAS_PURCHASE, ASSET_PURCHASE_TYPE_LOCKED,
@@ -1180,7 +1192,7 @@ What the migration could not know: transactions, fund movements and net worth sn
 
 ### Balances & net worth (`store/selectors.ts`)
 All of these take an optional `to` (default the reporting currency) and round each item in `to` before summing.
-- `accountNetFlow`: +income, −expense, −asset_purchase, −transfer.amount (from), +transfer.toAmount (to)
+- `accountNetFlow`: +income, −expense, −asset_purchase, transfer: from −amount / to +amount, exchange: from −sentAmount / to +receivedAmount, and every fee −fee.amount on its account (summed in integer minor units)
 - `accountBalance = openingBalance + accountNetFlow` (account currency)
 - `openingBalanceForCurrentBalance(entered) = entered − accountNetFlow` (EditAccountSheet)
 - `accountValue(account, to?)` = the balance converted at today's rates; `liquidTotal(to?) = Σ accountValue` (archived included)
@@ -1212,7 +1224,8 @@ All of these take an optional `to` (default the reporting currency) and round ea
 - `paySinkingFund` (operations): expense in account currency → `withdrawalPlan` (the payment currency's cash first, so no conversion; then the fund's own currency and the others at today's rate; whatever the cash can't cover stays unassigned) → `nextDueDate += cycle months` (`SINKING_CYCLE_MONTHS`: 12/6/3, `addMonthsToDate` clamps to month end)
 
 ### Cash flow
-- `transactionNet(tx, to?)`: income `+amount`, expense `−amount`, projected into `to` through the transaction's own snapshot; transfers / purchases 0
+- **Fees are spending.** `feeExpenses(state)` reads the fees of every transfer and exchange as VIRTUAL expense rows (never stored; `feeOfId` = the record): in the currency of the account they are charged to, in their category (the fees category by default), dated and valued at the record's own `rateSnapshotId`. `incomeExpenseRows(state)` = recorded income / expense + those rows; it feeds `monthSummary`, `monthExpenses` of plans and the review, and (with `feeExpenses`) analytics `scan`, `drillTransactions`, `runway`. So fees count in month summaries, buckets (رسوم is essentials), plan progress / safe-to-spend (a plan line for رسوم tracks them; with none they are unplanned), Analytics and the review; the move itself never does. `drillTransactions` returns the **parent** transfer / exchange once however many of its fees match (the total still counts every fee), so tapping the row opens the parent. `feeSpendImpact(month, fees)` (planning) is the hint for fees being entered.
+- `transactionNet(tx, to?)`: income `+amount`, expense `−amount`, projected into `to` through the transaction's own snapshot; a transfer or exchange is `−Σ its fees` (the move itself and purchases are neutral)
 - `monthSummary(month, { excludeOneTime, to })` → `{ income, expense, expenseByBucket, netCashFlow, savingsRate }`: income/expense only, `date ≥ trackingStartDate`; each transaction rounded in `to`, summed in minor units; `savingsRate = net / income` (null without income). `monthFlows(month, to?)` → `{ income, expense, savedToFunds, invested }`
 - `suggestedEmergencyTarget(3|6)` (EGP: a funds figure until Phase D): essentials (oneTime excluded) of the 3 full months before now; average over months with essentials `> 0`; × months; null if none
 
@@ -1354,6 +1367,8 @@ series by location and estimated points, money map, runway, fund projections, ev
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
 
+v8 suites (Phase C): transfers vs exchanges (account effects, currency rules, required received amount, fees on the named account, 1,000 repeated transfers with a fee stay exact, rounding per leg, failed operations change nothing, edit / delete atomic, transfer ↔ exchange through an edit, accounts in use), step 7 of the migration (exchange legs = stored amounts, balances identical, both unequal-leg cases with idempotence, recurring rules, the fees category), fees as spending (month summary at the record's own rates, per-day net, plan line, fee impact hint, Analytics totals and drill-down to the parent, review) and the exchange-form helpers (implied rate, 5% warning, rate formatting).
+
 v8 suites (Phase B): the **frozen-v7 oracle** (`store/legacy/*` + `tests/legacy/oracle.v7.ts` report every number v7 derived from a v7 state; `report.v8.ts` reports the same from the live code on the migrated state; `assertRoundingOnly` fails on any difference beyond half a minor unit per contributing row; run on a rich fixture, the example seed and, when present, `seed.local.ts`); countries; rates (A → USD → B, snapshots content-hashed and immutable, dangling id throws, every v7 pairwise rate reproduced); currencies as data; rounding at every write and aggregation boundary (INV-7); the ordered idempotent sub-steps (first k steps then hydrate = full migration, twice = once, throwing step fails closed); holdings cost in native currency; currency preferences; and **reporting currency** (INV-1: cycling it leaves every collection deep-equal, parts add up to the total in every currency, 1,000 SAR − 100 SAR = 900 SAR, the SAR cost of a holding does not move with rates).
 
 Adding tests: import pure modules (`@/store/*`, `@/utils/*` — never React Native ones), build
@@ -1365,7 +1380,7 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 
 ## 15. Known limitations & tech debt
 
-- **v8 (Phase B) is not complete as a product**: unassigned money, fund suggestions, the emergency target, next-action amounts, Goals totals and the fund screens still show EGP whatever the reporting currency is (Phase D). There is one gold price, in EGP (per-country gold pricing is a product-phase item). Net worth snapshots are stored in EGP (their field names say so). Records the migration found without their own rates point at an `estimated` rate snapshot frozen at the migration's rates.
+- **v8 (Phases B–C) is not complete as a product**: unassigned money, fund suggestions, the emergency target, next-action amounts, Goals totals and the fund screens still show EGP whatever the reporting currency is (Phase D). There is one gold price, in EGP (per-country gold pricing is a product-phase item). Net worth snapshots are stored in EGP (their field names say so). Records the migration found without their own rates point at an `estimated` rate snapshot frozen at the migration's rates.
 - Gold is priced from the world spot price plus a manual local premium, not from an Egyptian
   market feed, and excludes workmanship. Prices refresh only while the app is open. The free
   APIs have no SLA; when they fail the last saved prices stay (`constants/market.ts` values on a

@@ -4,9 +4,13 @@
 `currency-v8`** (rates as a USD table with immutable snapshots, countries, currencies as data, rounding INV-7, holdings
 cost in native currency, reporting and plan currency preferences, selectors and screens on the reporting currency, the
 frozen-v7 oracle and the v7 → v8 sub-steps). Dry run on the owner's real backup: every difference to v7 is rounding,
-within half a minor unit per contributing row. **Not built yet:** Phase C (exchange transactions, fees, same-currency
-transfers), Phase D (account-backed reservations, cover flow, unresolved migration; funds / unassigned in the reporting
-currency), the gold price object, the exchange-rate list UI, per-country gold pricing (product phase).
+within half a minor unit per contributing row. **Phase C — ledger — is implemented on the same branch** (transfer vs
+exchange, fees as spending in "رسوم", atomic edit / delete, recurring exchanges confirm-only, migration sub-step 7).
+Deviations from this document, decided with the owner: a v7 same-currency transfer with unequal amounts migrates to a
+transfer + a fee (sent > received) or a "تسوية" income (received > sent) instead of a same-currency exchange; the "تسوية"
+category is created only when needed. **Not built yet:** Phase D (account-backed reservations, cover flow, unresolved
+migration; funds / unassigned in the reporting currency), the gold price object, the exchange-rate list UI,
+per-country gold pricing (product phase).
 
 **Based on:** a read of `store/*`, `utils/currency.ts`, `utils/formatters.ts`, `utils/prices/*`, `constants/*`,
 `components/**` and `app/**` as of data v7 / app 1.2.0 (unbuilt), plus a read-only run of the current logic against

@@ -18,7 +18,23 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 - **تكلفة الذهب والأصول** بتتسجّل بالعملة اللي دفعت بيها (شراء بـ 4,000 ريال يفضل 4,000 ريال)، وبتتعرض بالجنيه بسعر يوم الشراء؛ مفيش فرق في اللي كنت مسجّله بالجنيه.
 - المبالغ بتتقرّب لكسور العملة (قرشين) عند الحفظ والجمع، فالصفوف دايماً بتجمع الإجمالي بالظبط. أي رقم قديم اتحرّك بأقل من نص قرش لكل صف.
 
-**Technical**
+**Phase C — transfers, exchanges and fees (same branch, data v8 step 7)**
+
+*For users*
+- **تحويل** بين حسابين بنفس العملة بيفضل تحويل عادي. بين عملتين بقى **تحويل عملة**: بتكتب **المبلغ المستلم** اللي وصلك فعلاً (التطبيق مش بيحسبه لوحده)، وبيظهر **سعر الصرف الفعلي**، وسعر السوق كاقتراح بزرار، وتنبيه خفيف لو السعر بعيد أكتر من ٥٪.
+- **رسوم** اختيارية على التحويل أو تحويل العملة، من الحساب المرسل أو المستلم. الرسوم **مصروف** في بند جديد «رسوم»: في ملخص الشهر والتحليلات والمراجعة والخطة (تقدر تعمل لها بند)، وبتظهر في إدخال التحويل هتفضل كام في بند «رسوم».
+- تعديل تحويل العملة أو حذفه بيرجّع الطرفين والرسوم مع بعض، وفتح «رسوم» من التحليلات بيفتح التحويل نفسه.
+- تحويل العملة المتكرر **بتأكيد** دايماً، بمبلغ مستلم تكتبه.
+- بيانات v7 القديمة: كل التحويلات بين عملتين بقت تحويل عملة بنفس المبالغ المسجلة، وكل الأرصدة زي ما هي. (تحويل قديم بنفس العملة ومبلغين مختلفين اتحوّل لتحويل + رسوم أو «تسوية»؛ مفيش في بياناتك.)
+
+*Technical*
+- `Transaction` = `income | expense | transfer | exchange | asset_purchase`; `transfer` (same currency) has `amount` + `fees[]`, `exchange` has `sentAmount` / `receivedAmount` + `fees[]` (no stored rate, no `toAmount`); `Fee { accountId, amount, categoryId? }`; `RecurringKind` gains `exchange`. Errors `TRANSFER_CURRENCY_MISMATCH`, `EXCHANGE_SAME_CURRENCY`, `FEE_ACCOUNT_INVALID`; ops `addExchange` (+ `addTransfer` same-currency only), validation and per-leg rounding in `operations.ts`; `accountNetFlow` includes sent / received / fees.
+- Fees are read as virtual expense rows (`feeExpenses`, `incomeExpenseRows`) in `selectors`, `planning`, `review`, `analytics` (drill-down maps them to the parent record); `feeSpendImpact`; `feeCategoryId`; default category "رسوم" (`cat-essentials-fees`).
+- Migration sub-step 7 `ledger` (idempotent; see TECHNICAL §8). `LATEST_V8_STEP = 7`.
+- UI: `ExchangeFields`, `FeeFields`, `exchangeUi.ts` (implied rate, 5% warning), `TransactionSheet` / `RuleSheet` / `ConfirmOccurrenceSheet` / `TransactionRow`; the "تحويل" filter covers exchanges.
+- Tests 362 → 390. Browser check on a real backup copy (network blocked): same-currency transfer with a fee, SAR → EGP exchange with a fee, edit, delete — balances, Analytics fees and the رسوم plan line agreed each time; the Analytics drill-down opened the parent record. Dry run on the real backup: unchanged (no transfers), only the رسوم category added.
+
+**Technical (Phase B)**
 - Data v8. `CURRENT_VERSION = 8`; v7 → v8 is `applyV8Steps` (`store/migrateV8.ts`): six ordered, idempotent sub-steps (countries, rates, currencies, rounding, holdings, preferences) recorded in `settings.v8Step`; v0 → v7 frozen in `migrateToV7`. A payload stored at version 8 by an earlier build is completed on hydration (`normalize` hook of `createPersistOptions`), after a copy to `@wealth_finance_state_backup_v8_before_step_{N}`.
 - Currency engine: USD-based `RateTable`, `convert` A → USD → B, content-hashed immutable `RateSnapshot`s in `state.rateSnapshots`; transactions, fund movements and net worth snapshots carry `rateSnapshotId` (replacing `rateToEGP` / `ratesSnapshot`); holdings carry `purchaseCost: Money` + `purchaseRateSnapshotId`; `projectAmount` for past amounts (dangling id throws).
 - Currencies and countries are data (`constants/currencyRegistry.ts`, `constants/countries.ts`, `settings.enabledCurrencies`); `location` → ISO `country`; liabilities have a country.
