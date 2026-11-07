@@ -6,7 +6,29 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased (2026-11-07) — 1.2.0 · data v7 · JS only (`eas update`) · Fail-closed hydration
+## Unreleased (2026-11-07) — branch `currency-v8` · data v8 · Phase B: currency engine and precision
+
+> Not released. `main` stays on data v7; this branch ships after Phase D (account-backed funds). One v7 → v8
+> migration, run on first launch of a build that contains it (a copy of your data is kept first).
+
+**For users**
+- **عملة العرض** (الإعدادات): الإجماليات (صافي الثروة، الأصول، ملخص الشهر، المراجعة، المعاملات) بتظهر بالعملة اللي تختارها (جنيه / ريال / دولار). بتغيّر العرض بس: مفيش مبلغ متخزّن بيتغيّر، وبالجنيه كل الأرقام زي ما هي.
+- **عملة الخطة الشهرية** (الإعدادات): العملة اللي بتبدأ بيها أي خطة جديدة (كانت ريال ثابتة).
+- **التحليلات**: زرار العملة بيعرض كل العملات اللي عندك، وبيبدأ بعملة العرض (اختيارك هناك مش بيتحفظ).
+- **تكلفة الذهب والأصول** بتتسجّل بالعملة اللي دفعت بيها (شراء بـ 4,000 ريال يفضل 4,000 ريال)، وبتتعرض بالجنيه بسعر يوم الشراء؛ مفيش فرق في اللي كنت مسجّله بالجنيه.
+- المبالغ بتتقرّب لكسور العملة (قرشين) عند الحفظ والجمع، فالصفوف دايماً بتجمع الإجمالي بالظبط. أي رقم قديم اتحرّك بأقل من نص قرش لكل صف.
+
+**Technical**
+- Data v8. `CURRENT_VERSION = 8`; v7 → v8 is `applyV8Steps` (`store/migrateV8.ts`): six ordered, idempotent sub-steps (countries, rates, currencies, rounding, holdings, preferences) recorded in `settings.v8Step`; v0 → v7 frozen in `migrateToV7`. A payload stored at version 8 by an earlier build is completed on hydration (`normalize` hook of `createPersistOptions`), after a copy to `@wealth_finance_state_backup_v8_before_step_{N}`.
+- Currency engine: USD-based `RateTable`, `convert` A → USD → B, content-hashed immutable `RateSnapshot`s in `state.rateSnapshots`; transactions, fund movements and net worth snapshots carry `rateSnapshotId` (replacing `rateToEGP` / `ratesSnapshot`); holdings carry `purchaseCost: Money` + `purchaseRateSnapshotId`; `projectAmount` for past amounts (dangling id throws).
+- Currencies and countries are data (`constants/currencyRegistry.ts`, `constants/countries.ts`, `settings.enabledCurrencies`); `location` → ISO `country`; liabilities have a country.
+- Rounding at every write (`money()`) and aggregation boundary (`roundIn / sumIn / addIn`, integer minor units) — INV-7.
+- Selectors take a target currency (default `settings.reportingCurrency`) and drop the `EGP` suffix: `netWorth, liquidTotal, holdingsTotal, liabilitiesTotal, totalAssets, accountValue, holdingValue, holdingCost, holdingPnl, netWorthBreakdown / ByCountry / Figures / AsOf, goldTotals, transactionNet, monthSummary (income, expense), monthFlows (income, expense, savedToFunds, invested), groupTransactionsByDay (net)`; `monthReview`, `netWorthChange`, `moneyMap`, `runway`, `netWorthSeries` follow. Stored net worth snapshots stay in EGP and are projected through their own snapshot. Funds / unassigned stay EGP until Phase D. New op `setCurrencyPreferences`; `DEFAULT_PLAN_CURRENCY` removed.
+- Frozen v7 code kept as a test oracle (`store/legacy/*`, `tests/legacy/*`). Tests: 285 → 362. Dry run on a real backup through the frozen oracle and the live code: native balances, unassigned per currency and holdings cost identical; every other difference is rounding, within half a minor unit per contributing row.
+
+---
+
+## Earlier in Unreleased (2026-11-07) — 1.2.0 · data v7 · JS only (`eas update`) · Fail-closed hydration
 
 > No native module, no native config, no data-model or migration change; `app.json` `version` not bumped. Safe to
 > ship with the 1.2.0 build or later as an `eas update`.

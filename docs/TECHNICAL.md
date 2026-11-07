@@ -1,6 +1,10 @@
 # Wealth — Technical Documentation
 
-> Written from the code as of persisted-state **version 7** (`store/migrations.ts → CURRENT_VERSION`).
+> Written from the code as of persisted-state **version 8** (`store/migrations.ts → CURRENT_VERSION`), on branch
+> `currency-v8` (Phase B of `docs/architecture/CURRENCY_AND_FUNDS_DESIGN.md`: currency engine and precision). `main`
+> is still data v7 until Phase D ships. Exchange transactions, fees, same-currency transfers and account-backed fund
+> reservations (Phases C–D) are **not built**: the Funds and unassigned-money sections still describe the v7 rules,
+> which v8 keeps (in EGP).
 > Examples use the fake data in `store/seed.example.ts`. **Never copy figures from
 > `store/seed.local.ts` (the owner's real data) into docs, tests or issues.**
 
@@ -19,9 +23,10 @@ Product idea: **"every pound has a job"** (zero-based budgeting). Money sits in 
 *funds* that earmark cash and/or linked gold; a *monthly plan* gives every unit of expected
 income a job; *safe to spend* tells the user what's left on flexible budget lines.
 
-Multi-currency: amounts are stored in their own currency; totals are shown in EGP (net worth)
-or in the plan currency (default SAR). Every transaction snapshots its exchange rate
-(`rateToEGP`) so history doesn't change when rates change.
+Multi-currency: amounts are stored in their own currency and rounded to it. Totals are shown in the **reporting
+currency** (`settings.reportingCurrency`, default EGP; changing it changes no stored amount) and plans in the plan
+currency (`settings.planCurrency`, default SAR). Every record that happened points at an immutable rate snapshot
+(`rateSnapshotId`), so history doesn't change when rates change.
 
 Islamic-finance constraint: the model deliberately has **no interest/APR fields** anywhere.
 
@@ -158,7 +163,10 @@ store/                      ALL business logic lives here (pure, no React)
   review.ts                 Monthly review numbers
   analytics.ts              Analytics tab numbers (periods, Sankey, trend, breakdown, net worth series, money map, runway, funds, insights, drill-down)
   errors.ts                 FinanceValidationError + typed codes
-  migrations.ts             v0 → v7 migration chain
+  migrations.ts             v0 → v7 chain (frozen, via migrateToV7) + migratePersistedState; CURRENT_VERSION = 8
+  migrateV8.ts              v7 → v8 as ordered idempotent sub-steps (V8_STEPS, applyV8Steps, settings.v8Step)
+  rateSnapshots.ts          snapshotForNow / ratePatch: the rate snapshot a write uses
+  legacy/                   FROZEN v7 code (types, currency, selectors, planning, recurring, snapshots, analytics): the test oracle only
   hydration.ts              Fail-closed hydration: persist options, write guard, refusal of unreadable / newer data
   backup.ts                 Backup file format, AES-GCM/PBKDF2, open/validate/preview
   defaultCategories.ts      20 default categories (stable ids), FIXED_CATEGORY_IDS
@@ -167,7 +175,9 @@ store/                      ALL business logic lives here (pure, no React)
   seed.local.ts             Owner's real opening position (git-ignored, EAS-uploaded)
 
 utils/
-  currency.ts               rateToEGP / toEGP / fromEGP
+  currency.ts               convertCurrency / toEGP / fromEGP / rateToEGP (current table), projectAmount (past amounts)
+  rates.ts                  USD-based RateTable, convert, content-hashed immutable RateSnapshot, tableFromEgpRates
+  money.ts                  decimals from the registry, roundMoney / sumTo / splitTo / minor units, lenient read helpers
   dates.ts                  date keys, month keys, shiftMonth, monthsUntil, addMonthsToDate, daysBetween
   formatters.ts             formatCurrency, formatDate, formatDayLabel, formatMonthLabel,
                             formatPercent, Arabic count phrases (dueCountPhrase, daysAgoPhrase…)
@@ -183,8 +193,9 @@ utils/
   prices/calc.ts            Pure: FX and gold-per-gram math, API response validation
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
-constants/                  theme.ts (design tokens), currencies.ts (DEFAULT_RATES), market.ts
-tests/logic.test.ts         285 tests over store/*, utils/* and the pure UI helpers
+constants/                  theme.ts (design tokens), currencyRegistry.ts, countries.ts, currencies.ts (names, v7-shaped DEFAULT_RATES for the seeds), market.ts
+tests/logic.test.ts         362 tests over store/*, utils/* and the pure UI helpers
+tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
 .easignore                  EAS upload filter (keeps store/seed.local.ts)
@@ -909,32 +920,35 @@ otherwise takes its intrinsic width and pushes the number off-screen) and center
 
 ## 6. Data model (`store/types.ts`)
 
-Conventions: amounts are in the entity's own currency unless the field name ends in `EGP`;
+Conventions: amounts are in the entity's own currency unless the field name ends in `EGP` (only the stored net worth
+snapshot figures still do: they are EGP by definition);
 dates are local `YYYY-MM-DD`; months are `YYYY-MM`; `createdAt`/`updatedAt` are ISO timestamps.
 Every synced entity has `updatedAt` (set only by operations).
 
-- `CurrencyCode = 'EGP' | 'SAR' | 'USD'`; `Location = 'EG' | 'SA'`
+- `CurrencyCode = string` — a code in the registry (`constants/currencyRegistry.ts`; EGP, SAR, USD today). `CountryCode = string` — ISO 3166-1 alpha-2 from `constants/countries.ts` (EG, SA today). Both are data: adding one is adding a registry entry (and enabling a currency in settings).
+- **RateSnapshot** `{ id (content hash), table: { base: 'USD', perUsd }, takenAt, source, quality: recorded|estimated }` — immutable; in `FinanceState.rateSnapshots`. **Money** `{ amount, currency }`.
 - `Bucket = 'essentials' | 'lifestyle' | 'giving' | 'income'`; `ExpenseBucket` excludes `income`
-- **Account** `{ id, name, type: cash|bank|wallet, currency, openingBalance, openingDate?, location, createdAt, archived?, updatedAt }` — balance is **derived**, never stored.
+- **Account** `{ id, name, type: cash|bank|wallet, currency, openingBalance, openingDate?, country, createdAt, archived?, updatedAt }` — balance is **derived**, never stored.
 - **Category** `{ id, name, kind: income|expense, bucket, isDefault, archived?, updatedAt }` — `archived` missing = false (optional field, no migration).
-- **Transaction** (discriminated union on `type`, common: `id, amount, date, note?, rateToEGP, createdAt, updatedAt`):
-  - common optional `ratesSnapshot? { SAR_EGP, USD_EGP }` (all rates at creation; missing on older transactions) (the rule occurrence this transaction records; any type)
+- **Transaction** (discriminated union on `type`, common: `id, amount, date, note?, rateSnapshotId, createdAt, updatedAt`):
+  - `rateSnapshotId` — the rate snapshot of the moment it was recorded; a dangling id is corrupt data and throws `RateSnapshotMissingError` (never today's rates)
+  - common optional `recurringRuleId?`, `occurrenceDate?` (the rule occurrence this transaction records; any type)
   - `income | expense`: `currency` (= account currency), `accountId`, `categoryId`, `liabilityId?`, `oneTime?`
   - `transfer`: `fromAccountId`, `toAccountId`, `toAmount` (in the target account's currency)
   - `asset_purchase`: `accountId`, `currency`, `holdingId` — cash turned into a holding
 - **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), updatedAt }`
-- **FundMovement** `{ id, fundId, amount (+allocate / −withdraw, in `currency`), currency? (the money's currency; missing = the fund's currency, covered by any currency's money — see Funds below), date, note?, ratesSnapshot?, updatedAt }`
-- **Holding** (union): `gold { weightGrams, karat: 18|21|24 }` or `currency { currency, quantity }`; common `id, name, purchaseCostEGP, purchaseDate?, location? (default EG), note?, updatedAt`
-- **Liability** `{ id, name, principal, currency, monthlyPayment?, startDate, notes?, updatedAt }` (no interest)
+- **FundMovement** `{ id, fundId, amount (+allocate / −withdraw, in `currency`), currency? (the money's currency; missing = the fund's currency, covered by any currency's money — see Funds below), date, note?, rateSnapshotId, updatedAt }`
+- **Holding** (union): `gold { weightGrams, karat: 18|21|24 }` or `currency { currency, quantity }`; common `id, name, purchaseCost: Money` (what it cost, in the currency it was paid in; never changes with rates), `purchaseRateSnapshotId` (the rates of the purchase, to show the cost in another currency as it was then), `purchaseDate?, country, note?, updatedAt`
+- **Liability** `{ id, name, principal, currency, country, monthlyPayment?, startDate, notes?, updatedAt }` (no interest)
 - **RecurringRule** `{ id, name, kind: income|expense|transfer, amount, currency (= account currency), accountId, categoryId? (income/expense), toAccountId?, toAmount? (transfers; required when currencies differ), frequency: weekly|monthly|yearly, interval ≥ 1, dayOfMonth? 1–31 (clamped to month end), startDate, endDate?, nextDate ('' when nothing is left), mode: auto|confirm, variableAmount, active, skippedDates[], note?, createdAt, updatedAt }`
 - **MonthlyPlan** `{ id = plan-YYYY-MM, month, currency, expectedIncome, lines: PlanLine[], fundContributions: PlannedContribution[], createdAt, updatedAt }`
   - `PlanLine { categoryId, limit, kind: fixed|flexible }`, `PlannedContribution { fundId, amount }` (plan currency)
-- **Settings** `{ exchangeRates {SAR_EGP, USD_EGP, lastUpdated}, goldPrice24kEGP, goldPrice21kEGP, goldPriceUpdatedAt, trackingStartDate, deviceId, lastBackupAt?, appLockEnabled?, dueNotificationsEnabled?, lastUsed?, priceSource? ('auto' | 'manual', missing = manual; a fresh install is set to 'auto' on first launch), localPremiumPct? (missing = 0), lastPriceFetchAt?, lastPriceFetchError? ('network' | 'fx' | 'gold'), fxSource? ('open.er-api' | 'exchangerate.fun'), lastGoldUsdPerOunce? }`
-- **NetWorthSnapshot** (v7) `{ id = nw-YYYY-MM, month, netWorthEGP, liquidEGP, holdingsEGP, breakdown? { EG, SA: { cashEGP, goldEGP, currenciesEGP }, liabilitiesEGP }, ratesSnapshot?, takenAt, estimated?, updatedAt }` — one per month; the current month follows the live figures, `estimated` marks months filled in afterwards.
+- **Settings** `{ rates: CurrentRates { base: 'USD', perUsd, updatedAt, source }, enabledCurrencies, reportingCurrency, planCurrency, v8Step, goldPrice24kEGP, goldPrice21kEGP, goldPriceUpdatedAt, trackingStartDate, deviceId, lastBackupAt?, appLockEnabled?, dueNotificationsEnabled?, lastUsed?, priceSource? ('auto' | 'manual', missing = manual; a fresh install is set to 'auto' on first launch), localPremiumPct? (missing = 0), lastPriceFetchAt?, lastPriceFetchError? ('network' | 'fx' | 'gold'), fxSource? ('open.er-api' | 'exchangerate.fun'), lastGoldUsdPerOunce? }`
+- **NetWorthSnapshot** `{ id = nw-YYYY-MM, month, netWorthEGP, liquidEGP, holdingsEGP, breakdown? { [country]: { cashEGP, goldEGP, currenciesEGP, liabilitiesEGP } }, rateSnapshotId, takenAt, estimated?, updatedAt }` — one per month, always valued in **EGP** at the rates of its `rateSnapshotId` (any other currency is a projection through those rates); the current month follows the live figures, `estimated` marks months filled in afterwards.
 - **ActionDismissal** (v7) `{ id = actionId, actionId, until (ISO), updatedAt }` — a snoozed Next Best Action.
 - **MonthlyReview** (v7) `{ id = review-YYYY-MM, month, completedAt, updatedAt }` — a finished review.
 - **Tombstone** `{ entity: SyncEntity, id, deletedAt }` — deletion log for a future sync. `SyncEntity` also covers `netWorthSnapshot`, `actionDismissal`, `monthlyReview` (v7).
-- **FinanceState** `{ accounts, categories, transactions, funds, fundMovements, holdings, liabilities, recurringRules, monthlyPlans, netWorthSnapshots, actionDismissals, monthlyReviews, settings, tombstones }`
+- **FinanceState** `{ accounts, categories, transactions, funds, fundMovements, holdings, liabilities, recurringRules, monthlyPlans, netWorthSnapshots, actionDismissals, monthlyReviews, rateSnapshots, settings, tombstones }`
 
 ```mermaid
 erDiagram
@@ -961,7 +975,7 @@ erDiagram
   Every action calls a pure function from `operations.ts` with `get()` and the context
   `{ newId: expo-crypto randomUUID, now: () => new Date() }`, then `set(patch)`. Actions throw
   `FinanceValidationError`; UI wraps them with `runAction` (Arabic alert).
-- `persist` middleware: key **`@wealth_finance_state`**, `version: CURRENT_VERSION` (7),
+- `persist` middleware: key **`@wealth_finance_state`**, `version: CURRENT_VERSION` (8),
   `partialize` = `dataOf()` (data only; no actions or `hasHydrated`).
 - Storage: `deviceStorage` wraps AsyncStorage (and records whether the read found nothing = a fresh
   install). The persist options come from `createPersistOptions` in `store/hydration.ts` (pure, no React
@@ -983,6 +997,7 @@ erDiagram
   `.catch`, the old `onRehydrateStorage` callback ignored the error and called `setState`, and zustand
   persisted the seed over the real data at launch (reproduced in a scratch script). The pre-migration copy
   `@wealth_finance_state_backup_v<N>` is still written before each migration (not for refused newer data).
+- **A version-8 payload from an earlier build.** Data v8 was built over several commits, so a device can hold a payload stored at version 8 that lacks later parts (`settings.v8Step` says how far it got). `createPersistOptions` takes a `normalize` hook (zustand's `merge`) that runs `applyV8Steps` on every hydration: a complete payload comes back unchanged, an older one is completed, and a step that throws fails closed like a failed migration. Before completing it the store copies the raw payload to `@wealth_finance_state_backup_v8_before_step_{N}`.
 - **SSR guard:** `isServer = Platform.OS === 'web' && typeof window === 'undefined'` → a no-op
   storage and `skipHydration: true`, so nothing touches AsyncStorage during web server rendering.
   (`web.output` is `"single"` today, so there is no server rendering, but the guard stays.)
@@ -998,6 +1013,7 @@ erDiagram
 |---|---|
 | `@wealth_finance_state` | Every state change (persist) |
 | `@wealth_finance_state_backup_v{N}` | Before migrating persisted data from version N (raw payload) |
+| `@wealth_finance_state_backup_v8_before_step_{N}` | Before a version-8 payload that had only N of the v7 → v8 sub-steps is completed (raw payload) |
 | `@wealth_finance_state_backup_before_import` | Before "استيراد البيانات الافتتاحية" |
 | `@wealth_finance_state_backup_before_restore` | Before restoring a backup file |
 
@@ -1018,9 +1034,31 @@ greater than the stored one. Used by `persist.migrate` **and** by backup restore
 | v5 → v6 | Legacy rules `{ type, nextDate, … }` → `RecurringRule`: `kind = type`, `interval: 1`, `dayOfMonth` = day of `nextDate` (not for weekly), `startDate = nextDate`, `mode: 'confirm'` (nothing is recorded without the user), `variableAmount: false`, `skippedDates: []`, `createdAt = updatedAt ?? now`. Rules that already have `kind` pass through unchanged. |
 | v6 → v7 | `netWorthSnapshots ??= []`, `actionDismissals ??= []`, `monthlyReviews ??= []`; then every past month from `trackingStartDate`'s month (at most 36) up to the month before `now` that has no snapshot gets an `estimated` one from `netWorthAsOf(month end)` at the current rates/prices, `takenAt = now`. The current month is left to the SnapshotRunner. Existing snapshots are never changed. |
 
+| v7 → v8 | `applyV8Steps`: six ordered, idempotent sub-steps (below). v0 → v7 are frozen in `migrateToV7` and run first for older data. |
+
 Idempotence rules: v2→v3 … v6→v7 only fill missing values and keep existing ones, so
 running them twice yields the same result (tested). Before migrating, the raw payload is
 saved to `@wealth_finance_state_backup_v{N}`.
+
+### v7 → v8 sub-steps (`store/migrateV8.ts`)
+
+`V8_STEPS` runs in order; `settings.v8Step` records how many a state has had, **and every step also detects the shape it
+needs** (it does nothing to data already in the new shape). So `applyV8Steps(input, ctx, upTo?)` accepts a v7 state, a
+version-8 state from any earlier step, or a current one; migrating twice equals migrating once. Steps are **only ever appended**.
+
+| # | Step | Change |
+|---|---|---|
+| 1 | countries | `location` → `country` (ISO code) on accounts and holdings; liabilities get `country: 'EG'` (v7 subtracted them all from Egypt); net worth snapshot breakdown becomes `{ EG, SA }` with liabilities in `EG` |
+| 2 | rates | `settings.exchangeRates` → `settings.rates` (USD table); every transaction, fund movement and net worth snapshot gets a `rateSnapshotId`. A record's own `rateToEGP` replaces its currency's rate in its table, so every pairwise rate v7 used is reproduced. `recorded` when it had a `ratesSnapshot`, otherwise `estimated`, frozen at the migration's rates (v7 let those drift with today's) |
+| 3 | currencies | `enabledCurrencies = ['EGP', 'SAR', 'USD']` |
+| 4 | rounding | every stored amount rounded to its currency's decimals (INV-7) |
+| 5 | holdings | `purchaseCostEGP` → `purchaseCost { amount, currency: 'EGP' }` (unchanged) + `purchaseRateSnapshotId` (an `estimated` snapshot of the stored rates) |
+| 6 | preferences | `reportingCurrency: 'EGP'`, `planCurrency: 'SAR'` (what v7 did) |
+
+Acceptance (tests): applying the first k steps for every k and then hydrating equals the full migration; the full
+migration twice equals once; a step that throws fails closed (stored payload untouched); and the frozen-v7 oracle
+(`tests/legacy/oracle.v7.ts`) reports the same numbers as the live selectors on the migrated state, to half a minor
+unit per contributing row.
 
 ---
 
@@ -1103,49 +1141,60 @@ DEFAULT_CATEGORY_DELETE, PLAN_NOT_FOUND`. Backup errors (`store/backup.ts → Ba
 
 ## 10. Financial logic (every formula)
 
-Two valuation rules: **balances/holdings use current rates & prices**; **transaction flows use
-each transaction's `rateToEGP` snapshot** (and its `ratesSnapshot` when shown in a third
-currency; same-currency amounts are never converted). The full table is under "Currency" below.
+Two valuation rules: **current valuations** (balances, holdings, liabilities, net worth) use today's `settings.rates` and
+gold prices; **records that already happened** (transactions, fund movements, net worth snapshots, a holding's cost)
+are projected through the `RateSnapshot` they point at and never move when rates change. Same-currency amounts are never
+converted. Totals are shown in the **reporting currency**: every valuation / flow selector takes an optional target
+`to` that defaults to `settings.reportingCurrency` (EGP unless changed); a screen may pass its own (the Analytics
+switch, never saved). Changing the reporting currency changes no stored amount (INV-1, property-tested).
 
-### Currency (`utils/currency.ts`)
-- `rateToEGP(cur, rates)`: EGP → 1, SAR → `SAR_EGP`, USD → `USD_EGP`
-- `toEGP(x, cur) = x × rateToEGP(cur)`; `fromEGP(x, cur) = x ÷ rateToEGP(cur)`
-- Rate snapshot: every new transaction (`addTransaction` / `addTransfer` / `buyGold` / recurring occurrences) stores `rateToEGP` of its (source) currency **and** `ratesSnapshot { SAR_EGP, USD_EGP }`; every new fund movement stores `ratesSnapshot`. Edits keep both; they are retaken together only when the transaction's currency changes.
-- `convertCurrency(x, from, to, rates)`: both legs at the same `rates`; `from === to` returns `x` untouched.
-- `historicalAmountIn(x, from, to, sourceRateToEGP, snapshot, currentRates)`: `from === to` → `x`; otherwise `x × sourceRateToEGP ÷ rateToEGP(to, snapshot ?? currentRates)`.
+### Currency engine (`utils/rates.ts`, `utils/currency.ts`)
+- `RateTable { base: 'USD', perUsd }` — units of each currency per USD. `convert(x, from, to, table) = x ÷ perUsd[from] × perUsd[to]` (A → USD → B); the same currency returns `x` untouched (not even float noise); a missing rate throws `RateMissingError`. Rates are entered and fetched as "EGP per unit" (`EgpRatesInput`) and re-based losslessly (`tableFromEgpRates`, `withEgpRates`).
+- `RateSnapshot`: the table plus `takenAt`, `source`, `quality`; its `id` is a content hash (`snapshotId`), so identical tables share one snapshot. `snapshotForNow(state, now)` (`store/rateSnapshots.ts`) returns the snapshot of the current table and adds it to `state.rateSnapshots` only when it is new (`ratePatch`). Snapshots are immutable and never deleted. `settings.rates` is the current table + `updatedAt` + `source`.
+- `convertCurrency / toEGP / fromEGP / rateToEGP`: against a table (current valuations and amounts being entered now). `projectAmount(snapshots, id, amount, from, to)`: a past amount through its own snapshot; same currency → unchanged without reading the snapshot; a dangling id → `RateSnapshotMissingError`.
+
+### Rounding (INV-7, `utils/money.ts`)
+- Decimals come from the registry (`decimalsOf`, ISO 4217; EGP/SAR/USD = 2). `roundMoney / roundTo` (half away from zero, no float noise), `sumTo` (adds integer minor units), `splitTo`, `toMinor / fromMinor`; the lenient read helpers `decimalsFor / roundIn / sumIn / addIn` round an unknown code to 2 decimals instead of throwing.
+- **Writes:** every operation rounds its amounts to their currency (`money()` in `operations.ts`) and rejects an unknown currency (`UNKNOWN_CURRENCY`) or country (`UNKNOWN_COUNTRY`).
+- **Reads:** each item is converted, rounded to the target currency, then summed in minor units, so a list of rows always adds up to the total shown. The one unrounded read is the implicit-FX cascade of `unassignedByCurrency` (movements without a currency), kept exactly as v7.
+
+### Registries are data
+`constants/currencyRegistry.ts` (code, symbol, Arabic / English name, decimals), `constants/countries.ts`, and `settings.enabledCurrencies` (what pickers offer). `currencyList(state)` = the enabled currencies first, then any other currency the data uses. `utils/formatters.ts` takes symbol and decimals from the registry; an unknown code shows as itself.
 
 **Conversion rules** (one rule everywhere): amounts that already happened never change when settings rates change; only current valuations and amounts not recorded yet use today's rates.
 
 | Where | Kind | Rates used |
 |---|---|---|
-| `transactionAmountIn` (= `planning.amountInCurrency`) → `spendByCategory`, `planProgress`, `safeToSpend(Today)`, `overspentLines`, `planSuggestion` (history part) | historical | same currency: none; else `tx.rateToEGP` → `tx.ratesSnapshot` |
-| `movementAmountIn` → `planProgress` contributions, monthly review funds, `monthFlows.savedToFundsEGP` | historical | fund currency = target: none; else `movement.ratesSnapshot` |
-| `monthSummary`, `transactionNetEGP`, review categories / one-time, `monthFlows.investedEGP`, TransactionRow "≈ EGP" | historical | `tx.amount × tx.rateToEGP` |
+| `transactionAmountIn` (= `planning.amountInCurrency`) → `spendByCategory`, `planProgress`, `safeToSpend(Today)`, `overspentLines`, `planSuggestion` (history part) | historical | same currency: none; else the transaction's `rateSnapshotId` |
+| `movementAmountIn` → `planProgress` contributions, monthly review funds, `monthFlows.savedToFunds` | historical | fund currency = target: none; else the movement's `rateSnapshotId` |
+| `monthSummary`, `transactionNet`, `groupTransactionsByDay`, review categories / one-time, `monthFlows.invested`, TransactionRow "≈" | historical | the transaction's `rateSnapshotId` |
+| `holdingCost`, `holdingPnl` (cost part) | historical | the holding's `purchaseRateSnapshotId` (cost in the target currency: none) |
+| `netWorthChange`, `monthNetWorthChange`, analytics `netWorthSeries` | snapshot | the stored EGP figure through the net worth snapshot's own `rateSnapshotId`; the live month at today's |
 | `paySinkingFund` withdrawal (payment → fund currency) | historical (the expense just made) | `transactionAmountIn` on that expense; exact when account and fund share a currency |
 | `fundCashByCurrency`, `fundAllocatedIn`, `unassignedByCurrency` | native, per currency | none |
 | `fundAllocated`, `fundStatus`, `fundMonthShortfall` (this month's movements) | current valuation in the fund currency | today's (each movement from its own currency; identity for the fund's own) |
 | `spendImpact` (expense being typed), `recurringMonthly`, `suggestedContributions`, `emptyPlan`, transfer / occurrence default `toAmount`, plan editor currency switch, AddLineSheet, PaySinkingSheet / MoveMoneySheet suggestions | not recorded yet | today's (`convertCurrency`, identity for the same currency) |
-| `accountBalanceEGP`, `liquidTotalEGP`, `holdingValueEGP`, `fundLinkedValue` / `fundCurrent` (linked gold part), `liabilitiesTotalEGP`, `netWorthEGP`, `unassignedEGP`, `suggestAllocation`, `planCover`, `fundsSummary`, emergency-fund action | current valuation | today's |
+| `accountValue`, `liquidTotal`, `holdingValue`, `holdingsTotal`, `liabilitiesTotal`, `netWorth`, `netWorthBreakdown`, `fundLinkedValue` / `fundCurrent` (linked gold part), `unassignedEGP`, `suggestAllocation`, `planCover`, `fundsSummary`, emergency-fund action | current valuation | today's |
 
-Known approximation: transactions and fund movements recorded before `ratesSnapshot` existed have no snapshot, so converting them into a **different** currency uses their own `rateToEGP` for the source leg (movements: today's) and today's rates for the target leg — those figures still move with settings rates. Same-currency amounts are exact for all data, old and new. Net worth snapshots of past months are estimates at the rates of when they were taken (see "Net worth snapshots").
+What the migration could not know: transactions, fund movements and net worth snapshots that had no rates of their own, and every migrated holding's purchase, point at an `estimated` snapshot frozen at the rates of the migration (v7 let those drift with today's rates). Same-currency amounts are exact for all data. Net worth snapshots of past months are estimates at the rates of when they were taken (see "Net worth snapshots").
 
 ### Balances & net worth (`store/selectors.ts`)
+All of these take an optional `to` (default the reporting currency) and round each item in `to` before summing.
 - `accountNetFlow`: +income, −expense, −asset_purchase, −transfer.amount (from), +transfer.toAmount (to)
 - `accountBalance = openingBalance + accountNetFlow` (account currency)
 - `openingBalanceForCurrentBalance(entered) = entered − accountNetFlow` (EditAccountSheet)
-- `accountBalanceEGP = toEGP(balance)`; `liquidTotalEGP = Σ accountBalanceEGP` (archived included)
-- `goldPricePerGram(karat)`: 24 → `goldPrice24kEGP`, 21 → `goldPrice21kEGP`, 18 → `goldPrice24kEGP × 0.75`
-- `holdingValueEGP`: gold `weightGrams × goldPricePerGram(karat)`; currency `toEGP(quantity)`
-- `holdingPnlEGP = holdingValueEGP − purchaseCostEGP`; `holdingsTotalEGP = Σ holdingValueEGP`
-- `totalAssetsEGP = liquid + holdings`
-- `liabilityRemaining = max(0, principal − Σ expense payments with liabilityId)`; `liabilitiesTotalEGP` at current rates
-- `netWorthEGP = liquidTotalEGP + holdingsTotalEGP − liabilitiesTotalEGP`
-- `netWorthByLocation`: accounts by `location`, holdings by `location ?? 'EG'`, liabilities subtracted from EG → `EG + SA = netWorthEGP`
-- `liquidByCurrency`: Σ balances per currency (no conversion); `goldTotals`: grams total, by karat, Σ cost
+- `accountValue(account, to?)` = the balance converted at today's rates; `liquidTotal(to?) = Σ accountValue` (archived included)
+- `goldPricePerGram(karat)`: 24 → `goldPrice24kEGP`, 21 → `goldPrice21kEGP`, 18 → `goldPrice24kEGP × 0.75` (one gold price, always EGP)
+- `holdingValue(h, to?)`: gold `weightGrams × goldPricePerGram(karat)` (EGP) converted to `to`; currency holding `quantity` converted. `holdingCost(h, to?)` = `purchaseCost` projected through `purchaseRateSnapshotId`. `holdingPnl = holdingValue − holdingCost`; `holdingsTotal = Σ holdingValue`; `totalAssets = liquidTotal + holdingsTotal`
+- `liabilityRemaining = max(0, principal − Σ expense payments with liabilityId)` (liability currency); `liabilitiesTotal(to?)` at current rates
+- `netWorth(to?) = liquidTotal + holdingsTotal − liabilitiesTotal`
+- `netWorthBreakdown(to?)`: per country `{ cash, gold, currencies, liabilities }` (liabilities belong to the country they are owed in); `netWorthByCountry` = cash + gold + currencies − liabilities per country, which add up to `netWorth` exactly
+- `netWorthFigures / netWorthAsOf(date, to?)`; a stored net worth snapshot is always built with `to = 'EGP'` (`store/snapshots.ts`) and shown in another currency through `snapshotNetWorth(s, to)`
+- `liquidByCurrency`: Σ balances per currency (no conversion); `goldTotals(to?)`: grams total, by karat, `totalCost`
 
 ### Funds
 - `fundCashByCurrency` = Σ the fund's movements per currency, each **in its own currency** (a movement's currency is `m.currency ?? fund.currency`); `fundAllocatedIn(cur)` = one of them. `fundAllocated` (fund currency) = Σ over currencies of `convertCurrency(cash[c], c, fund.currency)` at **today's** rate, which for a fund that only holds its own currency is just the sum of its movements
-- `fundLinkedValue` (fund currency) = Σ per linked holding: a currency holding → `convertCurrency(quantity, holding.currency, fund.currency)` (its quantity when it is the fund's own currency), gold → `fromEGP(holdingValueEGP)`
+- `fundLinkedValue` (fund currency) = Σ per linked holding: a currency holding → `convertCurrency(quantity, holding.currency, fund.currency)` (its quantity when it is the fund's own currency), gold → `fromEGP(holdingValue(h, 'EGP'))`
 - `fundCurrent = fundAllocated + fundLinkedValue`; `fundProgress = max(0, current / target)` (1 if target ≤ 0)
 - `fundDueDate` = `nextDueDate` (sinking) or `deadline`
 - `monthsUntil(due, now) = max(1, (dy−ny)·12 + (dm−nm) + 1)` (`utils/dates.ts`, current month counts)
@@ -1154,7 +1203,7 @@ Known approximation: transactions and fund movements recorded before `ratesSnaps
 - `fundStatus`: required = `max(0, target − (current − allocatedThisMonth)) / monthsUntil`; `no_deadline` without due date; `ahead` if required ≤ 0 or allocatedThisMonth > 1.1 × required; `on_track` if ≥ required; below required → `pending` while `daysLeftInMonth(month, now) > 7` (today counts: in a 31-day month day 24 leaves 8, day 25 leaves 7) or when the fund's `createdAt` is in the current month, otherwise `behind` (`BEHIND_DAYS_LEFT = 7`)
 - `fundSuggestedMonthly = min(requiredMonthly ?? monthlyContribution ?? 0, target − current)`
 - **Unassigned money is per currency** (`unassignedByCurrency`, linked gold is not cash): start from `liquidByCurrency` (account balances summed in their own currency, never via EGP) and subtract each movement that has a `currency` from that currency. Movements **without** a `currency` (all data from before currencies, and the fund edit sheet's adjustments) have no source currency: per fund currency they are summed, covered by that currency's money first, then by what is left in the other currencies at today's rate (EGP → SAR → USD), and any rest is a shortfall in their own currency. This keeps every figure of old data exactly what it was (the totals are linear), without inventing a shortfall when EGP funds were paid from SAR money.
-- `unassignedSummary`: `byCurrency`, `surpluses` / `deficits` (native, only beyond 0.005), and display totals in EGP at today's rate (`totalEGP`, `surplusEGP`, `deficitEGP`). `unassignedEGP` = `totalEGP`. `unassignedEGPWithFundCash(cash)` = preview after setting a fund's cash allocation (total).
+- `unassignedSummary`: `byCurrency`, `surpluses` / `deficits` (native, only beyond 0.005), and display totals in EGP at today's rate (`totalEGP`, `surplusEGP`, `deficitEGP`; still EGP, not the reporting currency, until Phase D). `unassignedEGP` = `totalEGP`. `unassignedEGPWithFundCash(cash)` = preview after setting a fund's cash allocation (total).
 - `allocateMany`: each allocation is in `currency` (omitted = the fund's currency, any currency's money); it fails with `INSUFFICIENT_UNASSIGNED` when the new movements would raise the EGP total of per-currency shortfalls (`worsensShortfall`). So SAR money can't be allocated beyond the SAR that exists, however much EGP there is.
 - `withdrawFromFund` / `withdrawMany`: per currency, never beyond the fund's cash **in that currency** (`WITHDRAW_EXCEEDS_FUND`); omitted currency = the fund's currency.
 - `withdrawalPlan(fund, amount, currency)`: how to take an amount out of a fund's cash — same currency first, then the fund's own, then the others at today's rate; used by `paySinkingFund` and by `editFund` decreases.
@@ -1163,9 +1212,9 @@ Known approximation: transactions and fund movements recorded before `ratesSnaps
 - `paySinkingFund` (operations): expense in account currency → `withdrawalPlan` (the payment currency's cash first, so no conversion; then the fund's own currency and the others at today's rate; whatever the cash can't cover stays unassigned) → `nextDueDate += cycle months` (`SINKING_CYCLE_MONTHS`: 12/6/3, `addMonthsToDate` clamps to month end)
 
 ### Cash flow
-- `transactionNetEGP`: income `+amount × rateToEGP`, expense `−…`, transfers/purchases 0
-- `monthSummary(month, {excludeOneTime})`: income/expense only, `date ≥ trackingStartDate`; expense by bucket; `netCashFlow = income − expense`; `savingsRate = net / income` (null without income)
-- `suggestedEmergencyTarget(3|6)`: essentials (oneTime excluded) of the 3 full months before now; average over months with essentials `> 0`; × months; null if none
+- `transactionNet(tx, to?)`: income `+amount`, expense `−amount`, projected into `to` through the transaction's own snapshot; transfers / purchases 0
+- `monthSummary(month, { excludeOneTime, to })` → `{ income, expense, expenseByBucket, netCashFlow, savingsRate }`: income/expense only, `date ≥ trackingStartDate`; each transaction rounded in `to`, summed in minor units; `savingsRate = net / income` (null without income). `monthFlows(month, to?)` → `{ income, expense, savedToFunds, invested }`
+- `suggestedEmergencyTarget(3|6)` (EGP: a funds figure until Phase D): essentials (oneTime excluded) of the 3 full months before now; average over months with essentials `> 0`; × months; null if none
 
 ### Monthly plan (`store/planning.ts`)
 - `amountInCurrency(tx, cur)` = `transactionAmountIn`: `tx.amount` when `tx.currency === cur`, otherwise `tx.amount × tx.rateToEGP ÷ rateToEGP(cur, tx.ratesSnapshot ?? current rates)` (see "Conversion rules")
@@ -1276,7 +1325,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts` (285 tests, ~20 s; the encrypted round
+`npm run test:logic` → `tsx --test tests/logic.test.ts` (362 tests, ~20 s; the encrypted round
 trip uses the real 200k-iteration KDF). Suites: migrations (v0–v7), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,
@@ -1305,6 +1354,8 @@ series by location and estimated points, money map, runway, fund projections, ev
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
 
+v8 suites (Phase B): the **frozen-v7 oracle** (`store/legacy/*` + `tests/legacy/oracle.v7.ts` report every number v7 derived from a v7 state; `report.v8.ts` reports the same from the live code on the migrated state; `assertRoundingOnly` fails on any difference beyond half a minor unit per contributing row; run on a rich fixture, the example seed and, when present, `seed.local.ts`); countries; rates (A → USD → B, snapshots content-hashed and immutable, dangling id throws, every v7 pairwise rate reproduced); currencies as data; rounding at every write and aggregation boundary (INV-7); the ordered idempotent sub-steps (first k steps then hydrate = full migration, twice = once, throwing step fails closed); holdings cost in native currency; currency preferences; and **reporting currency** (INV-1: cycling it leaves every collection deep-equal, parts add up to the total in every currency, 1,000 SAR − 100 SAR = 900 SAR, the SAR cost of a holding does not move with rates).
+
 Adding tests: import pure modules (`@/store/*`, `@/utils/*` — never React Native ones), build
 state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 `apply(state, ops.x(state, …, makeCtx()))` (recurring: `rule()` + `recurringState()`), assert error codes with
@@ -1314,6 +1365,7 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 
 ## 15. Known limitations & tech debt
 
+- **v8 (Phase B) is not complete as a product**: unassigned money, fund suggestions, the emergency target, next-action amounts, Goals totals and the fund screens still show EGP whatever the reporting currency is (Phase D). There is one gold price, in EGP (per-country gold pricing is a product-phase item). Net worth snapshots are stored in EGP (their field names say so). Records the migration found without their own rates point at an `estimated` rate snapshot frozen at the migration's rates.
 - Gold is priced from the world spot price plus a manual local premium, not from an Egyptian
   market feed, and excludes workmanship. Prices refresh only while the app is open. The free
   APIs have no SLA; when they fail the last saved prices stay (`constants/market.ts` values on a
