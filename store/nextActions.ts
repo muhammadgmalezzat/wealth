@@ -1,5 +1,6 @@
 import { formatMoney } from '@/components/ui/formatMoney';
 import { toEGP } from '@/utils/currency';
+import { roundIn, sumIn } from '@/utils/money';
 import { daysBetween, monthOf, shiftMonth, toDateKey, toMonthKey } from '@/utils/dates';
 import { pricesFetchedRecently } from '@/utils/prices/fetchPrices';
 import { daysAgoPhrase, dueCountPhrase, formatMonthLabel, withinDaysPhrase } from '@/utils/formatters';
@@ -151,7 +152,7 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
   const plan = planFor(state, month);
   const overspent = overspentLines(state, month);
   if (plan && overspent.length > 0) {
-    const over = overspent.reduce((total, l) => total - l.remaining, 0);
+    const over = sumIn(overspent.map((l) => -l.remaining), plan.currency);
     const names = overspent.map((l) => state.categories.find((c) => c.id === l.categoryId)?.name ?? '—');
     add(3, {
       id: 'overspent',
@@ -201,7 +202,7 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
   } else {
     const target = suggestedEmergencyTarget(state, 3, now);
     const monthlyEssentials = target === null ? null : target / 3;
-    const savedEGP = emergency.reduce((total, f) => total + toEGP(fundCurrent(state, f.id), f.currency, rates), 0);
+    const savedEGP = sumIn(emergency.map((f) => roundIn(toEGP(fundCurrent(state, f.id), f.currency, rates), 'EGP')), 'EGP');
     if (monthlyEssentials !== null && savedEGP < monthlyEssentials - EPSILON) {
       add(6, {
         id: 'emergency',

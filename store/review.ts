@@ -1,4 +1,5 @@
 import { monthOf, shiftMonth } from '@/utils/dates';
+import { addIn, sumIn } from '@/utils/money';
 import { isReviewed } from './nextActions';
 import { planFor, planProgress, previousPlanMonth, type LineProgress } from './planning';
 import { fundProgress, fundsByPriority, monthSummary, movementAmountIn, transactionAmountIn, unassignedSummary } from './selectors';
@@ -114,7 +115,7 @@ export function monthReview(state: State, month: string, now: Date = new Date())
     if (tx.oneTime) {
       oneTime.push({ id: tx.id, categoryId: tx.categoryId, amountEGP, date: tx.date, ...(tx.note ? { note: tx.note } : {}) });
     } else {
-      regular.set(tx.categoryId, (regular.get(tx.categoryId) ?? 0) + amountEGP);
+      regular.set(tx.categoryId, addIn(regular.get(tx.categoryId) ?? 0, amountEGP, 'EGP'));
     }
   }
   const topCategories = [...regular.entries()]
@@ -129,10 +130,11 @@ export function monthReview(state: State, month: string, now: Date = new Date())
   const planned = new Map(plan?.fundContributions.map((c) => [c.fundId, c.amount]) ?? []);
   // Each movement at its own rates, so a past month reads the same whatever today's rates are.
   const allocatedIn = (fund: Fund) =>
-    sum(
+    sumIn(
       state.fundMovements
         .filter((m) => m.fundId === fund.id && monthOf(m.date) === month)
-        .map((m) => movementAmountIn(state, m, fundCurrency))
+        .map((m) => movementAmountIn(state, m, fundCurrency)),
+      fundCurrency
     );
   const funds: ReviewFund[] = state.funds
     .filter((f) => planned.has(f.id) || state.fundMovements.some((m) => m.fundId === f.id && monthOf(m.date) === month))
@@ -151,7 +153,7 @@ export function monthReview(state: State, month: string, now: Date = new Date())
     plan: reviewPlan(state, month),
     topCategories,
     oneTime,
-    oneTimeTotalEGP: sum(oneTime.map((t) => t.amountEGP)),
+    oneTimeTotalEGP: sumIn(oneTime.map((t) => t.amountEGP), 'EGP'),
     fundCurrency,
     funds,
     completedFunds: fundsByPriority(state).filter((f) => fundProgress(state, f.id) >= 1),

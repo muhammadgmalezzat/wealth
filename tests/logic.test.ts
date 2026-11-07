@@ -1914,8 +1914,8 @@ describe('plan progress & safe to spend', () => {
   });
 
   it('unplanned is zero-based', () => {
-    assert.equal(unplannedAmount({ expectedIncome: 1000, lines: [{ categoryId: 'x', limit: 600, kind: 'fixed' }], fundContributions: [{ fundId: 'f', amount: 400 }] }), 0);
-    assert.equal(unplannedAmount({ expectedIncome: 1000, lines: [], fundContributions: [{ fundId: 'f', amount: 1200 }] }), -200);
+    assert.equal(unplannedAmount({ currency: 'SAR', expectedIncome: 1000, lines: [{ categoryId: 'x', limit: 600, kind: 'fixed' }], fundContributions: [{ fundId: 'f', amount: 400 }] }), 0);
+    assert.equal(unplannedAmount({ currency: 'SAR', expectedIncome: 1000, lines: [], fundContributions: [{ fundId: 'f', amount: 1200 }] }), -200);
   });
 
   it('spendImpact shows what a new expense leaves, or how far over it goes', () => {
@@ -3876,8 +3876,10 @@ describe('native amounts never drift with the rates', () => {
     const deep = apply(funded, ops.editFund(funded, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 1000 }, makeCtx()));
     const cash = sel.fundCashByCurrency(deep, 'F');
     approx(cash.EGP, 0);
-    approx(cash.SAR, 100 - 300 / 13);
-    approx(fundAllocated(deep, 'F'), 1000);
+    // The SAR taken out is a stored amount, so it is rounded to cents (23.08, not 23.0769…): the SAR left
+    // is 76.92 and its EGP value is within half a cent of SAR (0.065 EGP) of the 1,000 asked for.
+    assert.equal(cash.SAR, 76.92);
+    assert.ok(Math.abs(fundAllocated(deep, 'F') - 1000) <= 0.005 * 13, String(fundAllocated(deep, 'F')));
   });
 
   it('plan progress counts a SAR allocation as exactly what it was, and keeps history at its own rates', () => {
@@ -4412,14 +4414,14 @@ describe('analytics', () => {
     it('in SAR each point uses the rates it was valued at; today’s for the current month', () => {
       const result = series(state(), 'all', 'SAR');
       approx(result.points[1].total, 125000 / 12.5);
-      approx(result.points[2].total, 131000 / 13);
+      assert.equal(result.points[2].total, roundTo(131000 / 13, 2));
       approx(result.points[3].total, netWorthEGP(state()) / 12.5);
       // A snapshot that kept no rates falls back to today's.
       approx(result.points[0].total, 120000 / 12.5);
       // Changing today's rate leaves the recorded points alone.
       const moved = series(at(state(), 20), 'all', 'SAR');
       approx(moved.points[1].total, 125000 / 12.5);
-      approx(moved.points[2].total, 131000 / 13);
+      assert.equal(moved.points[2].total, roundTo(131000 / 13, 2));
     });
   });
 
@@ -5356,6 +5358,20 @@ describe('rate snapshots are immutable and deduplicated', () => {
 
 // --- v7 → v8, step 1: countries ------------------------------------------------------
 
+// The acceptance rule for Phase B: against the v7 oracle, a v8 number may differ only by ROUNDING to its
+// currency's decimals. A row (an account, transaction, movement, holding) moves by at most half a minor
+// unit (0.005 for EGP/SAR); a total may move by the sum of the rows it adds up (rows × 0.005).
+const PER_ROW_SECTIONS = ['accounts', 'transactions', 'movements', 'holdings', 'snapshots'];
+function assertRoundingOnly(v7: ReturnType<typeof richV7>, v8: FinanceState) {
+  const rows = v7.transactions.length + v7.fundMovements.length + v7.accounts.length + v7.holdings.length + v7.liabilities.length;
+  const beyond = diffReports(oracleReport(v7, ORACLE_NOW), reportV8(v8, ORACLE_NOW), 1e-9).filter((d) => {
+    const delta = Math.abs(Number(d.v8) - Number(d.oracle));
+    const bound = PER_ROW_SECTIONS.includes(d.path.split('.')[0]) ? 0.005 : 0.005 * rows;
+    return !(delta <= bound + 1e-9);
+  });
+  assert.deepEqual(beyond, []);
+}
+
 describe('v7 → v8: countries, and every v7 number is unchanged', () => {
   const fixtures: [string, ReturnType<typeof richV7>][] = [['rich', richV7()], ['example seed', exampleSeedV7()]];
   const local = localSeedV7();
@@ -5364,8 +5380,7 @@ describe('v7 → v8: countries, and every v7 number is unchanged', () => {
 
   for (const [name, v7] of fixtures) {
     it(`the ${name} fixture reports exactly the numbers the v7 oracle does`, () => {
-      // The only difference is float noise from converting through USD (never above 1e-9 here).
-      assert.deepEqual(diffReports(oracleReport(v7, ORACLE_NOW), reportV8(migrate(v7), ORACLE_NOW), 1e-6), []);
+      assertRoundingOnly(v7, migrate(v7));
     });
   }
 
@@ -5589,6 +5604,77 @@ describe('currencies are data: registry, enabled list, decimals', () => {
   it('the v7 → v8 migration enables the three currencies v7 offered, and every v7 number is unchanged', () => {
     const v8 = migratePersistedState(richV7(), 7, MIGRATION_CTX).state;
     assert.deepEqual(v8.settings.enabledCurrencies, ['EGP', 'SAR', 'USD']);
-    assert.deepEqual(diffReports(oracleReport(richV7(), ORACLE_NOW), reportV8(v8, ORACLE_NOW), 1e-6), []);
+    assertRoundingOnly(richV7(), v8);
+  });
+});
+
+// --- v8: rounding at every write and aggregation boundary (INV-7) ----------------------------
+
+describe('rounding: writes are rounded to the currency, sums are exact', () => {
+  const ctx = makeCtx();
+
+  it('every stored amount is rounded half away from zero, then validated', () => {
+    const s = { ...emptyState(), accounts: [account('egp', 'EGP', 0), account('sar', 'SAR', 0)], funds: [fund({ id: 'F' })] };
+    const a = apply(s, ops.addTransaction(s, { type: 'expense', amount: 10.005, currency: 'EGP', accountId: 'egp', categoryId: 'cat-lifestyle-dining', date: '2026-10-01' }, ctx));
+    assert.equal(a.transactions[0].amount, 10.01);
+    // Rounds to zero → not positive.
+    assert.throws(() => ops.addTransaction(s, { type: 'expense', amount: 0.004, currency: 'EGP', accountId: 'egp', categoryId: 'cat-lifestyle-dining', date: '2026-10-01' }, ctx), { code: 'NOT_POSITIVE' });
+    // A transfer rounds each leg in its own account's currency.
+    const t = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100.004, toAmount: 1250.555, date: '2026-10-02' }, ctx));
+    const tx = t.transactions[0];
+    assert.equal(tx.type === 'transfer' && tx.amount, 100);
+    assert.equal(tx.type === 'transfer' && tx.toAmount, 1250.56);
+    // An opening balance, a fund movement, a plan, a holding and a liability too.
+    assert.equal(apply(s, ops.addAccount(s, { name: 'x', type: 'cash', currency: 'USD', openingBalance: 99.995, country: 'EG' }, ctx)).accounts.at(-1)!.openingBalance, 100);
+    assert.equal(apply(s, ops.allocateToFund(s, 'F', 12.345, undefined, ctx)).fundMovements[0].amount, 12.35);
+    assert.throws(() => ops.allocateToFund(s, 'F', 0.001, undefined, ctx), { code: 'NOT_POSITIVE' });
+    const plan = apply(s, ops.savePlan(s, { month: '2026-10', currency: 'SAR', expectedIncome: 1000.004, lines: [{ categoryId: 'cat-essentials-rent', limit: 99.995, kind: 'fixed' }], fundContributions: [] }, ctx)).monthlyPlans[0];
+    assert.deepEqual([plan.expectedIncome, plan.lines[0].limit], [1000, 100]);
+    assert.equal(apply(s, ops.addLiability(s, { name: 'l', principal: 10.006, currency: 'EGP', startDate: '2026-01-01', country: 'EG' }, ctx)).liabilities[0].principal, 10.01);
+    assert.equal(apply(s, ops.addHolding(s, { type: 'gold', name: 'g', weightGrams: 1.23456, karat: 24, purchaseCostEGP: 100.005, country: 'EG' }, ctx)).holdings[0].purchaseCostEGP, 100.01);
+  });
+
+  it('a thousand 0.01s add up to exactly 10.00; plain floats do not', () => {
+    const transactions = Array.from({ length: 1000 }, (_, i) => ({
+      id: `t${i}`, type: 'income' as const, amount: 0.01, currency: 'EGP', accountId: 'egp', categoryId: 'cat-income-salary',
+      date: '2026-10-01', rateSnapshotId: S125.id, createdAt: T0, updatedAt: T0,
+    }));
+    const s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)], transactions };
+    assert.equal(accountBalance(s, 'egp'), 10);
+    assert.notEqual(transactions.reduce((a, t) => a + t.amount, 0), 10);
+    assert.equal(sel.monthSummary(s, '2026-10').incomeEGP, 10);
+    assert.equal(sel.liquidTotalEGP(s), 10);
+  });
+
+  it('income minus expenses has no float tail (0.6 − 0.1 − 0.2 is 0.3, not 0.30000000000000004)', () => {
+    const tx = (id: string, type: 'income' | 'expense', amount: number): Transaction => ({
+      id, type, amount, currency: 'EGP', accountId: 'egp', categoryId: type === 'income' ? 'cat-income-salary' : 'cat-lifestyle-dining',
+      date: '2026-10-01', rateSnapshotId: S125.id, createdAt: T0, updatedAt: T0,
+    });
+    const s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0)], transactions: [tx('a', 'income', 0.6), tx('b', 'expense', 0.1), tx('c', 'expense', 0.2)] };
+    assert.equal(sel.monthSummary(s, '2026-10').netCashFlow, 0.3);
+    assert.equal(accountBalance(s, 'egp'), 0.3);
+    assert.equal(sel.monthSummary(s, '2026-10').expenseEGP, 0.3);
+  });
+
+  it('a value in another currency is rounded to THAT currency, and the rows add up to the total shown', () => {
+    // Three 0.01 SAR expenses at 12.5 EGP: each is 0.125 EGP → 0.13 (half away from zero); their total is 0.39, not 0.38.
+    const tx = (id: string): Transaction => ({
+      id, type: 'expense', amount: 0.01, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining',
+      date: '2026-10-01', rateSnapshotId: S125.id, createdAt: T0, updatedAt: T0,
+    });
+    const s: FinanceState = { ...emptyState(), accounts: [account('sar', 'SAR', 1)], transactions: [tx('a'), tx('b'), tx('c')] };
+    assert.equal(sel.transactionAmountIn(s, s.transactions[0] as never, 'EGP'), 0.13);
+    assert.equal(sel.monthSummary(s, '2026-10').expenseEGP, 0.39);
+    assert.equal(analytics.periodTotals(s, { period: analytics.resolvePeriod(s, 'month', NOW), currency: 'EGP', includeOneTime: true }).expense, 0.39);
+    // A balance valued in EGP: 333.33 SAR × 12.5 = 4166.625 → 4166.63.
+    const v: FinanceState = { ...emptyState(), accounts: [account('sar', 'SAR', 333.33)] };
+    assert.equal(sel.liquidTotalEGP(v), 4166.63);
+  });
+
+  it('data from a newer registry (an unknown currency) still reads, with 2 decimals', () => {
+    const s: FinanceState = { ...emptyState(), accounts: [account('k', 'KWD', 10.005)] };
+    assert.equal(accountBalance(s, 'k'), 10.01);
+    assert.deepEqual(sel.liquidByCurrency(s).KWD, 10.01);
   });
 });

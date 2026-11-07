@@ -1,4 +1,5 @@
 import { monthOf, shiftMonth, toMonthKey } from '@/utils/dates';
+import { roundIn } from '@/utils/money';
 import { snapshotById } from '@/utils/rates';
 import { snapshotForNow } from './rateSnapshots';
 import { netWorthAsOf, netWorthEGP, netWorthFigures, type NetWorthFigures } from './selectors';
@@ -132,7 +133,7 @@ export interface NetWorthChange {
 }
 
 function change(from: number, to: number, fromMonth: string): NetWorthChange {
-  const amountEGP = to - from;
+  const amountEGP = roundIn(to - from, 'EGP');
   return { amountEGP, pct: Math.abs(from) >= EPSILON ? amountEGP / Math.abs(from) : null, fromMonth };
 }
 

@@ -66,3 +66,17 @@ export const splitMoney = (
   currency: string,
   registry: CurrencyRegistry = CURRENCY_REGISTRY
 ): number[] => splitTo(total, weights, decimalsOf(currency, registry));
+
+// --- Lenient versions for reads ------------------------------------------------------------------
+// A screen must never crash on data from a newer registry, so these use 2 decimals for a currency the
+// registry doesn't know (writes validate the currency first; see store/operations.ts).
+
+export const decimalsFor = (currency: string, registry: CurrencyRegistry = CURRENCY_REGISTRY): number =>
+  registry[currency]?.decimals ?? 2;
+
+export const roundIn = (x: number, currency: string): number => roundTo(x, decimalsFor(currency));
+
+export const sumIn = (values: readonly number[], currency: string): number => sumTo(values, decimalsFor(currency));
+
+// a + b, rounded: how running totals are kept exact (both are already rounded to the currency).
+export const addIn = (a: number, b: number, currency: string): number => roundTo(a + b, decimalsFor(currency));
