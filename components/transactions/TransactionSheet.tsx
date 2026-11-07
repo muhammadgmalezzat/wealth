@@ -133,7 +133,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       : null;
   const impactCategory = state.categories.find((c) => c.id === categoryId)?.name;
   const impactCurrency = planFor(state, monthOf(date))?.currency ?? 'EGP';
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const convertedToAmount =
     crossCurrency && amount !== null
       ? round2(convertCurrency(amount, fromAccount.currency, toAccount.currency, rates))
@@ -192,7 +192,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
               type: 'transfer',
               id: transaction.id,
               createdAt: transaction.createdAt,
-              rateToEGP: transaction.rateToEGP,
+              rateSnapshotId: transaction.rateSnapshotId,
             })
           : state.addTransfer(fields)
       );
@@ -261,7 +261,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
         id: transaction.id,
         createdAt: transaction.createdAt,
         // The store keeps this unless the currency changed.
-        rateToEGP: transaction.rateToEGP,
+        rateSnapshotId: transaction.rateSnapshotId,
       });
     });
     if (saved) onClose();

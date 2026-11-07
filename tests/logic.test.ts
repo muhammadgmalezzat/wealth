@@ -23,7 +23,7 @@ import { COUNTRY_REGISTRY, countryCodes, countryName, isKnownCountry } from '@/c
 import { CURRENCY_REGISTRY, decimalsOf, isKnownCurrency, UnknownCurrencyError } from '@/constants/currencyRegistry';
 import * as legacyCurrency from '@/store/legacy/currency.v7';
 import { roundMoney, roundTo, splitMoney, splitTo, sumTo } from '@/utils/money';
-import { convert, hasRate, makeSnapshot, RateMissingError, rateBetween, sameTable, snapshotById, snapshotForWrite, snapshotId, tableFromEgpRates } from '@/utils/rates';
+import { convert, hasRate, makeSnapshot, RateMissingError, rateBetween, sameTable, snapshotById, snapshotForWrite, snapshotId, tableFromEgpRates, type CurrentRates } from '@/utils/rates';
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
 import { FinanceValidationError } from '@/store/errors';
@@ -112,7 +112,31 @@ import * as prices from '@/utils/prices/fetchPrices';
 
 // --- Fixtures ---------------------------------------------------------------
 
-const RATES = { SAR_EGP: 12.5, USD_EGP: 50, lastUpdated: '2026-10-01T00:00:00.000Z' };
+// The rates as the v7 app and the Settings screen speak them (EGP per unit): v1 exports, updateRates / updateSettings input.
+const RATES_V7 = { SAR_EGP: 12.5, USD_EGP: 50, lastUpdated: '2026-10-01T00:00:00.000Z' };
+// The current rate table (USD base) for "SAR is worth `sar` EGP, USD `usd` EGP".
+const rateTable = (sar: number, usd = 50): CurrentRates => ({
+  ...tableFromEgpRates({ SAR: sar, USD: usd }),
+  updatedAt: '2026-10-01T00:00:00.000Z',
+  source: 'manual',
+});
+const RATES = rateTable(12.5);
+// The immutable snapshot of such a table, and the one every default fixture record points at.
+const snapshotOf = (sar: number, usd = 50) => makeSnapshot(rateTable(sar, usd), { takenAt: '2026-10-01T00:00:00.000Z', source: 'manual' });
+const S125 = snapshotOf(12.5);
+// `state` with the current SAR rate set to `sar` (records written next get a snapshot of it).
+const withSar = (state: FinanceState, sar: number, usd = 50): FinanceState => ({
+  ...state,
+  settings: { ...state.settings, rates: rateTable(sar, usd) },
+});
+// ops.addTransaction while SAR was worth `sar` EGP: history is recorded at the rates in force then.
+const addAt = (state: FinanceState, input: ops.NewIncomeExpense, sar: number, ctx: ops.OpContext): FinanceState => {
+  const patch = ops.addTransaction(withSar(state, sar), input, ctx);
+  return { ...state, ...patch, settings: { ...patch.settings!, rates: state.settings.rates } };
+};
+// How many EGP one unit of `currency` was worth on the rate snapshot a record points at.
+const snapRate = (state: Pick<FinanceState, 'rateSnapshots'>, record: { rateSnapshotId: string }, currency: string): number =>
+  convert(1, currency, 'EGP', snapshotById(state.rateSnapshots, record.rateSnapshotId)!);
 const NOW = new Date(2026, 9, 15, 12); // 15 Oct 2026, local time
 const MIGRATION_CTX = { now: '2026-10-15T09:00:00.000Z', newId: () => 'migrated-device' };
 // updatedAt for hand-built fixtures.
@@ -137,8 +161,9 @@ function emptyState(): FinanceState {
     netWorthSnapshots: [],
     actionDismissals: [],
     monthlyReviews: [],
+    rateSnapshots: [S125],
     settings: {
-      exchangeRates: RATES,
+      rates: RATES,
       goldPrice24kEGP: 6000,
       goldPrice21kEGP: 6000 * (21 / 24),
       goldPriceUpdatedAt: '2026-10-01T00:00:00.000Z',
@@ -148,6 +173,12 @@ function emptyState(): FinanceState {
     },
     tombstones: [],
   };
+}
+
+// A data-v7 state (what the frozen migration chain reads): v7 settings, no rate snapshots.
+function emptyStateV7() {
+  const { rateSnapshots: _snapshots, settings: { rates: _rates, ...settings }, ...rest } = emptyState();
+  return { ...rest, settings: { ...settings, exchangeRates: RATES_V7 } };
 }
 
 const apply = (state: FinanceState, patch: Partial<FinanceState>): FinanceState => ({
@@ -208,7 +239,7 @@ const LEGACY_V1: FinanceStateV1 = {
     { id: 'g-big', name: 'Big goal', targetAmount: 200000, currentAmount: 100000, deadline: '2027-06-30', currency: 'EGP' },
     { id: 'g-small', name: 'Small goal', targetAmount: 50000, currentAmount: 30000, currency: 'EGP' },
   ],
-  exchangeRates: RATES,
+  exchangeRates: RATES_V7,
 };
 
 // --- Migration --------------------------------------------------------------
@@ -249,7 +280,7 @@ describe('migration', () => {
     if (income.type === 'income') {
       assert.equal(income.accountId, 'a-cash');
       assert.equal(income.categoryId, CATEGORY_IDS.otherIncome);
-      assert.equal(income.rateToEGP, 12.5);
+      approx(snapRate(v2, income, 'SAR'), 12.5);
       assert.equal(income.date, '2026-09-02');
       assert.equal(income.note, 'Bonus');
     }
@@ -259,7 +290,9 @@ describe('migration', () => {
     }
 
     assert.equal(v2.categories.length, DEFAULT_CATEGORIES.length);
-    assert.deepEqual(v2.settings.exchangeRates, RATES);
+    approx(convert(1, 'SAR', 'EGP', v2.settings.rates), 12.5);
+    approx(convert(1, 'USD', 'EGP', v2.settings.rates), 50);
+    assert.equal(v2.settings.rates.updatedAt, RATES_V7.lastUpdated);
     assert.equal(v2.settings.goldPrice24kEGP, GOLD_PRICE_24K);
   });
 
@@ -380,8 +413,8 @@ describe('funds', () => {
       fund({ id: 'sar', currency: 'SAR', targetAmount: 10000, linkedHoldingIds: ['gold'] }),
     ];
     s.fundMovements = [
-      { id: 'm1', updatedAt: T0, fundId: 'egp', amount: 10000, date: '2026-09-01' },
-      { id: 'm2', updatedAt: T0, fundId: 'sar', amount: 200, date: '2026-09-01' },
+      { id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'egp', amount: 10000, date: '2026-09-01' },
+      { id: 'm2', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'sar', amount: 200, date: '2026-09-01' },
     ];
     approx(fundCurrent(s, 'egp'), 60000 + 10000);
     approx(fundProgress(s, 'egp'), 0.7);
@@ -395,7 +428,7 @@ describe('funds', () => {
       fund({ id: 'open' }),
       fund({ id: 'overdue', deadline: '2026-01-31' }),
     ];
-    s.fundMovements = [{ id: 'm1', updatedAt: T0, fundId: 'dated', amount: 10000, date: '2026-09-01' }];
+    s.fundMovements = [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'dated', amount: 10000, date: '2026-09-01' }];
     approx(fundRequiredMonthly(s, 'dated', NOW), (100000 - 70000) / 3); // Oct, Nov, Dec
     assert.equal(fundRequiredMonthly(s, 'open', NOW), null);
     approx(fundRequiredMonthly(s, 'overdue', NOW), 100000); // everything due now
@@ -405,7 +438,7 @@ describe('funds', () => {
     const ctx = makeCtx();
     const base = withGold();
     base.funds = [fund({ id: 'f', deadline: '2026-12-31', linkedHoldingIds: ['gold'] }), fund({ id: 'open' })];
-    base.fundMovements = [{ id: 'm1', updatedAt: T0, fundId: 'f', amount: 10000, date: '2026-09-01' }];
+    base.fundMovements = [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'f', amount: 10000, date: '2026-09-01' }];
     // At month start: 70,000 of 100,000 → 10,000/month required.
     const allocate = (amount: number) => apply(base, ops.allocateToFund(base, 'f', amount, undefined, ctx));
 
@@ -426,7 +459,7 @@ describe('funds', () => {
     const ctx = makeCtx();
     const s = withGold();
     s.funds = [fund({ id: 'f', linkedHoldingIds: ['gold'] })];
-    s.fundMovements = [{ id: 'm1', updatedAt: T0, fundId: 'f', amount: 1000, date: '2026-09-01' }];
+    s.fundMovements = [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'f', amount: 1000, date: '2026-09-01' }];
     assert.throws(() => ops.withdrawFromFund(s, 'f', 1500, undefined, ctx), ops.FinanceValidationError);
     const after = apply(s, ops.withdrawFromFund(s, 'f', 400, 'repair', ctx));
     approx(fundCurrent(after, 'f'), 60000 + 600);
@@ -440,8 +473,8 @@ describe('unassignedEGP', () => {
     s.holdings = [{ id: 'gold', updatedAt: T0, type: 'gold', name: 'Gold', weightGrams: 10, karat: 24, purchaseCostEGP: 0, country: 'EG' }];
     s.funds = [fund({ id: 'egp-fund', linkedHoldingIds: ['gold'] }), fund({ id: 'sar-fund', currency: 'SAR' })];
     s.fundMovements = [
-      { id: 'm1', updatedAt: T0, fundId: 'egp-fund', amount: 30000, date: '2026-09-01' },
-      { id: 'm2', updatedAt: T0, fundId: 'sar-fund', amount: 400, date: '2026-09-01' },
+      { id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'egp-fund', amount: 30000, date: '2026-09-01' },
+      { id: 'm2', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'sar-fund', amount: 400, date: '2026-09-01' },
     ];
     approx(unassignedEGP(s), 50000 + 2000 * 12.5 - 30000 - 400 * 12.5);
   });
@@ -454,20 +487,21 @@ describe('monthSummary', () => {
     const ctx = makeCtx();
     let s = emptyState();
     s.accounts = [account('egp', 'EGP', 0), account('sar', 'SAR', 0)];
-    const add = (input: ops.NewIncomeExpense) => {
-      s = apply(s, ops.addTransaction(s, input, ctx));
+    const add = (input: ops.NewIncomeExpense, sar = 12.5) => {
+      s = addAt(s, input, sar, ctx);
     };
-    add({ type: 'income', amount: 10000, currency: 'SAR', accountId: 'sar', categoryId: 'cat-income-salary', date: '2026-10-01', rateToEGP: 12 });
+    // Each is recorded at the SAR rate in force that day.
+    add({ type: 'income', amount: 10000, currency: 'SAR', accountId: 'sar', categoryId: 'cat-income-salary', date: '2026-10-01' }, 12);
     add({ type: 'expense', amount: 20000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-10-02' });
-    add({ type: 'expense', amount: 100, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-03', rateToEGP: 13 });
-    // No explicit rate → snapshot of the current SAR rate (12.5).
+    add({ type: 'expense', amount: 100, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-03' }, 13);
+    // At the current SAR rate (12.5).
     add({ type: 'expense', amount: 80, currency: 'SAR', accountId: 'sar', categoryId: 'cat-giving-sadaqah', date: '2026-10-04' });
     // Other month and transfers are excluded.
     add({ type: 'expense', amount: 999, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-09-30' });
     s = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100, date: '2026-10-05' }, ctx));
 
     // Later rate changes must not rewrite history.
-    s = apply(s, ops.updateRates(s, { ...RATES, SAR_EGP: 20 }));
+    s = apply(s, ops.updateRates(s, { ...RATES_V7, SAR_EGP: 20 }));
 
     const summary = monthSummary(s, '2026-10');
     approx(summary.incomeEGP, 120000);
@@ -510,7 +544,7 @@ describe('transfers', () => {
     approx(liquidTotalEGP(s), before);
     const [tx] = s.transactions;
     assert.equal(tx.type, 'transfer');
-    assert.equal(tx.rateToEGP, 12.5);
+    approx(snapRate(s, tx, 'SAR'), 12.5);
   });
 
   it('records the actual received amount when given (e.g. after fees)', () => {
@@ -621,7 +655,7 @@ describe('editFund', () => {
     ...emptyState(),
     accounts: [account('egp', 'EGP', 50000)],
     funds: [fund({ id: 'f', deadline: '2026-12-31' })],
-    fundMovements: [{ id: 'm1', updatedAt: T0, fundId: 'f', amount: 30000, date: '2026-09-01' }],
+    fundMovements: [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'f', amount: 30000, date: '2026-09-01' }],
   });
   const edit = (cashAllocation: number): ops.FundEdit => ({
     name: ' Wedding ',
@@ -689,12 +723,12 @@ describe('transaction lists', () => {
   const build = () => {
     const ctx = makeCtx();
     let s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 0), account('sar', 'SAR', 1000)] };
-    const add = (input: ops.NewIncomeExpense) => {
-      s = apply(s, ops.addTransaction(s, input, ctx));
+    const add = (input: ops.NewIncomeExpense, sar = 12.5) => {
+      s = addAt(s, input, sar, ctx);
     };
-    add({ type: 'income', amount: 1000, currency: 'SAR', accountId: 'sar', categoryId: 'cat-income-salary', date: '2026-10-01', rateToEGP: 12 });
+    add({ type: 'income', amount: 1000, currency: 'SAR', accountId: 'sar', categoryId: 'cat-income-salary', date: '2026-10-01' }, 12);
     add({ type: 'expense', amount: 300, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-10-01' });
-    add({ type: 'expense', amount: 10, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-03', rateToEGP: 13 });
+    add({ type: 'expense', amount: 10, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-03' }, 13);
     add({ type: 'expense', amount: 50, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-09-30' });
     s = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100, date: '2026-10-03' }, ctx));
     return s;
@@ -713,7 +747,8 @@ describe('transaction lists', () => {
   });
 
   it('groupTransactionsByDay orders days and nets each day in EGP at stored rates', () => {
-    const groups = groupTransactionsByDay(transactionsForMonth(build(), '2026-10'));
+    const built = build();
+    const groups = groupTransactionsByDay(built, transactionsForMonth(built, '2026-10'));
     assert.deepEqual(groups.map((g) => [g.date, g.transactions.length]), [
       ['2026-10-03', 2],
       ['2026-10-01', 2],
@@ -739,12 +774,9 @@ describe('editing transactions', () => {
       ...emptyState(),
       accounts: [account('sar', 'SAR', 0), account('sar2', 'SAR', 0), account('egp', 'EGP', 0)],
     };
-    s = apply(
-      s,
-      ops.addTransaction(s, { type: 'expense', amount: 100, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-02', rateToEGP: 11 }, makeCtx())
-    );
+    s = addAt(s, { type: 'expense', amount: 100, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-02' }, 11, makeCtx());
     // Rates move after the transaction was recorded.
-    return apply(s, ops.updateRates(s, { ...RATES, SAR_EGP: 14 }));
+    return apply(s, ops.updateRates(s, { ...RATES_V7, SAR_EGP: 14 }));
   };
 
   const expenseOf = (s: FinanceState) => {
@@ -758,11 +790,12 @@ describe('editing transactions', () => {
     const tx = expenseOf(s);
     const after = apply(
       s,
-      ops.updateTransaction(s, { ...tx, amount: 150, accountId: 'sar2', rateToEGP: 999, createdAt: 'tampered' }, makeCtx())
+      ops.updateTransaction(s, { ...tx, amount: 150, accountId: 'sar2', rateSnapshotId: 'rs-tampered', createdAt: 'tampered' }, makeCtx())
     );
     const updated = after.transactions[0];
     assert.equal(updated.amount, 150);
-    assert.equal(updated.rateToEGP, 11);
+    approx(snapRate(after, updated, 'SAR'), 11);
+    assert.equal(updated.rateSnapshotId, tx.rateSnapshotId);
     assert.equal(updated.createdAt, tx.createdAt);
   });
 
@@ -770,7 +803,10 @@ describe('editing transactions', () => {
     const s = setup();
     const tx = expenseOf(s);
     const after = apply(s, ops.updateTransaction(s, { ...tx, accountId: 'egp', currency: 'EGP', amount: 1500 }, makeCtx()));
-    assert.equal(after.transactions[0].rateToEGP, 1);
+    // The snapshot is taken again, at the rates in force now (SAR 14).
+    assert.equal(after.transactions[0].rateSnapshotId, snapshotId(rateTable(14)));
+    assert.notEqual(after.transactions[0].rateSnapshotId, tx.rateSnapshotId);
+    assert.ok(after.rateSnapshots.some((snap) => snap.id === snapshotId(rateTable(14))), 'and it is saved');
     // ...and still validates the currency against the account, like add does.
     assert.throws(() => ops.updateTransaction(s, { ...tx, accountId: 'egp' }, makeCtx()), { code: 'CURRENCY_MISMATCH' });
   });
@@ -788,13 +824,13 @@ describe('editing transactions', () => {
         amount: 100,
         toAmount: 1400,
         date: tx.date,
-        rateToEGP: tx.rateToEGP,
+        rateSnapshotId: tx.rateSnapshotId,
         createdAt: tx.createdAt,
       }, makeCtx())
     );
     approx(accountBalance(after, 'egp'), 1400);
     approx(accountBalance(after, 'sar'), -100);
-    assert.equal(after.transactions[0].rateToEGP, 11); // still SAR-denominated
+    approx(snapRate(after, after.transactions[0], 'SAR'), 11); // still SAR-denominated: its snapshot is kept
   });
 
   it('deleting a transaction restores the account balance', () => {
@@ -828,7 +864,7 @@ describe('fund allocation', () => {
       fund({ id: 'D', priority: 4, targetAmount: 50000 }), // no deadline, no plan → nothing suggested
       fund({ id: 'F', priority: 5, targetAmount: 1000, monthlyContribution: 500 }), // only 100 left to reach
     ],
-    fundMovements: [{ id: 'm1', updatedAt: T0, fundId: 'F', amount: 900, date: '2026-09-01' }],
+    fundMovements: [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'F', amount: 900, date: '2026-09-01' }],
   });
 
   it('suggestAllocation follows priority and caps each fund', () => {
@@ -893,8 +929,8 @@ describe('covering overspent fund money', () => {
       accounts: [account('egp', 'EGP', 10000)],
       funds: [fund({ id: 'A', priority: 1 }), fund({ id: 'B', priority: 2 })],
       fundMovements: [
-        { id: 'm1', updatedAt: T0, fundId: 'A', amount: 6000, date: '2026-09-01' },
-        { id: 'm2', updatedAt: T0, fundId: 'B', amount: 3000, date: '2026-09-01' },
+        { id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'A', amount: 6000, date: '2026-09-01' },
+        { id: 'm2', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'B', amount: 3000, date: '2026-09-01' },
       ],
     };
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 5000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-bills', date: '2026-10-10' }, makeCtx()));
@@ -948,7 +984,7 @@ describe('paySinkingFund', () => {
       fund({ id: 'S', type: 'sinking', targetAmount: 2400, frequency: 'yearly', nextDueDate: '2026-10-20' }),
       fund({ id: 'G', priority: 2 }),
     ],
-    fundMovements: [{ id: 'm1', updatedAt: T0, fundId: 'S', amount: 2000, date: '2026-09-01' }],
+    fundMovements: [{ id: 'm1', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'S', amount: 2000, date: '2026-09-01' }],
   });
   const payment = (overrides: Partial<ops.SinkingPayment> = {}): ops.SinkingPayment => ({
     fundId: 'S',
@@ -1046,7 +1082,7 @@ describe('opening data import', { skip: noSeed }, () => {
     assert.ok(acct, `account ${name}`);
     return accountBalance(s, acct.id);
   };
-  const seedRate = () => LOCAL_SEED!.transactions[0].rateToEGP;
+  const seedRate = () => snapRate(LOCAL_SEED!, LOCAL_SEED!.transactions[0], 'SAR');
 
   it('ends with the expected account balances', () => {
     const s = imported();
@@ -1066,7 +1102,7 @@ describe('opening data import', { skip: noSeed }, () => {
 
   it('keeps current market inputs but takes the seed tracking start', () => {
     const s = imported();
-    assert.deepEqual(s.settings.exchangeRates, RATES);
+    assert.deepEqual(s.settings.rates, RATES);
     assert.equal(s.settings.trackingStartDate, '2026-08-05');
     assert.equal(s.settings.lastUsed, undefined);
   });
@@ -1186,7 +1222,7 @@ describe('buyGold', () => {
           accountId: 'egp',
           categoryId: 'cat-essentials-rent',
           date: tx.date,
-          rateToEGP: 1,
+          rateSnapshotId: S125.id,
           createdAt: tx.createdAt,
         }, makeCtx()),
       { code: 'ASSET_PURCHASE_TYPE_LOCKED' }
@@ -1237,8 +1273,9 @@ describe('settings & gold prices', () => {
       s,
       ops.updateSettings(s, { exchangeRates: { SAR_EGP: 13, USD_EGP: 50 }, goldPrice21kEGP: 5400 }, makeCtx())
     );
-    assert.equal(after.settings.exchangeRates.SAR_EGP, 13);
-    assert.equal(after.settings.exchangeRates.lastUpdated, NOW.toISOString());
+    approx(convert(1, 'SAR', 'EGP', after.settings.rates), 13);
+    assert.equal(after.settings.rates.updatedAt, NOW.toISOString());
+    assert.equal(after.settings.rates.source, 'manual');
     assert.equal(after.settings.goldPrice21kEGP, 5400);
     assert.equal(after.settings.goldPriceUpdatedAt, NOW.toISOString());
     assert.throws(() => ops.updateSettings(s, { goldPrice24kEGP: 0 }, makeCtx()), { code: 'NOT_POSITIVE' });
@@ -1250,7 +1287,7 @@ describe('migration v2 → v3', () => {
   // A v2 payload: no account location, no 21k price or tracking start, old category list
   // (with one default the user renamed).
   const v2 = () => {
-    const base = emptyState();
+    const base = emptyStateV7();
     const { goldPrice21kEGP: _p21, trackingStartDate: _start, ...settingsV2 } = base.settings;
     return {
       ...base,
@@ -1694,10 +1731,7 @@ describe('plan suggestion', () => {
 describe('plan currency conversion', () => {
   const GROCERIES = CATEGORY_IDS.groceries;
   const DINING = 'cat-lifestyle-dining';
-  const withSarRate = (s: FinanceState, SAR_EGP: number): FinanceState => ({
-    ...s,
-    settings: { ...s.settings, exchangeRates: { ...s.settings.exchangeRates, SAR_EGP } },
-  });
+  const withSarRate = (s: FinanceState, SAR_EGP: number): FinanceState => withSar(s, SAR_EGP);
   // Recorded while 1 SAR = 13.5 EGP: a 40 SAR and a 270 EGP (= 20 SAR) expense, a 3,000 SAR
   // income, 1,350 EGP (= 100 SAR) put into an EGP fund, all in October's SAR plan.
   const recordedAt13_5 = (): FinanceState => {
@@ -1738,11 +1772,6 @@ describe('plan currency conversion', () => {
     return apply(s, ops.allocateToFund(s, 'F', 1350, undefined, ctx));
   };
   const spent = (s: FinanceState, categoryId: string) => planProgress(s, '2026-10')!.lines.find((l) => l.categoryId === categoryId)!.spent;
-  const withoutSnapshots = (s: FinanceState): FinanceState => ({
-    ...s,
-    transactions: s.transactions.map(({ ratesSnapshot: _r, ...tx }) => tx as Transaction),
-    fundMovements: s.fundMovements.map(({ ratesSnapshot: _r, ...m }) => m),
-  });
 
   it('keeps a 40 SAR expense at exactly 40 in a SAR plan after SAR_EGP moves 13.5 → 14', () => {
     const before = recordedAt13_5();
@@ -1754,7 +1783,7 @@ describe('plan currency conversion', () => {
 
   it('converts an EGP expense into the SAR plan with its own snapshot, not today’s rate', () => {
     const before = recordedAt13_5();
-    assert.deepEqual(before.transactions.find((t) => t.amount === 270)!.ratesSnapshot, { SAR_EGP: 13.5, USD_EGP: 50 });
+    approx(snapRate(before, before.transactions.find((t) => t.amount === 270)!, 'SAR'), 13.5);
     approx(spent(before, DINING), 20);
     approx(spent(withSarRate(before, 14), DINING), 20);
     approx(spent(withSarRate(before, 27), DINING), 20);
@@ -1784,7 +1813,7 @@ describe('plan currency conversion', () => {
   it('keeps fund allocations of the month at their own rates (plan progress, review, month flows)', () => {
     const before = recordedAt13_5();
     const after = withSarRate(before, 14);
-    assert.deepEqual(after.fundMovements[0].ratesSnapshot, { SAR_EGP: 13.5, USD_EGP: 50 });
+    approx(snapRate(after, after.fundMovements[0], 'SAR'), 13.5);
     approx(planProgress(after, '2026-10')!.contributions[0].allocated, 100);
     approx(reviewLogic.monthReview(after, '2026-10', NOW).funds[0].allocated, 100);
     assert.equal(monthFlows(after, '2026-10').savedToFundsEGP, 1350);
@@ -1792,41 +1821,18 @@ describe('plan currency conversion', () => {
     assert.equal(fundAllocated(after, 'F'), 1350);
   });
 
-  it('still works for transactions and movements recorded before ratesSnapshot existed', () => {
-    const old = withSarRate(withoutSnapshots(recordedAt13_5()), 14);
-    // Same currency: exact, whatever the rates.
-    assert.equal(spent(old, GROCERIES), 40);
-    // Other currency: own rate to EGP, today's rate out of it (the documented approximation).
-    approx(spent(old, DINING), 270 / 14);
-    approx(planProgress(old, '2026-10')!.contributions[0].allocated, 1350 / 14);
-    approx(amountInCurrency(old, { amount: 100, currency: 'SAR', rateToEGP: 13 }, 'SAR'), 100);
-    approx(amountInCurrency(old, { amount: 100, currency: 'SAR', rateToEGP: 13 }, 'EGP'), 1300);
-    approx(amountInCurrency(old, { amount: 100, currency: 'SAR', rateToEGP: 13 }, 'USD'), 26);
-    // With a snapshot both legs come from the same moment.
-    approx(
-      amountInCurrency(old, { amount: 100, currency: 'SAR', rateToEGP: 13, ratesSnapshot: { SAR_EGP: 13, USD_EGP: 52 } }, 'USD'),
-      25
-    );
-  });
-
   it('keeps the snapshot when a transaction is edited, and retakes it when its currency changes', () => {
     const s = withSarRate(recordedAt13_5(), 14);
     const ctx = makeCtx();
     const tx = s.transactions.find((t) => t.amount === 40)!;
     const edited = apply(s, ops.updateTransaction(s, { ...tx, amount: 45 } as Transaction, ctx)).transactions.find((t) => t.id === tx.id)!;
-    assert.equal(edited.rateToEGP, 13.5);
-    assert.deepEqual(edited.ratesSnapshot, { SAR_EGP: 13.5, USD_EGP: 50 });
+    assert.equal(edited.rateSnapshotId, tx.rateSnapshotId);
+    approx(snapRate(s, edited, 'SAR'), 13.5);
     const moved = apply(
       s,
       ops.updateTransaction(s, { ...tx, accountId: 'egp', currency: 'EGP' } as Transaction, ctx)
     ).transactions.find((t) => t.id === tx.id)!;
-    assert.equal(moved.rateToEGP, 1);
-    assert.deepEqual(moved.ratesSnapshot, { SAR_EGP: 14, USD_EGP: 50 });
-    // An old transaction stays without one while its currency is unchanged.
-    const old = withoutSnapshots(s);
-    const oldTx = old.transactions.find((t) => t.amount === 40)!;
-    const oldEdited = apply(old, ops.updateTransaction(old, { ...oldTx, amount: 41 } as Transaction, ctx)).transactions.find((t) => t.id === tx.id)!;
-    assert.equal('ratesSnapshot' in oldEdited, false);
+    assert.equal(moved.rateSnapshotId, snapshotId(rateTable(14)));
   });
 
   it('pays a sinking fund in its own currency without a conversion', () => {
@@ -1987,7 +1993,7 @@ describe('plan operations', () => {
 
 describe('migration v4 → v5', () => {
   const v4 = () => ({
-    ...emptyState(),
+    ...emptyStateV7(),
     monthlyPlans: [{ month: '2026-09', expectedIncomeEGP: 5000, bucketLimitsEGP: { lifestyle: 100 }, updatedAt: T0 }],
     tombstones: [{ entity: 'monthlyPlan' as const, id: '2026-08', deletedAt: T0 }],
   });
@@ -2135,7 +2141,7 @@ describe('recurring processing', () => {
     const ctx = makeCtx();
     let s = recurringState(rule({ id: 'r', mode: 'auto', currency: 'SAR', accountId: 'sar', startDate: '2026-10-05' }));
     s = apply(s, ops.processDue(s, ctx));
-    assert.equal(s.transactions[0].rateToEGP, 12.5);
+    approx(snapRate(s, s.transactions[0], 'SAR'), 12.5);
   });
 
   it('skips paused and ended rules', () => {
@@ -2260,7 +2266,7 @@ describe('recurring in the plan', () => {
 
 describe('migration v5 → v6', () => {
   const v5 = () => ({
-    ...emptyState(),
+    ...emptyStateV7(),
     recurringRules: [
       {
         id: 'old',
@@ -2443,7 +2449,7 @@ describe('next best actions: rules and ordering', () => {
       accountId: 'egp',
       categoryId,
       date,
-      rateToEGP: 1,
+      rateSnapshotId: S125.id,
       createdAt: `${date}T10:00:00.000Z`,
       updatedAt: T0,
       ...extra,
@@ -2452,7 +2458,7 @@ describe('next best actions: rules and ordering', () => {
     ...s,
     settings: {
       ...s.settings,
-      exchangeRates: { ...RATES, lastUpdated: '2026-10-25T00:00:00.000Z' },
+      rates: { ...RATES, updatedAt: '2026-10-25T00:00:00.000Z' },
       goldPriceUpdatedAt: '2026-10-25T00:00:00.000Z',
       lastBackupAt: '2026-10-25T00:00:00.000Z',
     },
@@ -2529,7 +2535,7 @@ describe('next best actions: rules and ordering', () => {
       ...emptyState(),
       accounts: [account('egp', 'EGP', 1000)],
       funds: [fund({ id: 'goal', name: 'جواز', deadline: '2027-09-30' })],
-      fundMovements: [{ id: 'm', fundId: 'goal', amount: 5000, date: '2026-09-01', updatedAt: T0 }],
+      fundMovements: [{ id: 'm', fundId: 'goal', amount: 5000, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 }],
       recurringRules: [rule({ id: 'r', startDate: '2026-10-05' })],
     };
     assert.deepEqual(ids(s), ['due', 'cover', 'plan-2026-10', 'emergency', 'backup']);
@@ -2544,7 +2550,7 @@ describe('next best actions: rules and ordering', () => {
     const s: FinanceState = {
       ...busy(),
       funds: [...busy().funds, fund({ id: 'big', deadline: '2027-09-30', priority: 9 })],
-      fundMovements: [{ id: 'm', fundId: 'big', amount: 500000, date: '2026-09-01', updatedAt: T0 }],
+      fundMovements: [{ id: 'm', fundId: 'big', amount: 500000, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 }],
     };
     for (const a of nba.allActions(s, OCT_26)) {
       assert.equal(a.dismissible, !['due', 'cover'].includes(a.id), a.id);
@@ -2576,7 +2582,7 @@ describe('next best actions: rules and ordering', () => {
       ...emptyState(),
       accounts: [account('egp', 'EGP', 100000)],
       funds: [fund({ id: 'car', type: 'sinking', targetAmount: 5000, frequency: 'yearly', nextDueDate })],
-      fundMovements: saved ? [{ id: 'm', fundId: 'car', amount: saved, date: '2026-09-01', updatedAt: T0 }] : [],
+      fundMovements: saved ? [{ id: 'm', fundId: 'car', amount: saved, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 }] : [],
     });
     assert.ok(ids(sinking('2026-10-29')).includes('sinking-car')); // 14 days
     assert.ok(!ids(sinking('2026-10-30')).includes('sinking-car')); // 15 days
@@ -2594,7 +2600,7 @@ describe('next best actions: rules and ordering', () => {
       accounts: [account('egp', 'EGP', 100000)],
       transactions: history,
       funds: [fund({ id: 'em', type: 'emergency', targetAmount: 18000 })],
-      fundMovements: [{ id: 'm', fundId: 'em', amount: saved, date: '2026-09-01', updatedAt: T0 }],
+      fundMovements: [{ id: 'm', fundId: 'em', amount: saved, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 }],
     });
     const thin = nba.nextActions(withFund(1000), NOW).find((a) => a.id === 'emergency')!;
     assert.equal(thin.title, 'ابدأ صندوق الطوارئ');
@@ -2694,7 +2700,7 @@ describe('net worth snapshots', () => {
         accountId: 'egp',
         categoryId: 'cat-income-salary',
         date: '2026-09-10',
-        rateToEGP: 1,
+        rateSnapshotId: S125.id,
         createdAt: T0,
         updatedAt: T0,
       },
@@ -2762,9 +2768,9 @@ describe('net worth snapshots', () => {
 describe('migration v6 → v7', () => {
   const v6 = () => {
     const { netWorthSnapshots: _n, actionDismissals: _a, monthlyReviews: _r, ...rest } = {
-      ...emptyState(),
+      ...emptyStateV7(),
       accounts: [{ ...accountV7('egp', 'EGP', 1000), openingDate: '2026-08-01' }],
-      settings: { ...emptyState().settings, trackingStartDate: '2026-08-20' },
+      settings: { ...emptyStateV7().settings, trackingStartDate: '2026-08-20' },
     };
     return rest;
   };
@@ -2814,7 +2820,7 @@ describe('monthly review', () => {
       accountId: 'egp',
       categoryId,
       date: '2026-09-10',
-      rateToEGP: 1,
+      rateSnapshotId: S125.id,
       createdAt: T0,
       updatedAt: T0,
       ...extra,
@@ -2836,7 +2842,7 @@ describe('monthly review', () => {
         accountId: 'egp',
         holdingId: 'g',
         date: '2026-09-12',
-        rateToEGP: 1,
+        rateSnapshotId: S125.id,
         createdAt: T0,
         updatedAt: T0,
       },
@@ -2844,8 +2850,8 @@ describe('monthly review', () => {
     holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 1, karat: 24, purchaseCostEGP: 4000, country: 'EG', updatedAt: T0 }],
     funds: [fund({ id: 'goal', name: 'جواز', targetAmount: 50000 }), fund({ id: 'done', targetAmount: 100, priority: 2 })],
     fundMovements: [
-      { id: 'm1', fundId: 'goal', amount: 1000, date: '2026-09-15', updatedAt: T0 },
-      { id: 'm2', fundId: 'done', amount: 100, date: '2026-08-15', updatedAt: T0 },
+      { id: 'm1', fundId: 'goal', amount: 1000, date: '2026-09-15', rateSnapshotId: S125.id, updatedAt: T0 },
+      { id: 'm2', fundId: 'done', amount: 100, date: '2026-08-15', rateSnapshotId: S125.id, updatedAt: T0 },
     ],
     monthlyPlans: [
       {
@@ -2864,8 +2870,8 @@ describe('monthly review', () => {
       },
     ],
     netWorthSnapshots: [
-      { id: 'nw-2026-08', month: '2026-08', netWorthEGP: 20000, liquidEGP: 20000, holdingsEGP: 0, takenAt: T0, updatedAt: T0 },
-      { id: 'nw-2026-09', month: SEP, netWorthEGP: 23000, liquidEGP: 17000, holdingsEGP: 6000, takenAt: T0, updatedAt: T0 },
+      { id: 'nw-2026-08', month: '2026-08', netWorthEGP: 20000, liquidEGP: 20000, holdingsEGP: 0, rateSnapshotId: S125.id, takenAt: T0, updatedAt: T0 },
+      { id: 'nw-2026-09', month: SEP, netWorthEGP: 23000, liquidEGP: 17000, holdingsEGP: 6000, rateSnapshotId: S125.id, takenAt: T0, updatedAt: T0 },
     ],
   });
 
@@ -2960,7 +2966,7 @@ describe('home: homeFunds', () => {
         fund({ id: 'okNear', priority: 4, targetAmount: 100, deadline: '2026-12-01' }),
         fund({ id: 'okNoDue', priority: 5 }),
       ],
-      fundMovements: [{ id: 'm', fundId: 'okNear', amount: 100, date: '2026-10-02', updatedAt: T0 }],
+      fundMovements: [{ id: 'm', fundId: 'okNear', amount: 100, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }],
     };
     assert.deepEqual(
       home.homeFunds(s, NOW, 5).map((f) => f.id),
@@ -3147,7 +3153,7 @@ describe('A1: fundStatus pending vs behind', () => {
   });
 
   it('partially allocated with 10 days left → pending', () => {
-    const partial = state({}, [{ id: 'm', fundId: 'f', amount: 4000, date: '2026-10-05', updatedAt: T0 }]);
+    const partial = state({}, [{ id: 'm', fundId: 'f', amount: 4000, date: '2026-10-05', rateSnapshotId: S125.id, updatedAt: T0 }]);
     assert.equal(fundStatus(partial, 'f', at(22)), 'pending'); // 10 days left
   });
 
@@ -3158,7 +3164,7 @@ describe('A1: fundStatus pending vs behind', () => {
   });
 
   it('ahead / on_track / no_deadline are unchanged', () => {
-    const done = (amount: number) => state({}, [{ id: 'm', fundId: 'f', amount, date: '2026-10-02', updatedAt: T0 }]);
+    const done = (amount: number) => state({}, [{ id: 'm', fundId: 'f', amount, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }]);
     assert.equal(fundStatus(done(10000), 'f', at(26)), 'on_track');
     assert.equal(fundStatus(done(12000), 'f', at(26)), 'ahead');
     assert.equal(fundStatus(state({ deadline: undefined }), 'f', at(26)), 'no_deadline');
@@ -3173,7 +3179,7 @@ describe('A1: fundStatus pending vs behind', () => {
         fund({ id: 'behind', priority: 2, targetAmount: 30000, deadline: '2027-06-30' }),
         fund({ id: 'okNear', priority: 3, targetAmount: 100, deadline: '2026-11-30' }),
       ],
-      fundMovements: [{ id: 'm', fundId: 'okNear', amount: 100, date: '2026-10-02', updatedAt: T0 }],
+      fundMovements: [{ id: 'm', fundId: 'okNear', amount: 100, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }],
     };
     assert.deepEqual(
       home.homeFunds(s, at(26), 3).map((f) => f.id),
@@ -3183,11 +3189,13 @@ describe('A1: fundStatus pending vs behind', () => {
 });
 
 describe('A2: transfer edits re-snapshot the rate when the from-currency changes', () => {
+  const S11 = snapshotOf(11);
   const setup = (): FinanceState => ({
     ...emptyState(),
+    rateSnapshots: [S125, S11],
     accounts: [account('sar', 'SAR', 10000, 'SA'), account('egp', 'EGP', 100000), account('egp2', 'EGP', 0)],
     transactions: [
-      { id: 't', type: 'transfer', fromAccountId: 'sar', toAccountId: 'egp', amount: 100, toAmount: 1100, date: '2026-10-02', rateToEGP: 11, createdAt: T0, updatedAt: T0 },
+      { id: 't', type: 'transfer', fromAccountId: 'sar', toAccountId: 'egp', amount: 100, toAmount: 1100, date: '2026-10-02', rateSnapshotId: S11.id, createdAt: T0, updatedAt: T0 },
     ],
   });
 
@@ -3195,17 +3203,17 @@ describe('A2: transfer edits re-snapshot the rate when the from-currency changes
     const s = setup();
     const tx = s.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
     const after = apply(s, ops.updateTransaction(s, { ...tx, amount: 120, toAmount: 1320 }, makeCtx()));
-    assert.equal(after.transactions[0].rateToEGP, 11);
+    assert.equal(after.transactions[0].rateSnapshotId, S11.id);
   });
 
   it('takes the current rate of the new from-currency', () => {
     const s = setup();
     const tx = s.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
     const toEgp = apply(s, ops.updateTransaction(s, { ...tx, fromAccountId: 'egp', toAccountId: 'egp2', toAmount: 100 }, makeCtx()));
-    assert.equal(toEgp.transactions[0].rateToEGP, 1);
+    assert.equal(toEgp.transactions[0].rateSnapshotId, S125.id);
     const back = toEgp.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
     const toSar = apply(toEgp, ops.updateTransaction(toEgp, { ...back, fromAccountId: 'sar', toAccountId: 'egp', toAmount: 1250 }, makeCtx()));
-    assert.equal(toSar.transactions[0].rateToEGP, 12.5); // RATES.SAR_EGP
+    assert.equal(toSar.transactions[0].rateSnapshotId, S125.id); // the current rates (SAR 12.5)
   });
 });
 
@@ -3248,8 +3256,8 @@ describe('funds UI helpers', () => {
         fund({ id: 'open', targetAmount: 1000 }),
       ],
       [
-        { id: 'm1', fundId: 'egp', amount: 6000, date: '2026-09-01', updatedAt: T0 },
-        { id: 'm2', fundId: 'sar', amount: 600, date: '2026-09-01', updatedAt: T0 },
+        { id: 'm1', fundId: 'egp', amount: 6000, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 },
+        { id: 'm2', fundId: 'sar', amount: 600, date: '2026-09-01', rateSnapshotId: S125.id, updatedAt: T0 },
       ]
     );
     const summary = fundsUi.fundsSummary(s, at(15));
@@ -3265,11 +3273,11 @@ describe('funds UI helpers', () => {
     assert.ok(fundsUi.fundNextStep(state([goal]), goal, at(26)).text.startsWith('خصص '));
     assert.equal(fundsUi.fundNextStep(state([goal]), goal, at(10)).tone, 'neutral'); // pending
     assert.ok(fundsUi.fundNextStep(state([goal]), goal, at(10)).text.endsWith(' الشهر ده.'));
-    const paid = state([goal], [{ id: 'm', fundId: 'g', amount: 10000, date: '2026-10-02', updatedAt: T0 }]);
+    const paid = state([goal], [{ id: 'm', fundId: 'g', amount: 10000, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }]);
     assert.deepEqual(fundsUi.fundNextStep(paid, goal, at(26)), { tone: 'ok', text: 'ماشي على الخطة.' });
     const open = fund({ id: 'o', targetAmount: 1000 });
     assert.ok(fundsUi.fundNextStep(state([open]), open, at(26)).text.startsWith('لسه محتاج '));
-    const reached = state([open], [{ id: 'm', fundId: 'o', amount: 1000, date: '2026-10-02', updatedAt: T0 }]);
+    const reached = state([open], [{ id: 'm', fundId: 'o', amount: 1000, date: '2026-10-02', rateSnapshotId: S125.id, updatedAt: T0 }]);
     assert.deepEqual(fundsUi.fundNextStep(reached, open, at(26)), { tone: 'ok', text: 'وصلت للهدف.' });
   });
 
@@ -3356,9 +3364,10 @@ describe('live prices: calculations and validation', () => {
 
   it('derives SAR_EGP and USD_EGP from USD-based rates', () => {
     const fx = priceCalc.parseOpenErApi(ER_API)!;
-    assert.equal(fx.USD_EGP, 50);
-    approx(fx.SAR_EGP, 50 / 3.75);
-    approx(priceCalc.parseExchangerateFun(ER_FUN)!.SAR_EGP, 52 / 3.75);
+    assert.equal(fx.perUsd.EGP, 50);
+    assert.equal(fx.perUsd.USD, 1);
+    approx(convert(1, 'SAR', 'EGP', fx), 50 / 3.75);
+    approx(convert(1, 'SAR', 'EGP', priceCalc.parseExchangerateFun(ER_FUN)!), 52 / 3.75);
   });
 
   it('prices a gram of gold from the ounce price, the USD rate and the local premium', () => {
@@ -3438,7 +3447,7 @@ describe('live prices: fetching', () => {
   it('uses the primary FX source and never calls the fallback when it works', async () => {
     const { fetchImpl, calls } = fakeFetch({ [P]: ER_API, [F]: ER_FUN, [G]: GOLD });
     const result = await prices.fetchLivePrices({ fetchImpl });
-    assert.deepEqual(result, { fx: { SAR_EGP: 50 / 3.75, USD_EGP: 50 }, fxSource: 'open.er-api', xauUsd: GOLD.price });
+    assert.deepEqual(result, { fx: { base: 'USD', perUsd: { USD: 1, EGP: 50, SAR: 3.75 } }, fxSource: 'open.er-api', xauUsd: GOLD.price });
     assert.ok(!calls.includes(F));
   });
 
@@ -3446,7 +3455,7 @@ describe('live prices: fetching', () => {
     for (const primary of [new Error('offline'), { status: 500 }, { result: 'error' }, { ...ER_API, rates: { EGP: 0, SAR: 3.75 } }] as Reply[]) {
       const result = await prices.fetchLivePrices({ fetchImpl: fakeFetch({ [P]: primary, [F]: ER_FUN, [G]: GOLD }).fetchImpl });
       assert.equal(result.fxSource, 'exchangerate.fun');
-      assert.equal(result.fx!.USD_EGP, 52);
+      assert.equal(result.fx!.perUsd.EGP, 52);
       assert.equal(result.error, undefined);
     }
   });
@@ -3460,7 +3469,7 @@ describe('live prices: fetching', () => {
     const goldBad = await prices.fetchLivePrices({ fetchImpl: fakeFetch({ [P]: ER_API, [G]: { ...GOLD, price: -5 } }).fetchImpl });
     assert.equal(goldBad.error, 'gold');
     assert.equal(goldBad.xauUsd, null);
-    assert.equal(goldBad.fx!.USD_EGP, 50);
+    assert.equal(goldBad.fx!.perUsd.EGP, 50);
   });
 
   it('gives up on a request that hangs (timeout)', async () => {
@@ -3470,7 +3479,7 @@ describe('live prices: fetching', () => {
 });
 
 describe('live prices: applying', () => {
-  const OK: prices.PriceFetchResult = { fx: { SAR_EGP: 14, USD_EGP: 50 }, fxSource: 'open.er-api', xauUsd: 3110.34768 };
+  const OK: prices.PriceFetchResult = { fx: { base: 'USD', perUsd: { USD: 1, EGP: 50, SAR: 50 / 14 } }, fxSource: 'open.er-api', xauUsd: 3110.34768 };
   const withSettings = (s: FinanceState, settings: Partial<FinanceState['settings']>): FinanceState => ({ ...s, settings: { ...s.settings, ...settings } });
   const AUTO = { priceSource: 'auto' } as const;
   const autoState = () => withSettings(emptyState(), AUTO);
@@ -3478,7 +3487,10 @@ describe('live prices: applying', () => {
   it('auto mode overwrites rates and gold prices and their dates', () => {
     const s = withSettings(autoState(), { localPremiumPct: 4 });
     const { settings } = apply(s, ops.applyLivePrices(s, OK, makeCtx()));
-    assert.deepEqual(settings.exchangeRates, { SAR_EGP: 14, USD_EGP: 50, lastUpdated: NOW.toISOString() });
+    approx(convert(1, 'SAR', 'EGP', settings.rates), 14);
+    assert.equal(settings.rates.perUsd.EGP, 50);
+    assert.equal(settings.rates.updatedAt, NOW.toISOString());
+    assert.equal(settings.rates.source, 'open.er-api');
     approx(settings.goldPrice24kEGP, 5200);
     approx(settings.goldPrice21kEGP, 4550);
     assert.equal(settings.goldPriceUpdatedAt, NOW.toISOString());
@@ -3505,7 +3517,7 @@ describe('live prices: applying', () => {
     const imported = apply(existing, ops.replaceWithSeed(existing, emptyState(), makeCtx()));
     assert.equal(prices.priceSourceOf(imported.settings), 'manual');
     // The migration chain doesn't turn auto on either.
-    const { netWorthSnapshots: _n, actionDismissals: _a, monthlyReviews: _r, ...v6 } = emptyState();
+    const { netWorthSnapshots: _n, actionDismissals: _a, monthlyReviews: _r, ...v6 } = emptyStateV7();
     assert.equal(prices.priceSourceOf(migratePersistedState(v6, 6, MIGRATION_CTX).state.settings), 'manual');
   });
 
@@ -3513,7 +3525,7 @@ describe('live prices: applying', () => {
     const fresh = apply(emptyState(), ops.ensurePriceSource(emptyState(), true));
     assert.equal(fresh.settings.priceSource, 'auto');
     assert.equal(prices.shouldAutoFetch(fresh.settings, NOW), true);
-    approx(apply(fresh, ops.applyLivePrices(fresh, OK, makeCtx())).settings.exchangeRates.SAR_EGP, 14);
+    approx(convert(1, 'SAR', 'EGP', apply(fresh, ops.applyLivePrices(fresh, OK, makeCtx())).settings.rates), 14);
     // An explicit choice is never changed, fresh or not.
     const manual = withSettings(emptyState(), { priceSource: 'manual' });
     assert.deepEqual(ops.ensurePriceSource(manual, true), {});
@@ -3529,13 +3541,13 @@ describe('live prices: applying', () => {
   it('keeps the saved prices on failure and records the error until a fetch succeeds', () => {
     const s = autoState();
     const failed = apply(s, ops.applyLivePrices(s, { fx: null, xauUsd: null, error: 'network' }, makeCtx()));
-    assert.deepEqual(failed.settings.exchangeRates, s.settings.exchangeRates);
+    assert.deepEqual(failed.settings.rates, s.settings.rates);
     assert.equal(failed.settings.goldPrice24kEGP, s.settings.goldPrice24kEGP);
     assert.equal(failed.settings.lastPriceFetchError, 'network');
     assert.equal(failed.settings.lastPriceFetchAt, undefined);
     // Gold failed: rates update, gold stays.
     const partial = apply(s, ops.applyLivePrices(s, { fx: OK.fx, fxSource: 'exchangerate.fun', xauUsd: null, error: 'gold' }, makeCtx()));
-    assert.equal(partial.settings.exchangeRates.SAR_EGP, 14);
+    approx(convert(1, 'SAR', 'EGP', partial.settings.rates), 14);
     assert.equal(partial.settings.goldPrice24kEGP, s.settings.goldPrice24kEGP);
     assert.equal(partial.settings.goldPriceUpdatedAt, s.settings.goldPriceUpdatedAt);
     assert.equal(partial.settings.lastPriceFetchError, 'gold');
@@ -3579,7 +3591,7 @@ describe('live prices: applying', () => {
         accounts: [account('sar', 'SAR', 1000, 'SA'), account('egp', 'EGP', 5000)],
         holdings: [{ id: 'g', type: 'gold', name: 'g', weightGrams: 10, karat: 24, purchaseCostEGP: 1, country: 'EG', updatedAt: T0 }],
       },
-      { exchangeRates: { ...RATES, SAR_EGP: 12.5 }, priceSource: 'auto' }
+      { rates: RATES, priceSource: 'auto' }
     );
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 40, currency: 'SAR', accountId: 'sar', categoryId: CATEGORY_IDS.groceries, date: '2026-10-05' }, ctx));
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 250, currency: 'EGP', accountId: 'egp', categoryId: 'cat-lifestyle-dining', date: '2026-10-06' }, ctx));
@@ -3633,10 +3645,7 @@ describe('live prices: applying', () => {
 // --- Native amounts never drift with the rates ------------------------------------
 
 describe('native amounts never drift with the rates', () => {
-  const at = (s: FinanceState, SAR_EGP: number): FinanceState => ({
-    ...s,
-    settings: { ...s.settings, exchangeRates: { ...s.settings.exchangeRates, SAR_EGP } },
-  });
+  const at = (s: FinanceState, SAR_EGP: number): FinanceState => withSar(s, SAR_EGP);
   // 1000 SAR and 5000 EGP of cash, SAR_EGP 13.
   const base = (rate = 13): FinanceState =>
     at({ ...emptyState(), accounts: [account('sar', 'SAR', 1000, 'SA'), account('egp', 'EGP', 5000)] }, rate);
@@ -3735,7 +3744,7 @@ describe('native amounts never drift with the rates', () => {
 
   it('old movements (no currency) behave exactly as before', () => {
     const legacy = (amount: number): FinanceState['fundMovements'] => [
-      { id: 'm', updatedAt: T0, fundId: 'F', amount, date: '2026-09-01' },
+      { id: 'm', updatedAt: T0, fundId: 'F', amount, date: '2026-09-01', rateSnapshotId: S125.id },
     ];
     // Everything in EGP: the sum of the movements, the old unassigned figure.
     const egp: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 10000)], funds: [fund({ id: 'F' })], fundMovements: legacy(6000) };
@@ -3858,7 +3867,7 @@ describe('native amounts never drift with the rates', () => {
   });
 
   it('editing a fund’s total cash takes from its own currency first, then the others', () => {
-    const funded = allocate({ ...base(), funds: [fund({ id: 'F', targetAmount: 100000 })], fundMovements: [{ id: 'm0', updatedAt: T0, fundId: 'F', amount: 1000, date: '2026-09-01' }] }, 100, 'SAR');
+    const funded = allocate({ ...base(), funds: [fund({ id: 'F', targetAmount: 100000 })], fundMovements: [{ id: 'm0', rateSnapshotId: S125.id, updatedAt: T0, fundId: 'F', amount: 1000, date: '2026-09-01' }] }, 100, 'SAR');
     approx(fundAllocated(funded, 'F'), 2300);
     const small = apply(funded, ops.editFund(funded, 'F', { name: 'F', targetAmount: 100000, cashAllocation: 1500 }, makeCtx()));
     assert.deepEqual(sel.fundCashByCurrency(small, 'F'), { EGP: 200, SAR: 100, USD: 0 });
@@ -3892,7 +3901,6 @@ describe('native amounts never drift with the rates', () => {
 
 describe('analytics', () => {
   const OCT_26 = new Date(2026, 9, 26, 12);
-  const SNAP = { SAR_EGP: 12.5, USD_EGP: 50 };
   const tx = (
     id: string,
     type: 'income' | 'expense',
@@ -3909,14 +3917,13 @@ describe('analytics', () => {
       accountId: 'egp',
       categoryId,
       date,
-      rateToEGP: 1,
-      ratesSnapshot: SNAP,
+      rateSnapshotId: S125.id,
       createdAt: `${date}T10:00:00.000Z`,
       updatedAt: T0,
       ...extra,
     }) as Transaction;
   const sarTx = (id: string, type: 'income' | 'expense', categoryId: string, amount: number, date: string): Transaction =>
-    tx(id, type, categoryId, amount, date, { currency: 'SAR', accountId: 'sar', rateToEGP: 12.5 });
+    tx(id, type, categoryId, amount, date, { currency: 'SAR', accountId: 'sar' });
   const gold = (id: string, amount: number, date: string): Transaction =>
     ({
       id,
@@ -3926,8 +3933,7 @@ describe('analytics', () => {
       accountId: 'egp',
       holdingId: 'g1',
       date,
-      rateToEGP: 1,
-      ratesSnapshot: SNAP,
+      rateSnapshotId: S125.id,
       createdAt: `${date}T10:00:00.000Z`,
       updatedAt: T0,
     }) as Transaction;
@@ -3940,8 +3946,7 @@ describe('analytics', () => {
       fromAccountId: 'egp',
       toAccountId: 'sar',
       date,
-      rateToEGP: 1,
-      ratesSnapshot: SNAP,
+      rateSnapshotId: S125.id,
       createdAt: `${date}T10:00:00.000Z`,
       updatedAt: T0,
     }) as Transaction;
@@ -3950,14 +3955,11 @@ describe('analytics', () => {
     fundId,
     amount,
     date,
-    ratesSnapshot: SNAP,
+    rateSnapshotId: S125.id,
     updatedAt: T0,
     ...extra,
   });
-  const at = (s: FinanceState, SAR_EGP: number): FinanceState => ({
-    ...s,
-    settings: { ...s.settings, exchangeRates: { ...s.settings.exchangeRates, SAR_EGP } },
-  });
+  const at = (s: FinanceState, SAR_EGP: number): FinanceState => withSar(s, SAR_EGP);
   const withTx = (s: FinanceState, ...more: Transaction[]): FinanceState => ({ ...s, transactions: [...s.transactions, ...more] });
 
   // Tracking starts 1 Aug. Aug: salary 10,000 · rent 3,000 · groceries 1,000 · dining 500.
@@ -4119,12 +4121,14 @@ describe('analytics', () => {
       assert.equal(analytics.periodTotals(at(s, 20), query(at(s, 20), 'month')).byCategory.get('cat-lifestyle-dining')!.amount, 300 + 1250);
     });
 
-    it('a transaction without a snapshot converts its other leg at today’s rate (documented approximation)', () => {
-      const old = tx('o1', 'expense', 'cat-lifestyle-dining', 1250, '2026-10-02', { ratesSnapshot: undefined });
-      const s = withTx({ ...emptyState(), settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' } }, old);
+    it('a migrated record without rates of its own is frozen at the migration’s rates and no longer drifts', () => {
+      // v7 converted such a transaction's other leg at TODAY's rate (100 SAR became 50 SAR when SAR rose to 25).
+      const frozen = makeSnapshot(rateTable(12.5), { takenAt: T0, source: 'migrated', quality: 'estimated' });
+      const old = tx('o1', 'expense', 'cat-lifestyle-dining', 1250, '2026-10-02', { rateSnapshotId: frozen.id });
+      const s = withTx({ ...emptyState(), rateSnapshots: [S125, frozen], settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' } }, old);
       const q = query(s, 'month', { currency: 'SAR' });
       approx(analytics.periodTotals(s, q).expense, 100);
-      approx(analytics.periodTotals(at(s, 25), q).expense, 50);
+      approx(analytics.periodTotals(at(s, 25), q).expense, 100);
       assert.equal(analytics.periodTotals(at(s, 25), query(s, 'month')).expense, 1250);
     });
 
@@ -4344,6 +4348,7 @@ describe('analytics', () => {
       netWorthEGP: 0,
       liquidEGP: 0,
       holdingsEGP: 0,
+      rateSnapshotId: S125.id,
       takenAt: T0,
       updatedAt: T0,
       ...extra,
@@ -4351,17 +4356,18 @@ describe('analytics', () => {
     const state = (): FinanceState => ({
       ...emptyState(),
       accounts: [account('egp', 'EGP', 50000)],
+      rateSnapshots: [S125, snapshotOf(13)],
       netWorthSnapshots: [
         snap('2026-07', { netWorthEGP: 120000 }), // recorded before breakdowns existed
         snap('2026-08', {
           estimated: true,
           netWorthEGP: 125000,
-          ratesSnapshot: { SAR_EGP: 12.5, USD_EGP: 50 },
+          rateSnapshotId: S125.id,
           breakdown: { EG: { ...zero, cashEGP: 100000 }, SA: { ...zero, cashEGP: 25000 } },
         }),
         snap('2026-09', {
           netWorthEGP: 131000,
-          ratesSnapshot: { SAR_EGP: 13, USD_EGP: 50 },
+          rateSnapshotId: snapshotOf(13).id,
           breakdown: { EG: { cashEGP: 110000, goldEGP: 5000, currenciesEGP: 0, liabilitiesEGP: 10000 }, SA: { ...zero, cashEGP: 26000 } },
         }),
       ],
@@ -4699,13 +4705,15 @@ describe('analytics', () => {
         EG: { cashEGP: 1000, goldEGP: 6000, currenciesEGP: 0, liabilitiesEGP: 0 },
         SA: { cashEGP: 1250, goldEGP: 0, currenciesEGP: 0, liabilitiesEGP: 0 },
       });
-      assert.deepEqual(oct.ratesSnapshot, { SAR_EGP: 12.5, USD_EGP: 50 });
-      assert.ok(list.every((p) => p.breakdown && p.ratesSnapshot));
+      assert.equal(oct.rateSnapshotId, S125.id);
+      assert.ok(list.every((p) => p.breakdown && p.rateSnapshotId));
       assert.equal(snapshots.syncedSnapshots({ ...s, netWorthSnapshots: list }, NOW), null);
 
       // Snapshots from before: an estimate is worked out again, a recorded one is left alone.
-      const old = list.map(({ breakdown: _b, ratesSnapshot: _r, ...rest }) => rest);
-      const upgraded = snapshots.syncedSnapshots({ ...s, netWorthSnapshots: old.map((p) => (p.month === '2026-09' ? { ...p, estimated: undefined, netWorthEGP: 42 } : p)) }, NOW)!;
+      // (a snapshot with no rates of its own points at an 'estimated' rate snapshot after the migration)
+      const noRates = makeSnapshot(RATES, { takenAt: T0, source: 'migrated', quality: 'estimated' });
+      const old = list.map(({ breakdown: _b, ...rest }) => ({ ...rest, rateSnapshotId: noRates.id }));
+      const upgraded = snapshots.syncedSnapshots({ ...s, rateSnapshots: [S125, noRates], netWorthSnapshots: old.map((p) => (p.month === '2026-09' ? { ...p, estimated: undefined, netWorthEGP: 42 } : p)) }, NOW)!;
       assert.equal(upgraded.find((p) => p.month === '2026-08')!.breakdown!.SA.cashEGP, 1250);
       const kept = upgraded.find((p) => p.month === '2026-09')!;
       assert.equal(kept.netWorthEGP, 42);
@@ -4789,9 +4797,9 @@ describe('analytics UI helpers', () => {
       ...emptyState(),
       settings: { ...emptyState().settings, trackingStartDate: '2026-08-01' },
       transactions: [
-        { id: 'i', type: 'income', amount: 10000, currency: 'EGP', accountId: 'a', categoryId: 'cat-income-salary', date: '2026-10-02', rateToEGP: 1, createdAt: T0, updatedAt: T0 },
-        { id: 'e1', type: 'expense', amount: 3000, currency: 'EGP', accountId: 'a', categoryId: 'cat-essentials-rent', date: '2026-10-03', rateToEGP: 1, createdAt: T0, updatedAt: T0 },
-        { id: 'e2', type: 'expense', amount: 1000, currency: 'EGP', accountId: 'a', categoryId: 'cat-lifestyle-dining', date: '2026-10-04', rateToEGP: 1, createdAt: T0, updatedAt: T0 },
+        { id: 'i', type: 'income', amount: 10000, currency: 'EGP', accountId: 'a', categoryId: 'cat-income-salary', date: '2026-10-02', rateSnapshotId: S125.id, createdAt: T0, updatedAt: T0 },
+        { id: 'e1', type: 'expense', amount: 3000, currency: 'EGP', accountId: 'a', categoryId: 'cat-essentials-rent', date: '2026-10-03', rateSnapshotId: S125.id, createdAt: T0, updatedAt: T0 },
+        { id: 'e2', type: 'expense', amount: 1000, currency: 'EGP', accountId: 'a', categoryId: 'cat-lifestyle-dining', date: '2026-10-04', rateSnapshotId: S125.id, createdAt: T0, updatedAt: T0 },
       ] as Transaction[],
     };
     const flow = analytics.spendingFlow(state, { period: analytics.resolvePeriod(state, 'month', NOW), currency: 'EGP', includeOneTime: true });
@@ -5354,7 +5362,8 @@ describe('v7 → v8: countries, and every v7 number is unchanged', () => {
 
   for (const [name, v7] of fixtures) {
     it(`the ${name} fixture reports exactly the numbers the v7 oracle does`, () => {
-      assert.deepEqual(diffReports(oracleReport(v7, ORACLE_NOW), reportV8(migrate(v7), ORACLE_NOW)), []);
+      // The only difference is float noise from converting through USD (never above 1e-9 here).
+      assert.deepEqual(diffReports(oracleReport(v7, ORACLE_NOW), reportV8(migrate(v7), ORACLE_NOW), 1e-6), []);
     });
   }
 
@@ -5398,5 +5407,136 @@ describe('v7 → v8: countries, and every v7 number is unchanged', () => {
     // Data using a country the registry doesn't know yet still shows (as its code) instead of crashing.
     assert.deepEqual(sel.countriesInUse(s), ['EG', 'SA', 'KW']);
     assert.deepEqual(Object.keys(sel.netWorthBreakdown(s)), ['EG', 'SA', 'KW']);
+  });
+});
+
+// --- v7 → v8, step 2: rates and rate snapshots ----------------------------------------
+
+describe('v7 → v8: rates become a USD table, records point at immutable snapshots', () => {
+  const migrate = (v7: ReturnType<typeof richV7>) => migratePersistedState(v7, 7, MIGRATION_CTX).state;
+  const rich = () => migrate(richV7());
+  const txOf = (s: FinanceState, id: string) => s.transactions.find((t) => t.id === id)!;
+  const snapOfRecord = (s: FinanceState, record: { rateSnapshotId: string }) => snapshotById(s.rateSnapshots, record.rateSnapshotId)!;
+
+  it('the current rates are the v7 pair re-based on USD, with their date and source', () => {
+    const v8 = rich();
+    assert.deepEqual(Object.keys(v8.settings.rates.perUsd).sort(), ['EGP', 'SAR', 'USD']);
+    assert.equal(v8.settings.rates.perUsd.USD, 1);
+    assert.equal(v8.settings.rates.perUsd.EGP, 50);
+    assert.equal(v8.settings.rates.perUsd.SAR, 4);
+    assert.equal(v8.settings.rates.updatedAt, RATES_V7.lastUpdated);
+    assert.equal(v8.settings.rates.source, 'manual');
+    assert.ok(!('exchangeRates' in v8.settings));
+    // An auto-mode install keeps where its rates came from.
+    const auto = migrate({ ...richV7(), settings: { ...richV7().settings, priceSource: 'auto', fxSource: 'exchangerate.fun' } });
+    assert.equal(auto.settings.rates.source, 'exchangerate.fun');
+  });
+
+  it('every record points at a stored snapshot; the old fields are gone', () => {
+    const v8 = rich();
+    for (const r of [...v8.transactions, ...v8.fundMovements, ...v8.netWorthSnapshots]) {
+      assert.ok(snapshotById(v8.rateSnapshots, r.rateSnapshotId), r.id);
+      assert.ok(!('rateToEGP' in r) && !('ratesSnapshot' in r), r.id);
+    }
+  });
+
+  it('snapshots are deduplicated by content and sorted; the same table has the same id', () => {
+    const v8 = rich();
+    assert.equal(new Set(v8.rateSnapshots.map((s) => s.id)).size, v8.rateSnapshots.length);
+    // The 12.5 / 50 snapshot is shared by every record recorded at it.
+    const shared = v8.transactions.filter((t) => t.rateSnapshotId === txOf(v8, 't-groc-oct').rateSnapshotId);
+    assert.ok(shared.length >= 5, `shared by ${shared.length}`);
+    for (const s of v8.rateSnapshots) assert.equal(s.id, snapshotId(s, s.quality));
+    assert.deepEqual(v8.rateSnapshots.map((s) => s.takenAt), [...v8.rateSnapshots.map((s) => s.takenAt)].sort());
+  });
+
+  it('is deterministic: migrating the same data twice gives the same snapshots, ids included', () => {
+    assert.deepEqual(migrate(richV7()).rateSnapshots, migrate(richV7()).rateSnapshots);
+  });
+
+  it('a record\'s own typed rate is kept (the custom 12.2 is not the snapshot\'s 12.5)', () => {
+    const v8 = rich();
+    approx(snapRate(v8, txOf(v8, 't-custom'), 'SAR'), 12.2);
+    approx(snapRate(v8, txOf(v8, 't-groc-oct'), 'SAR'), 12.5);
+    approx(snapRate(v8, txOf(v8, 't-rent-sep'), 'SAR'), 12);
+    // …and its other currencies still come from its snapshot (USD 50).
+    approx(convert(1, 'USD', 'EGP', snapOfRecord(v8, txOf(v8, 't-custom'))), 50);
+  });
+
+  it('records that had no snapshot get an ESTIMATED one, frozen at the migration\'s rates; the others are recorded', () => {
+    const v8 = rich();
+    const quality = (id: string) => snapOfRecord(v8, txOf(v8, id)).quality;
+    assert.equal(quality('t-old-sar'), 'estimated');
+    assert.equal(quality('t-inc-egp'), 'estimated');
+    assert.equal(quality('t-rent-sep'), 'recorded');
+    assert.equal(quality('t-custom'), 'recorded');
+    // Fund movements and net-worth snapshots follow the same rule.
+    assert.equal(snapOfRecord(v8, v8.fundMovements.find((m) => m.id === 'm2')!).quality, 'estimated');
+    assert.equal(snapOfRecord(v8, v8.fundMovements.find((m) => m.id === 'm1')!).quality, 'recorded');
+    assert.equal(snapOfRecord(v8, v8.netWorthSnapshots.find((s) => s.month === '2026-08')!).quality, 'estimated');
+    assert.equal(snapOfRecord(v8, v8.netWorthSnapshots.find((s) => s.month === '2026-09')!).quality, 'recorded');
+    // The estimated table is the migration's current table (no drift from now on).
+    approx(convert(1, 'SAR', 'EGP', snapOfRecord(v8, txOf(v8, 't-old-sar'))), 12.57);
+    approx(convert(1, 'USD', 'EGP', snapOfRecord(v8, txOf(v8, 't-old-sar'))), 50);
+  });
+
+  it('a rate change never changes native or historical amounts; only current valuations move', () => {
+    const before = rich();
+    const after = apply(before, ops.updateRates(before, { SAR_EGP: 25, USD_EGP: 80, lastUpdated: '2026-10-20T00:00:00.000Z' }));
+    const a = reportV8(before, ORACLE_NOW);
+    const b = reportV8(after, ORACLE_NOW);
+    // Native balances and every recorded amount: identical.
+    for (const part of ['accounts', 'liquidByCurrency', 'transactions', 'months', 'plans', 'movements', 'snapshots'] as const) {
+      assert.deepEqual(diffReports(a[part], b[part], 0), [], part);
+    }
+    assert.deepEqual(diffReports(a.analytics.sinceStart, b.analytics.sinceStart, 0), [], 'historical analytics');
+    // What is valued today does move.
+    assert.ok(b.totals.liquidEGP > a.totals.liquidEGP);
+    assert.ok(b.totals.netWorthEGP !== a.totals.netWorthEGP);
+    // The old snapshots are untouched and a new rates snapshot is not added until something is recorded.
+    assert.deepEqual(after.rateSnapshots, before.rateSnapshots);
+  });
+
+  it('records written later get the current rates\' snapshot; unchanged rates reuse it; old ones stay', () => {
+    let s = rich();
+    const ctx = makeCtx();
+    const input = (note: string): ops.NewIncomeExpense => ({ type: 'expense', amount: 10, currency: 'SAR', accountId: 'a-sar-eg', categoryId: 'cat-lifestyle-dining', date: '2026-10-14', note });
+    const count0 = s.rateSnapshots.length;
+    s = apply(s, ops.addTransaction(s, input('one'), ctx));
+    // 12.5 / 50 is already stored (recorded by the fixture's own transactions): nothing new.
+    assert.equal(s.rateSnapshots.length, count0);
+    s = apply(s, ops.updateRates(s, { SAR_EGP: 13, USD_EGP: 50, lastUpdated: '2026-10-20T00:00:00.000Z' }));
+    s = apply(s, ops.addTransaction(s, input('two'), ctx));
+    s = apply(s, ops.addTransaction(s, input('three'), ctx));
+    assert.equal(s.rateSnapshots.length, count0 + 1, 'one new snapshot for both records at the new rates');
+    const [three, two, one] = s.transactions;
+    assert.equal(three.rateSnapshotId, two.rateSnapshotId);
+    assert.notEqual(one.rateSnapshotId, two.rateSnapshotId);
+    assert.equal(two.rateSnapshotId, snapshotId(rateTable(13)));
+    approx(snapRate(s, one, 'SAR'), 12.5);
+  });
+
+  it('a gold purchase records its snapshot and an exchange-free cost; a fund movement and a recurring occurrence do too', () => {
+    const ctx = makeCtx();
+    const s0 = withSar({ ...emptyState(), accounts: [account('sar', 'SAR', 10000), account('egp', 'EGP', 1000)], funds: [fund({ id: 'F' })] }, 13);
+    const bought = apply(s0, ops.buyGold(s0, { accountId: 'sar', amount: 1000, date: '2026-10-10', holding: { name: 'g', weightGrams: 1, karat: 24 } }, ctx));
+    assert.equal(bought.transactions[0].rateSnapshotId, snapshotId(rateTable(13)));
+    approx(bought.holdings[0].purchaseCostEGP, 13000);
+    const moved = apply(s0, ops.allocateToFund(s0, 'F', 100, undefined, ctx));
+    assert.equal(moved.fundMovements[0].rateSnapshotId, snapshotId(rateTable(13)));
+    assert.ok(moved.rateSnapshots.some((x) => x.id === snapshotId(rateTable(13))));
+  });
+
+  it('restoring a backup or importing the seed brings the snapshots its records point at', () => {
+    const restored = apply(emptyState(), ops.restoreFromBackup(emptyState(), rich(), makeCtx()));
+    assert.deepEqual(restored.rateSnapshots, rich().rateSnapshots);
+    for (const r of restored.transactions) assert.ok(snapshotById(restored.rateSnapshots, r.rateSnapshotId));
+  });
+
+  it('a dangling snapshot id is an error, never silently today\'s rates', () => {
+    const s = { ...emptyState(), transactions: [{ ...txOf(rich(), 't-groc-oct'), rateSnapshotId: 'rs-missing' } as Transaction] };
+    assert.throws(() => sel.transactionAmountIn(s, s.transactions[0] as never, 'EGP'), RateMissingError);
+    // Same currency needs no rate at all.
+    assert.equal(sel.transactionAmountIn(s, s.transactions[0] as never, 'SAR'), 200);
   });
 });

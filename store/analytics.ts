@@ -1,5 +1,6 @@
 import { formatMoney } from '@/components/ui/formatMoney';
-import { convertCurrency, fromEGP, toEGP } from '@/utils/currency';
+import { convertCurrency, fromEGP, requireSnapshot, toEGP } from '@/utils/currency';
+import type { RateTable } from '@/utils/rates';
 import { addMonthsToDate, daysBetween, isDateKey, monthOf, shiftDate, shiftMonth, toDateKey, toMonthKey } from '@/utils/dates';
 import { formatMonthLabel, formatPercent } from '@/utils/formatters';
 import { CATEGORY_IDS } from './defaultCategories';
@@ -30,7 +31,6 @@ import type {
   CountryCode,
   GoldKarat,
   NetWorthBreakdown,
-  RatesSnapshot,
   Transaction,
 } from './types';
 
@@ -632,7 +632,7 @@ export function netWorthSeries(
 ): NetWorthSeries {
   const { location, currency, includeEstimated, now } = options;
   const current = toMonthKey(now);
-  const liveRates = state.settings.exchangeRates;
+  const liveRates = state.settings.rates;
   const points: NetWorthPoint[] = [];
   let skipped = 0;
   const stored = state.netWorthSnapshots.filter((s) => s.month !== current);
@@ -644,11 +644,11 @@ export function netWorthSeries(
       live: false,
       breakdown: s.breakdown,
       totalEGP: s.netWorthEGP,
-      rates: s.ratesSnapshot ?? liveRates,
+      rates: requireSnapshot(state.rateSnapshots, s.rateSnapshotId),
     })),
     { month: current, estimated: false, live: true, breakdown: live.breakdown, totalEGP: live.netWorthEGP, rates: liveRates },
   ].sort((a, b) => (a.month < b.month ? -1 : 1));
-  const show = (egp: number, rates: RatesSnapshot) => (currency === 'EGP' ? egp : fromEGP(egp, currency, rates));
+  const show = (egp: number, rates: RateTable) => (currency === 'EGP' ? egp : fromEGP(egp, currency, rates));
   for (const e of entries) {
     if (e.estimated && !includeEstimated) continue;
     if (!e.breakdown) {
@@ -704,7 +704,7 @@ export interface MoneyMap {
 }
 
 export function moneyMap(state: State, currency: DisplayCurrency): MoneyMap {
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const show = (egp: number) => (currency === 'EGP' ? egp : fromEGP(egp, currency, rates));
   const native = liquidByCurrency(state);
   const liquid: LiquidRow[] = (['EGP', 'SAR', 'USD'] as CurrencyCode[])
@@ -810,7 +810,7 @@ export function runway(state: State, currency: DisplayCurrency, now: Date): Runw
   const avg = monthsObserved > 0 ? sum([...perMonth.values()]) / monthsObserved : 0;
   const months = (amount: number, per: number) => (per > EPSILON ? Math.max(0, amount) / per : null);
 
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const unassigned = unassignedSummary(state);
   const liquidNative = liquidByCurrency(state);
   const liquidAmount = sum((['EGP', 'SAR', 'USD'] as CurrencyCode[]).map((c) => convertCurrency(liquidNative[c], c, currency, rates)));

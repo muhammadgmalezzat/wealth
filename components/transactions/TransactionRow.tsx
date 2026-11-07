@@ -9,6 +9,7 @@ import { formatDateAr } from '@/components/ui/formatDateAr';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { space } from '@/constants/theme';
 import type { CurrencyCode, FinanceState, Transaction } from '@/store/types';
+import { projectAmount } from '@/utils/currency';
 
 import { transferTitle } from './transactionUi';
 
@@ -16,7 +17,7 @@ type IconName = ComponentProps<typeof MaterialIcons>['name'];
 
 interface TransactionRowProps {
   tx: Transaction;
-  state: Pick<FinanceState, 'accounts' | 'categories' | 'holdings'>;
+  state: Pick<FinanceState, 'accounts' | 'categories' | 'holdings' | 'rateSnapshots'>;
   onPress: () => void;
   showDate?: boolean;
   /** @deprecated separators come from ListGroup; still accepted. */
@@ -108,7 +109,7 @@ export function TransactionRow({ tx, state, onPress, showDate = false }: Transac
           align="left"
           tone={income ? 'positive' : 'default'}
           showSign={income}
-          converted={d.currency !== 'EGP' ? { amount: tx.amount * tx.rateToEGP, currency: 'EGP' } : undefined}
+          converted={d.currency !== 'EGP' ? { amount: projectAmount(state.rateSnapshots, tx.rateSnapshotId, tx.amount, d.currency, 'EGP'), currency: 'EGP' } : undefined}
         />
       }
       onPress={onPress}

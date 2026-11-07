@@ -1,4 +1,5 @@
-import type { FxSource, PriceFetchError, RatesSnapshot, Settings } from '@/store/types';
+import type { FxSource, PriceFetchError, Settings } from '@/store/types';
+import type { RateTable } from '@/utils/rates';
 
 import { parseExchangerateFun, parseGoldApi, parseOpenErApi } from './calc';
 
@@ -24,7 +25,7 @@ type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok:
 
 export interface PriceFetchResult {
   // null when neither FX source gave usable rates.
-  fx: RatesSnapshot | null;
+  fx: RateTable | null;
   fxSource?: FxSource;
   // USD per troy ounce; null when the gold source failed.
   xauUsd: number | null;
@@ -63,7 +64,7 @@ export interface FetchOptions {
 
 // FX from the primary source, the fallback only when that fails or is invalid; gold in parallel.
 export async function fetchLivePrices({ fetchImpl = fetch as FetchLike, timeoutMs = FETCH_TIMEOUT_MS }: FetchOptions = {}): Promise<PriceFetchResult> {
-  const fxAttempt = async (): Promise<Attempt<RatesSnapshot> & { source?: FxSource }> => {
+  const fxAttempt = async (): Promise<Attempt<RateTable> & { source?: FxSource }> => {
     const primary = await getValid(FX_PRIMARY_URL, parseOpenErApi, fetchImpl, timeoutMs);
     if (primary.value) return { ...primary, source: 'open.er-api' };
     const fallback = await getValid(FX_FALLBACK_URL, parseExchangerateFun, fetchImpl, timeoutMs);

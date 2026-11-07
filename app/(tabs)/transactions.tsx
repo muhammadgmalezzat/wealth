@@ -34,7 +34,7 @@ export default function TransactionsScreen() {
   if (!state.hasHydrated) return <LoadingView />;
 
   const monthTransactions = transactionsForMonth(state, month);
-  const days = groupTransactionsByDay(filterTransactions(monthTransactions, filter));
+  const days = groupTransactionsByDay(state, filterTransactions(monthTransactions, filter));
   const editing = sheet && sheet !== 'add' ? state.transactions.find((t) => t.id === sheet.id) : undefined;
 
   const header = (

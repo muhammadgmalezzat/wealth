@@ -1,8 +1,9 @@
-import { snapshotRates } from '@/utils/currency';
 import { monthOf, shiftMonth, toMonthKey } from '@/utils/dates';
+import { snapshotById } from '@/utils/rates';
+import { snapshotForNow } from './rateSnapshots';
 import { netWorthAsOf, netWorthEGP, netWorthFigures, type NetWorthFigures } from './selectors';
 import { daysInMonth } from './shared';
-import type { FinanceState, NetWorthBreakdown, NetWorthSnapshot, RatesSnapshot } from './types';
+import type { FinanceState, NetWorthBreakdown, NetWorthSnapshot, RateSnapshot } from './types';
 
 // Monthly net worth snapshots. Pure functions only.
 //
@@ -30,13 +31,13 @@ function snapshot(
   figures: NetWorthFigures,
   at: string,
   estimated: boolean,
-  rates: RatesSnapshot
+  rateSnapshotId: string
 ): NetWorthSnapshot {
   return {
     id: snapshotIdFor(month),
     month,
     ...figures,
-    ratesSnapshot: snapshotRates(rates),
+    rateSnapshotId,
     takenAt: at,
     updatedAt: at,
     ...(estimated ? { estimated: true } : {}),
@@ -45,7 +46,11 @@ function snapshot(
 
 // Estimated snapshots for months from trackingStartDate's up to (not including) `now`'s month
 // that have none yet. Existing snapshots are never touched.
-export function missingPastSnapshots(state: State, now: Date): NetWorthSnapshot[] {
+export function missingPastSnapshots(
+  state: State,
+  now: Date,
+  rateSnapshotId: string = snapshotForNow(state, now).id
+): NetWorthSnapshot[] {
   const current = toMonthKey(now);
   const startMonth = monthOf(state.settings.trackingStartDate);
   const at = now.toISOString();
@@ -53,7 +58,7 @@ export function missingPastSnapshots(state: State, now: Date): NetWorthSnapshot[
   for (let n = MAX_BACKFILL_MONTHS; n >= 1; n--) {
     const month = shiftMonth(current, -n);
     if (month < startMonth || snapshotFor(state, month)) continue;
-    result.push(snapshot(month, netWorthAsOf(state, monthEnd(month)), at, true, state.settings.exchangeRates));
+    result.push(snapshot(month, netWorthAsOf(state, monthEnd(month)), at, true, rateSnapshotId));
   }
   return result;
 }
@@ -65,38 +70,57 @@ const sameBreakdown = (a: NetWorthBreakdown, b: NetWorthBreakdown) =>
     PARTS.every((part) => Math.abs((a[country]?.[part] ?? 0) - (b[country]?.[part] ?? 0)) < EPSILON)
   );
 
+// Whether the month has rates of its own. The migration gives a snapshot that had none a rate snapshot
+// of quality 'estimated' (frozen at the rates of the migration), which counts as "none".
+const hasOwnRates = (state: Pick<State, 'rateSnapshots'>, s: NetWorthSnapshot) =>
+  snapshotById(state.rateSnapshots, s.rateSnapshotId)?.quality === 'recorded';
+
 // Whether a stored snapshot already says what the live figures say (and carries the breakdown
 // and rates analytics needs, which older snapshots lack).
-const same = (a: NetWorthSnapshot, b: NetWorthFigures) =>
+const same = (state: Pick<State, 'rateSnapshots'>, a: NetWorthSnapshot, b: NetWorthFigures) =>
   Math.abs(a.netWorthEGP - b.netWorthEGP) < EPSILON &&
   Math.abs(a.liquidEGP - b.liquidEGP) < EPSILON &&
   Math.abs(a.holdingsEGP - b.holdingsEGP) < EPSILON &&
-  !!a.ratesSnapshot &&
+  hasOwnRates(state, a) &&
   !!a.breakdown &&
   sameBreakdown(a.breakdown, b.breakdown);
 
 // Estimated snapshots from before the breakdown existed are estimates anyway: work them out
 // again, now with the breakdown and the rates they are valued at.
-function upgradedEstimates(state: State, now: Date): NetWorthSnapshot[] {
+function upgradedEstimates(state: State, now: Date, rateSnapshotId: string): NetWorthSnapshot[] {
   const at = now.toISOString();
   return state.netWorthSnapshots
-    .filter((s) => s.estimated && (!s.breakdown || !s.ratesSnapshot) && s.month < toMonthKey(now))
-    .map((s) => snapshot(s.month, netWorthAsOf(state, monthEnd(s.month)), at, true, state.settings.exchangeRates));
+    .filter((s) => s.estimated && (!s.breakdown || !hasOwnRates(state, s)) && s.month < toMonthKey(now))
+    .map((s) => snapshot(s.month, netWorthAsOf(state, monthEnd(s.month)), at, true, rateSnapshotId));
+}
+
+export interface SnapshotSync {
+  netWorthSnapshots: NetWorthSnapshot[];
+  // Set when the sync needed a rate snapshot that did not exist yet: the full list, to be saved too.
+  rateSnapshots?: RateSnapshot[];
 }
 
 // The snapshot list with missing past months filled in and the current month's snapshot set to
-// the live figures, oldest first; null when nothing would change (so callers skip the write).
-export function syncedSnapshots(state: State, now: Date): NetWorthSnapshot[] | null {
+// the live figures, oldest first (plus the rate snapshot they point at, when it is new); null when
+// nothing would change (so callers skip the write).
+export function syncSnapshots(state: State, now: Date): SnapshotSync | null {
   const current = toMonthKey(now);
-  const missing = [...missingPastSnapshots(state, now), ...upgradedEstimates(state, now)];
+  const rates = snapshotForNow(state, now);
+  const missing = [...missingPastSnapshots(state, now, rates.id), ...upgradedEstimates(state, now, rates.id)];
   const live = netWorthFigures(state);
   const existing = snapshotFor(state, current);
-  const currentChanged = !existing || existing.estimated || !same(existing, live);
+  const currentChanged = !existing || existing.estimated || !same(state, existing, live);
   if (missing.length === 0 && !currentChanged) return null;
   const replaced = new Set(missing.map((s) => s.month));
   const kept = state.netWorthSnapshots.filter((s) => !replaced.has(s.month) && !(currentChanged && s.month === current));
-  const added = currentChanged ? [snapshot(current, live, now.toISOString(), false, state.settings.exchangeRates)] : [];
-  return [...kept, ...missing, ...added].sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
+  const added = currentChanged ? [snapshot(current, live, now.toISOString(), false, rates.id)] : [];
+  const netWorthSnapshots = [...kept, ...missing, ...added].sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
+  return { netWorthSnapshots, ...(rates.rateSnapshots ? { rateSnapshots: rates.rateSnapshots } : {}) };
+}
+
+// Just the net-worth list of syncSnapshots.
+export function syncedSnapshots(state: State, now: Date): NetWorthSnapshot[] | null {
+  return syncSnapshots(state, now)?.netWorthSnapshots ?? null;
 }
 
 export interface NetWorthChange {

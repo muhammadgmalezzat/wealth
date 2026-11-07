@@ -128,7 +128,7 @@ export default function AssetsScreen() {
               purchaseCostEGP: toEGP(
                 num(form.purchasePrice) ?? 0,
                 form.currency,
-                state.settings.exchangeRates
+                state.settings.rates
               ),
             })
           )

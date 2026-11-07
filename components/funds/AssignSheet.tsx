@@ -31,7 +31,7 @@ interface AssignSheetProps {
 // currency at a time (the ones that have some left); each fund counts it at today's rate.
 export function AssignSheet({ onClose }: AssignSheetProps) {
   const state = useFinanceStore();
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const funds = fundsByPriority(state);
   const unassigned = unassignedSummary(state);
   // Currencies with money left, the biggest first; EGP when there is none (nothing to split).

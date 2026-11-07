@@ -30,7 +30,7 @@ interface PaySinkingSheetProps {
 // date to the next cycle — all in one atomic store action.
 export function PaySinkingSheet({ fund, onClose }: PaySinkingSheetProps) {
   const state = useFinanceStore();
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const accounts = state.accounts.filter((a) => !a.archived);
   const expenseCategories = pickerCategories(state.categories, 'expense');
   const lastUsed = state.settings.lastUsed?.expense;

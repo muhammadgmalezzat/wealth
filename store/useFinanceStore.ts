@@ -13,7 +13,6 @@ import type {
   Account,
   Category,
   CurrencyCode,
-  ExchangeRates,
   FinanceState,
   Fund,
   FundMovement,
@@ -53,6 +52,7 @@ let storageWasEmpty = false;
 // backup contains.
 export function dataOf(s: FinanceState): FinanceState {
   return {
+    rateSnapshots: s.rateSnapshots,
     accounts: s.accounts,
     categories: s.categories,
     transactions: s.transactions,
@@ -137,7 +137,7 @@ interface FinanceActions {
   dismissAction: (actionId: string) => void;
   completeMonthlyReview: (month: string) => void;
 
-  updateRates: (rates: ExchangeRates) => void;
+  updateRates: (rates: ops.EgpRatesInput & { lastUpdated: string }) => void;
   updateSettings: (update: ops.SettingsUpdate) => void;
   setPricePreferences: (prefs: ops.PricePreferences) => void;
   // Fetches live prices and applies them (auto mode only; manual mode resolves without a

@@ -20,7 +20,7 @@ export interface FundsSummary {
 }
 
 export function fundsSummary(state: FinanceState, now: Date = new Date()): FundsSummary {
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const funds = fundsByPriority(state);
   let reservedEGP = 0;
   let requiredEGP = 0;

@@ -116,7 +116,7 @@ function amountToShow(parts: CurrencyAmount[], totalEGP: number): { amount: numb
 export function allActions(state: State, now: Date = new Date()): NextAction[] {
   const today = toDateKey(now);
   const month = toMonthKey(now);
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const unassigned = unassignedSummary(state);
   const actions: NextAction[] = [];
   const add = (priority: number, draft: Draft) =>
@@ -275,7 +275,7 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
     return days === null || days >= STALE_DAYS ? (days ?? Infinity) : null;
   };
   const goldAge = usesGold ? stale(state.settings.goldPriceUpdatedAt) : null;
-  const fxAge = usesFx ? stale(rates.lastUpdated) : null;
+  const fxAge = usesFx ? stale(rates.updatedAt) : null;
   // Auto mode that fetched everything in the last 24 hours has nothing to update.
   if ((goldAge !== null || fxAge !== null) && !pricesFetchedRecently(state.settings, now)) {
     const what = goldAge !== null && fxAge !== null ? 'أسعار الذهب والصرف' : goldAge !== null ? 'سعر الذهب' : 'أسعار الصرف';

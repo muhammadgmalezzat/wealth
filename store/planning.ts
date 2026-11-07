@@ -42,7 +42,7 @@ export const amountInCurrency = transactionAmountIn;
 
 // For amounts that haven't happened yet: today's rates (the same currency stays untouched).
 function convert(state: Pick<State, 'settings'>, amount: number, from: CurrencyCode, to: CurrencyCode): number {
-  return convertCurrency(amount, from, to, state.settings.exchangeRates);
+  return convertCurrency(amount, from, to, state.settings.rates);
 }
 
 function monthExpenses(state: State, month: string, { excludeOneTime = false } = {}): IncomeExpenseTransaction[] {

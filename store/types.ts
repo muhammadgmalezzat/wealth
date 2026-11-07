@@ -1,3 +1,7 @@
+import type { CurrentRates, RateSnapshot } from '@/utils/rates';
+
+export type { CurrentRates, RateSnapshot };
+
 // Data model V2. Monetary amounts are stored in the entity's own currency unless the
 // field name says EGP. Dates are local calendar dates ('YYYY-MM-DD'); createdAt is an ISO timestamp.
 // Deliberately no interest/APR fields anywhere.
@@ -41,24 +45,15 @@ export interface Category extends Synced {
   archived?: boolean;
 }
 
-// Exchange rates kept with a record, so its amount can later be shown in another currency as it
-// was worth then (never at whatever the rates are today).
-export interface RatesSnapshot {
-  SAR_EGP: number;
-  USD_EGP: number;
-}
-
 interface TransactionBase extends Synced {
   id: string;
   amount: number;
   date: string;
   note?: string;
-  // Exchange rate of the transaction's currency to EGP, snapshotted at creation.
-  rateToEGP: number;
-  // All rates at creation (re-taken with rateToEGP when the currency changes). Missing on
-  // transactions made before it existed: converting those into a third currency falls back to
-  // today's rates for the target leg.
-  ratesSnapshot?: RatesSnapshot;
+  // The immutable rate snapshot (state.rateSnapshots) in force when it was recorded: its amount can
+  // later be shown in another currency as it was worth then, never at whatever the rates are today.
+  // Re-taken only when the transaction's currency changes.
+  rateSnapshotId: string;
   createdAt: string;
   // Set when the transaction records an occurrence of a recurring rule: the rule and the
   // scheduled date it fulfils (the transaction's own `date` may differ).
@@ -133,9 +128,9 @@ export interface FundMovement extends Synced {
   currency?: CurrencyCode;
   date: string;
   note?: string;
-  // Rates when the movement was made; used to show it in another currency in history (plan,
-  // review, month totals). Missing on older movements, which convert at today's rates.
-  ratesSnapshot?: RatesSnapshot;
+  // The rate snapshot in force when the movement was made; used to show it in another currency in
+  // history (plan, review, month totals).
+  rateSnapshotId: string;
 }
 
 export type GoldKarat = 18 | 21 | 24;
@@ -270,8 +265,9 @@ export interface NetWorthSnapshot extends Synced {
   holdingsEGP: number;
   // Optional: snapshots taken before the analytics tab have none (see snapshotDetail).
   breakdown?: NetWorthBreakdown;
-  // The rates the EGP figures were valued at, to show them in another currency as they were.
-  ratesSnapshot?: RatesSnapshot;
+  // The rates the EGP figures were valued at, to show them in another currency as they were. A
+  // snapshot of quality 'estimated' means the month had no rates of its own (see the migration).
+  rateSnapshotId: string;
   takenAt: string;
   estimated?: boolean;
 }
@@ -291,12 +287,6 @@ export interface MonthlyReview extends Synced {
   completedAt: string;
 }
 
-export interface ExchangeRates {
-  SAR_EGP: number;
-  USD_EGP: number;
-  lastUpdated: string;
-}
-
 // Defaults for the next transaction form, remembered per type. Ids may point at entities
 // that were deleted since, so readers must check they still exist.
 export interface LastUsedSelection {
@@ -306,7 +296,8 @@ export interface LastUsedSelection {
 }
 
 export interface Settings {
-  exchangeRates: ExchangeRates;
+  // The CURRENT rate table (USD base): what current valuations use. Records keep their own snapshot.
+  rates: CurrentRates;
   goldPrice24kEGP: number;
   // Market price of 21k, stored separately (it isn't exactly 24k × 21/24). 18k derives from 24k.
   goldPrice21kEGP: number;
@@ -368,6 +359,8 @@ export interface Tombstone {
 }
 
 export interface FinanceState {
+  // Immutable, append-only, deduplicated rate tables that records point at (utils/rates.ts).
+  rateSnapshots: RateSnapshot[];
   accounts: Account[];
   categories: Category[];
   transactions: Transaction[];

@@ -1,7 +1,7 @@
 import { monthOf, shiftMonth } from '@/utils/dates';
 import { isReviewed } from './nextActions';
 import { planFor, planProgress, previousPlanMonth, type LineProgress } from './planning';
-import { fundProgress, fundsByPriority, monthSummary, movementAmountIn, unassignedSummary } from './selectors';
+import { fundProgress, fundsByPriority, monthSummary, movementAmountIn, transactionAmountIn, unassignedSummary } from './selectors';
 import { monthNetWorthChange, type NetWorthChange } from './snapshots';
 import type { CurrencyCode, ExpenseBucket, FinanceState, Fund, IncomeExpenseTransaction } from './types';
 
@@ -110,7 +110,7 @@ export function monthReview(state: State, month: string, now: Date = new Date())
   const regular = new Map<string, number>();
   const oneTime: ReviewOneTime[] = [];
   for (const tx of monthExpenses(state, month)) {
-    const amountEGP = tx.amount * tx.rateToEGP;
+    const amountEGP = transactionAmountIn(state, tx, 'EGP');
     if (tx.oneTime) {
       oneTime.push({ id: tx.id, categoryId: tx.categoryId, amountEGP, date: tx.date, ...(tx.note ? { note: tx.note } : {}) });
     } else {

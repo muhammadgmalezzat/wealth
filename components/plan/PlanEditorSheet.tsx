@@ -81,7 +81,7 @@ export function PlanEditorSheet({ plan, onClose }: PlanEditorSheetProps) {
 
   const changeCurrency = (next: CurrencyCode) => {
     if (next === currency) return;
-    const rates = state.settings.exchangeRates;
+    const rates = state.settings.rates;
     const convert = (text: string) => {
       const value = amountOf(text);
       return value === null ? text : String(Math.round(convertCurrency(value, currency, next, rates)));

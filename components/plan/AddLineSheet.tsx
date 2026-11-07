@@ -86,7 +86,7 @@ export function AddLineSheet({ month, currency, usedIds, onAdd, onManage, onClos
     }
     // The saved plan may still be in another currency than the draft.
     const planCurrency = state.monthlyPlans.find((p) => p.month === month)?.currency ?? currency;
-    const rates = state.settings.exchangeRates;
+    const rates = state.settings.rates;
     const savedLimit = convertCurrency(limit, currency, planCurrency, rates);
     let categoryId = '';
     const ok = runAction('تعذّر إضافة البند', () => {

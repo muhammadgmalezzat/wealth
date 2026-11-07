@@ -1,12 +1,14 @@
 import { isKnownCountry } from '@/constants/countries';
-import { convertCurrency, rateToEGP, snapshotRates } from '@/utils/currency';
+import { convertCurrency, projectAmount, rateToEGP } from '@/utils/currency';
+import { withEgpRates } from '@/utils/rates';
 import { addMonthsToDate, isDateKey, isMonthKey, shiftDate, toDateKey } from '@/utils/dates';
 import { goldPricesEGP, isValidPremiumPct } from '@/utils/prices/calc';
 import { priceSourceOf, type PriceFetchResult } from '@/utils/prices/fetchPrices';
 import { planIdFor } from './migrations';
 import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
-import { syncedSnapshots } from './snapshots';
+import { snapshotForNow } from './rateSnapshots';
+import { syncSnapshots } from './snapshots';
 import {
   FinanceValidationError,
   type FinanceEntity,
@@ -29,7 +31,6 @@ import type {
   Category,
   CountryCode,
   CurrencyCode,
-  ExchangeRates,
   FinanceState,
   Fund,
   FundMovement,
@@ -43,6 +44,7 @@ import type {
   MonthlyReview,
   PlanLine,
   PriceSource,
+  RateSnapshot,
   RecurringRule,
   Settings,
   SinkingFrequency,
@@ -72,17 +74,19 @@ export type Editable<T> = T extends unknown ? Omit<T, 'updatedAt'> & { updatedAt
 
 export type NewAccount = Omit<Account, 'id' | 'createdAt' | 'updatedAt'>;
 export type NewCategory = Omit<Category, 'id' | 'isDefault' | 'updatedAt'>;
-export type NewIncomeExpense = Omit<IncomeExpenseTransaction, 'id' | 'createdAt' | 'updatedAt' | 'rateToEGP'> & {
-  rateToEGP?: number;
-};
+export type NewIncomeExpense = Omit<IncomeExpenseTransaction, 'id' | 'createdAt' | 'updatedAt' | 'rateSnapshotId'>;
 export type NewTransfer = Omit<
   TransferTransaction,
-  'id' | 'type' | 'createdAt' | 'updatedAt' | 'rateToEGP' | 'toAmount'
+  'id' | 'type' | 'createdAt' | 'updatedAt' | 'rateSnapshotId' | 'toAmount'
 > & {
   // Defaults to `amount` converted at current rates.
   toAmount?: number;
-  rateToEGP?: number;
 };
+
+// The rate snapshot a patch must also save when the current rates have none yet (see snapshotForNow).
+type RateSnapshotUse = ReturnType<typeof snapshotForNow>;
+const ratePatch = (use: RateSnapshotUse): { rateSnapshots?: RateSnapshot[] } =>
+  use.rateSnapshots ? { rateSnapshots: use.rateSnapshots } : {};
 export type NewFund = Omit<Fund, 'id' | 'createdAt' | 'updatedAt' | 'linkedHoldingIds'> & {
   linkedHoldingIds?: string[];
 };
@@ -275,7 +279,6 @@ export function deleteCategory(state: State, id: string, ctx: OpContext): Patch 
 
 function validateIncomeExpense(state: State, tx: IncomeExpenseTransaction) {
   assertPositive(tx.amount, 'amount');
-  assertPositive(tx.rateToEGP, 'rateToEGP');
   assertDate(tx.date, 'date');
   const account = requireById(state.accounts, tx.accountId, 'account');
   if (tx.currency !== account.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
@@ -292,7 +295,6 @@ function validateIncomeExpense(state: State, tx: IncomeExpenseTransaction) {
 function validateTransfer(state: State, tx: TransferTransaction) {
   assertPositive(tx.amount, 'amount');
   assertPositive(tx.toAmount, 'toAmount');
-  assertPositive(tx.rateToEGP, 'rateToEGP');
   assertDate(tx.date, 'date');
   requireById(state.accounts, tx.fromAccountId, 'account');
   requireById(state.accounts, tx.toAccountId, 'account');
@@ -305,18 +307,19 @@ function rememberSelection(state: State, selection: LastUsedSelection): Settings
 }
 
 export function addTransaction(state: State, input: NewIncomeExpense, ctx: OpContext): Patch {
+  const rates = snapshotForNow(state, ctx.now());
   const tx: IncomeExpenseTransaction = stamp(
     {
       ...input,
       id: ctx.newId(),
       createdAt: ctx.now().toISOString(),
-      rateToEGP: input.rateToEGP ?? rateToEGP(input.currency, state.settings.exchangeRates),
-      ratesSnapshot: snapshotRates(state.settings.exchangeRates),
+      rateSnapshotId: rates.id,
     },
     ctx
   );
   validateIncomeExpense(state, tx);
   return {
+    ...ratePatch(rates),
     transactions: [tx, ...state.transactions],
     settings: rememberSelection(state, {
       [tx.type]: { accountId: tx.accountId, categoryId: tx.categoryId },
@@ -325,7 +328,8 @@ export function addTransaction(state: State, input: NewIncomeExpense, ctx: OpCon
 }
 
 export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): Patch {
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
+  const use = snapshotForNow(state, ctx.now());
   const from = requireById(state.accounts, input.fromAccountId, 'account');
   const to = requireById(state.accounts, input.toAccountId, 'account');
   const tx: TransferTransaction = stamp(
@@ -336,13 +340,13 @@ export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): P
       createdAt: ctx.now().toISOString(),
       toAmount:
         input.toAmount ?? convertCurrency(input.amount, from.currency, to.currency, rates),
-      rateToEGP: input.rateToEGP ?? rateToEGP(from.currency, rates),
-      ratesSnapshot: snapshotRates(rates),
+      rateSnapshotId: use.id,
     },
     ctx
   );
   validateTransfer(state, tx);
   return {
+    ...ratePatch(use),
     transactions: [tx, ...state.transactions],
     settings: rememberSelection(state, {
       transfer: { fromAccountId: tx.fromAccountId, toAccountId: tx.toAccountId },
@@ -350,7 +354,7 @@ export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): P
   };
 }
 
-// Currency that rateToEGP refers to: the transaction's own, or the source account's for transfers.
+// The currency a transaction's rates are about: its own, or the source account's for transfers.
 function transactionCurrency(state: State, tx: Editable<Transaction>): CurrencyCode | undefined {
   if (tx.type !== 'transfer') return tx.currency;
   return state.accounts.find((a) => a.id === tx.fromAccountId)?.currency;
@@ -358,7 +362,6 @@ function transactionCurrency(state: State, tx: Editable<Transaction>): CurrencyC
 
 function validateAssetPurchase(state: State, tx: AssetPurchaseTransaction) {
   assertPositive(tx.amount, 'amount');
-  assertPositive(tx.rateToEGP, 'rateToEGP');
   assertDate(tx.date, 'date');
   const account = requireById(state.accounts, tx.accountId, 'account');
   if (tx.currency !== account.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
@@ -371,18 +374,24 @@ function validateTransaction(state: State, tx: Transaction) {
   else validateIncomeExpense(state, tx);
 }
 
-// The holding's cost basis always mirrors its purchase: amount × the snapshotted rate.
-function syncPurchaseCost(holdings: Holding[], tx: AssetPurchaseTransaction, ctx: OpContext): Holding[] {
+// The holding's cost basis always mirrors its purchase: the amount in EGP at the purchase's own rates.
+function syncPurchaseCost(
+  holdings: Holding[],
+  snapshots: readonly RateSnapshot[],
+  tx: AssetPurchaseTransaction,
+  ctx: OpContext
+): Holding[] {
   return holdings.map((h) =>
-    h.id === tx.holdingId ? stamp({ ...h, purchaseCostEGP: tx.amount * tx.rateToEGP }, ctx) : h
+    h.id === tx.holdingId
+      ? stamp({ ...h, purchaseCostEGP: projectAmount(snapshots, tx.rateSnapshotId, tx.amount, tx.currency, 'EGP') }, ctx)
+      : h
   );
 }
 
 // Replaces a transaction. Income/expense/transfer may change into each other, but a gold
-// purchase stays a gold purchase (it owns a holding). createdAt and the snapshotted rates
-// (rateToEGP, ratesSnapshot) are kept from the original; they are re-snapshotted, together,
-// only when the currency changes, e.g. when the transaction moves to an account in another
-// currency.
+// purchase stays a gold purchase (it owns a holding). createdAt and the rate snapshot
+// (rateSnapshotId) are kept from the original; the snapshot is re-taken only when the currency
+// changes, e.g. when the transaction moves to an account in another currency.
 export function updateTransaction(state: State, tx: Editable<Transaction>, ctx: OpContext): Patch {
   const existing = requireById(state.transactions, tx.id, 'transaction');
   if ((existing.type === 'asset_purchase') !== (tx.type === 'asset_purchase')) {
@@ -390,22 +399,23 @@ export function updateTransaction(state: State, tx: Editable<Transaction>, ctx: 
   }
   const currency = transactionCurrency(state, tx);
   const keepRates = !currency || currency === transactionCurrency(state, existing);
-  const ratesSnapshot = keepRates ? existing.ratesSnapshot : snapshotRates(state.settings.exchangeRates);
-  const { ratesSnapshot: _edited, ...edited } = tx;
+  const use = keepRates ? undefined : snapshotForNow(state, ctx.now());
+  const { rateSnapshotId: _edited, ...edited } = tx;
   const updated = stamp(
     {
       ...edited,
       createdAt: existing.createdAt,
-      rateToEGP: keepRates ? existing.rateToEGP : rateToEGP(currency, state.settings.exchangeRates),
-      ...(ratesSnapshot ? { ratesSnapshot } : {}),
+      rateSnapshotId: use ? use.id : existing.rateSnapshotId,
     },
     ctx
   ) as Transaction;
   validateTransaction(state, updated);
+  const snapshots = use?.rateSnapshots ?? state.rateSnapshots;
   return {
+    ...(use ? ratePatch(use) : {}),
     transactions: replaceById(state.transactions, updated, 'transaction'),
     ...(updated.type === 'asset_purchase'
-      ? { holdings: syncPurchaseCost(state.holdings, updated, ctx) }
+      ? { holdings: syncPurchaseCost(state.holdings, snapshots, updated, ctx) }
       : {}),
   };
 }
@@ -463,13 +473,14 @@ function goldHoldingFor(
 }
 
 // Buys gold with cash in one atomic step: a gold holding whose cost is what was paid
-// (amount × rateToEGP) and an asset_purchase transaction that takes it out of the account.
+// (the amount in EGP at the current rates) and an asset_purchase transaction that takes it out of the account.
 // At cost, net worth is unchanged: cash goes down by exactly what the gold goes up.
 export function buyGold(state: State, input: GoldPurchase, ctx: OpContext): Patch {
   const account = requireById(state.accounts, input.accountId, 'account');
   assertPositive(input.amount, 'amount');
-  const rate = rateToEGP(account.currency, state.settings.exchangeRates);
-  const holding = goldHoldingFor(input, ctx.newId(), input.amount * rate, account.country, ctx);
+  const use = snapshotForNow(state, ctx.now());
+  const costEGP = convertCurrency(input.amount, account.currency, 'EGP', state.settings.rates);
+  const holding = goldHoldingFor(input, ctx.newId(), costEGP, account.country, ctx);
   validateHolding(holding);
 
   const tx: AssetPurchaseTransaction = {
@@ -482,13 +493,12 @@ export function buyGold(state: State, input: GoldPurchase, ctx: OpContext): Patc
     holdingId: holding.id,
     date: input.date,
     ...(input.note?.trim() ? { note: input.note.trim() } : {}),
-    rateToEGP: rate,
-    ratesSnapshot: snapshotRates(state.settings.exchangeRates),
+    rateSnapshotId: use.id,
     createdAt: ctx.now().toISOString(),
   };
   const holdings = [...state.holdings, holding];
   validateAssetPurchase({ ...state, holdings }, tx);
-  return { holdings, transactions: [tx, ...state.transactions] };
+  return { ...ratePatch(use), holdings, transactions: [tx, ...state.transactions] };
 }
 
 // Edits a gold purchase and its holding together. The rate snapshot is kept unless the
@@ -500,9 +510,12 @@ export function updateGoldPurchase(state: State, txId: string, input: GoldPurcha
   const account = requireById(state.accounts, input.accountId, 'account');
   assertPositive(input.amount, 'amount');
   const keepRates = account.currency === existing.currency;
-  const rate = keepRates ? existing.rateToEGP : rateToEGP(account.currency, state.settings.exchangeRates);
+  const use = keepRates ? undefined : snapshotForNow(state, ctx.now());
+  const costEGP = keepRates
+    ? projectAmount(state.rateSnapshots, existing.rateSnapshotId, input.amount, account.currency, 'EGP')
+    : convertCurrency(input.amount, account.currency, 'EGP', state.settings.rates);
   const holding: GoldHolding = {
-    ...goldHoldingFor(input, previousHolding.id, input.amount * rate, previousHolding.country, ctx),
+    ...goldHoldingFor(input, previousHolding.id, costEGP, previousHolding.country, ctx),
   };
   validateHolding(holding);
 
@@ -514,13 +527,12 @@ export function updateGoldPurchase(state: State, txId: string, input: GoldPurcha
     currency: account.currency,
     date: input.date,
     ...(input.note?.trim() ? { note: input.note.trim() } : {}),
-    rateToEGP: rate,
-    ...(keepRates ? {} : { ratesSnapshot: snapshotRates(state.settings.exchangeRates) }),
+    ...(use ? { rateSnapshotId: use.id } : {}),
     updatedAt: ctx.now().toISOString(),
   };
   const holdings = replaceById(state.holdings, holding, 'holding');
   validateAssetPurchase({ ...state, holdings }, tx);
-  return { holdings, transactions: replaceById(state.transactions, tx, 'transaction') };
+  return { ...(use ? ratePatch(use) : {}), holdings, transactions: replaceById(state.transactions, tx, 'transaction') };
 }
 
 // --- Funds & movements ------------------------------------------------------
@@ -607,7 +619,7 @@ export function deleteFund(state: State, id: string, ctx: OpContext): Patch {
 }
 
 function newMovement(
-  state: State,
+  rateSnapshotId: string,
   fundId: string,
   amount: number,
   note: string | undefined,
@@ -623,7 +635,7 @@ function newMovement(
     // and covered by whichever money is available (see unassignedByCurrency).
     ...(currency ? { currency } : {}),
     date: toDateKey(ctx.now()),
-    ratesSnapshot: snapshotRates(state.settings.exchangeRates),
+    rateSnapshotId,
     ...(note ? { note } : {}),
   };
 }
@@ -651,7 +663,8 @@ export function allocateToFund(
   requireById(state.funds, fundId, 'fund');
   assertPositive(amount, 'amount');
   assertCurrency(currency);
-  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, amount, note, ctx, currency)] };
+  const use = snapshotForNow(state, ctx.now());
+  return { ...ratePatch(use), fundMovements: [...state.fundMovements, newMovement(use.id, fundId, amount, note, ctx, currency)] };
 }
 
 // Takes `amount` of `currency` out of the fund's cash in that currency (the fund's currency when
@@ -668,7 +681,8 @@ export function withdrawFromFund(
   assertPositive(amount, 'amount');
   assertCurrency(currency);
   if (amount > fundAllocatedIn(state, fundId, currency ?? fund.currency)) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
-  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, -amount, note, ctx, currency)] };
+  const use = snapshotForNow(state, ctx.now());
+  return { ...ratePatch(use), fundMovements: [...state.fundMovements, newMovement(use.id, fundId, -amount, note, ctx, currency)] };
 }
 
 // Allocates to several funds at once. All or nothing: the money may not exceed what is
@@ -686,9 +700,10 @@ export function allocateMany(
     assertPositive(amount, 'amount');
     assertCurrency(currency);
   }
-  const added = allocations.map(({ fundId, amount, currency }) => newMovement(state, fundId, amount, note, ctx, currency));
+  const use = snapshotForNow(state, ctx.now());
+  const added = allocations.map(({ fundId, amount, currency }) => newMovement(use.id, fundId, amount, note, ctx, currency));
   if (worsensShortfall(state, added)) fail('INSUFFICIENT_UNASSIGNED');
-  return { fundMovements: [...state.fundMovements, ...added] };
+  return { ...ratePatch(use), fundMovements: [...state.fundMovements, ...added] };
 }
 
 // Withdraws from several funds at once. All or nothing: no fund may go below zero cash in any
@@ -714,10 +729,12 @@ export function withdrawMany(
   for (const { fundId, currency, total } of perFundCurrency.values()) {
     if (total > fundAllocatedIn(state, fundId, currency) + 0.005) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
   }
+  const use = snapshotForNow(state, ctx.now());
   return {
+    ...ratePatch(use),
     fundMovements: [
       ...state.fundMovements,
-      ...withdrawals.map(({ fundId, amount, currency }) => newMovement(state, fundId, -amount, note, ctx, currency)),
+      ...withdrawals.map(({ fundId, amount, currency }) => newMovement(use.id, fundId, -amount, note, ctx, currency)),
     ],
   };
 }
@@ -744,19 +761,20 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
   validateFund(state, updated, fundId);
   assertNonNegative(edit.cashAllocation, 'cashAllocation');
 
+  const use = snapshotForNow(state, ctx.now());
   const change = edit.cashAllocation - fundAllocated(state, fundId);
   let adjustments: FundMovement[] = [];
   if (change >= 0.005) {
     // In the fund's currency, covered by any currency's money (like data from before currencies).
-    adjustments = [newMovement(state, fundId, change, 'تعديل الرصيد', ctx)];
+    adjustments = [newMovement(use.id, fundId, change, 'تعديل الرصيد', ctx)];
     if (worsensShortfall(state, adjustments)) fail('INSUFFICIENT_UNASSIGNED', { id: fundId });
   } else if (change <= -0.005) {
     const plan = withdrawalPlan(state, fundId, -change, fund.currency);
-    adjustments = plan.withdrawals.map((w) => newMovement(state, fundId, -w.amount, 'تعديل الرصيد', ctx, w.currency));
-    if (plan.shortfall > 0.005) adjustments.push(newMovement(state, fundId, -plan.shortfall, 'تعديل الرصيد', ctx));
+    adjustments = plan.withdrawals.map((w) => newMovement(use.id, fundId, -w.amount, 'تعديل الرصيد', ctx, w.currency));
+    if (plan.shortfall > 0.005) adjustments.push(newMovement(use.id, fundId, -plan.shortfall, 'تعديل الرصيد', ctx));
   }
   const fundMovements = adjustments.length > 0 ? [...state.fundMovements, ...adjustments] : state.fundMovements;
-  return { funds: replaceById(state.funds, updated, 'fund'), fundMovements };
+  return { ...(adjustments.length > 0 ? ratePatch(use) : {}), funds: replaceById(state.funds, updated, 'fund'), fundMovements };
 }
 
 export interface SinkingPayment {
@@ -817,6 +835,7 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
     fundMovements: draft.fundMovements,
     funds: draft.funds,
     settings: draft.settings,
+    rateSnapshots: draft.rateSnapshots,
   };
 }
 
@@ -1054,9 +1073,10 @@ function occurrenceTransaction(
   rule: RecurringRule,
   occurrenceDate: string,
   overrides: OccurrenceOverrides,
-  ctx: OpContext
+  ctx: OpContext,
+  rateSnapshotId: string
 ): Transaction {
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const account = requireById(state.accounts, overrides.accountId ?? rule.accountId, 'account');
   const amount = overrides.amount ?? rule.amount;
   const note = overrides.note?.trim() || rule.note || rule.name;
@@ -1065,8 +1085,7 @@ function occurrenceTransaction(
     amount,
     date: overrides.date ?? occurrenceDate,
     note,
-    rateToEGP: rateToEGP(account.currency, rates),
-    ratesSnapshot: snapshotRates(rates),
+    rateSnapshotId,
     createdAt: ctx.now().toISOString(),
     recurringRuleId: rule.id,
     occurrenceDate,
@@ -1099,11 +1118,12 @@ function occurrenceTransaction(
 export function processDue(state: State, ctx: OpContext): Patch {
   const due = dueOccurrences(state, todayOf(ctx), 'auto');
   if (due.length === 0) return {};
+  const use = snapshotForNow(state, ctx.now());
   const created: Transaction[] = [];
   const touched = new Set<string>();
   for (const { rule, date } of due) {
     try {
-      created.push(occurrenceTransaction(state, rule, date, {}, ctx));
+      created.push(occurrenceTransaction(state, rule, date, {}, ctx, use.id));
       touched.add(rule.id);
     } catch (error) {
       if (!(error instanceof FinanceValidationError)) throw error;
@@ -1113,6 +1133,7 @@ export function processDue(state: State, ctx: OpContext): Patch {
   const transactions = [...created.reverse(), ...state.transactions];
   const after = { ...state, transactions };
   return {
+    ...ratePatch(use),
     transactions,
     recurringRules: state.recurringRules.map((r) => (touched.has(r.id) ? stamp(withNextDate(after, r, ctx), ctx) : r)),
   };
@@ -1137,9 +1158,11 @@ export function confirmOccurrence(
   ctx: OpContext
 ): Patch {
   const rule = requireDue(state, ruleId, occurrenceDate);
-  const tx = occurrenceTransaction(state, rule, occurrenceDate, overrides, ctx);
+  const use = snapshotForNow(state, ctx.now());
+  const tx = occurrenceTransaction(state, rule, occurrenceDate, overrides, ctx, use.id);
   const transactions = [tx, ...state.transactions];
   return {
+    ...ratePatch(use),
     transactions,
     recurringRules: replaceById(
       state.recurringRules,
@@ -1261,8 +1284,7 @@ export function deletePlan(state: State, month: string, ctx: OpContext): Patch {
 // Fills in missing past months and upserts the current month's snapshot. {} when nothing
 // changed, so calling it after every change never loops.
 export function recordNetWorthSnapshots(state: State, ctx: OpContext): Patch {
-  const netWorthSnapshots = syncedSnapshots(state, ctx.now());
-  return netWorthSnapshots ? { netWorthSnapshots } : {};
+  return syncSnapshots(state, ctx.now()) ?? {};
 }
 
 // "مش دلوقتي": hides a Next Best Action for 24 hours. Urgent ones (due items, spent fund money)
@@ -1297,10 +1319,21 @@ export const reviewIdFor = (month: string) => `review-${month}`;
 
 // --- Settings ---------------------------------------------------------------
 
-export function updateRates(state: State, rates: ExchangeRates): Patch {
+// The two rates the Settings screen edits: how many EGP one SAR / one USD is worth.
+export interface EgpRatesInput {
+  SAR_EGP: number;
+  USD_EGP: number;
+}
+
+export function updateRates(state: State, rates: EgpRatesInput & { lastUpdated: string }): Patch {
   assertPositive(rates.SAR_EGP, 'exchangeRate');
   assertPositive(rates.USD_EGP, 'exchangeRate');
-  return { settings: { ...state.settings, exchangeRates: rates } };
+  return {
+    settings: {
+      ...state.settings,
+      rates: { ...withEgpRates(state.settings.rates, rates), updatedAt: rates.lastUpdated, source: 'manual' },
+    },
+  };
 }
 
 export interface SettingsUpdate {
@@ -1318,9 +1351,12 @@ export function updateSettings(state: State, update: SettingsUpdate, ctx: OpCont
   if (update.exchangeRates) {
     assertPositive(update.exchangeRates.SAR_EGP, 'exchangeRate');
     assertPositive(update.exchangeRates.USD_EGP, 'exchangeRate');
-    const { SAR_EGP, USD_EGP } = settings.exchangeRates;
-    if (update.exchangeRates.SAR_EGP !== SAR_EGP || update.exchangeRates.USD_EGP !== USD_EGP) {
-      settings.exchangeRates = { ...update.exchangeRates, lastUpdated: now };
+    const same = (a: number, b: number) => Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(b));
+    const unchanged =
+      same(update.exchangeRates.SAR_EGP, rateToEGP('SAR', settings.rates)) &&
+      same(update.exchangeRates.USD_EGP, rateToEGP('USD', settings.rates));
+    if (!unchanged) {
+      settings.rates = { ...withEgpRates(settings.rates, update.exchangeRates), updatedAt: now, source: 'manual' };
     }
   }
   const p24 = update.goldPrice24kEGP ?? settings.goldPrice24kEGP;
@@ -1358,7 +1394,7 @@ export function setPricePreferences(state: State, prefs: PricePreferences, ctx: 
   if (priceSourceOf(settings) === 'auto' && premiumChanged && settings.lastGoldUsdPerOunce) {
     Object.assign(
       settings,
-      goldPricesEGP(settings.lastGoldUsdPerOunce, settings.exchangeRates.USD_EGP, settings.localPremiumPct),
+      goldPricesEGP(settings.lastGoldUsdPerOunce, settings.rates.perUsd.EGP, settings.localPremiumPct),
       { goldPriceUpdatedAt: ctx.now().toISOString() }
     );
   }
@@ -1374,7 +1410,7 @@ export function ensurePriceSource(state: State, freshInstall: boolean): Patch {
 }
 
 // Applies a live price fetch. Manual mode is never overwritten ({}). Auto mode: fetched rates
-// replace exchangeRates, a fetched world gold price (with usable rates) replaces the gold
+// replace the rate table, a fetched world gold price (with usable rates) replaces the gold
 // prices, each with a fresh "updated" date; whatever failed keeps its last saved value and the
 // error is recorded. Only settings change, so recorded amounts keep their own rate snapshots.
 export function applyLivePrices(state: State, result: PriceFetchResult, ctx: OpContext): Patch {
@@ -1382,11 +1418,16 @@ export function applyLivePrices(state: State, result: PriceFetchResult, ctx: OpC
   const now = ctx.now().toISOString();
   const { lastPriceFetchError: _previousError, ...settings } = state.settings;
   if (result.fx) {
-    settings.exchangeRates = { SAR_EGP: result.fx.SAR_EGP, USD_EGP: result.fx.USD_EGP, lastUpdated: now };
+    settings.rates = {
+      base: 'USD',
+      perUsd: { ...settings.rates.perUsd, ...result.fx.perUsd },
+      updatedAt: now,
+      source: result.fxSource ?? settings.rates.source,
+    };
     settings.lastPriceFetchAt = now;
     if (result.fxSource) settings.fxSource = result.fxSource;
     if (result.xauUsd !== null) {
-      Object.assign(settings, goldPricesEGP(result.xauUsd, result.fx.USD_EGP, settings.localPremiumPct ?? 0), {
+      Object.assign(settings, goldPricesEGP(result.xauUsd, result.fx.perUsd.EGP, settings.localPremiumPct ?? 0), {
         goldPriceUpdatedAt: now,
         lastGoldUsdPerOunce: result.xauUsd,
       });
@@ -1413,7 +1454,7 @@ function pricePreferences(state: State): Partial<Settings> {
   return Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined));
 }
 
-const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones'>; entity: SyncEntity }[] = [
+const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones' | 'rateSnapshots'>; entity: SyncEntity }[] = [
   { key: 'accounts', entity: 'account' },
   { key: 'categories', entity: 'category' },
   { key: 'transactions', entity: 'transaction' },
@@ -1444,7 +1485,8 @@ function replaceAllData(state: State, next: State, settings: Settings, ctx: OpCo
   };
   [...state.tombstones, ...next.tombstones].forEach(record);
 
-  const patch: Patch = { settings };
+  // Rate snapshots are immutable and content-addressed (no tombstones); the records now in the state point at the incoming ones.
+  const patch: Patch = { settings, rateSnapshots: next.rateSnapshots };
   for (const { key, entity } of COLLECTIONS) {
     const incoming = next[key] as object[];
     const incomingIds = new Set(incoming.map(syncKey));
@@ -1468,7 +1510,7 @@ export function replaceWithSeed(state: State, seed: State, ctx: OpContext): Patc
     seed,
     {
       ...seedSettings,
-      exchangeRates: state.settings.exchangeRates,
+      rates: state.settings.rates,
       goldPrice24kEGP: state.settings.goldPrice24kEGP,
       goldPrice21kEGP: state.settings.goldPrice21kEGP,
       goldPriceUpdatedAt: state.settings.goldPriceUpdatedAt,

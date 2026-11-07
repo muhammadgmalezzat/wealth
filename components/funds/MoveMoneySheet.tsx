@@ -90,7 +90,7 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
       />
       {foreign && amount !== null && (
         <AppText variant="caption" color="textSecondary" align="center">
-          بسعر النهارده ≈ {formatMoney(convertCurrency(amount, currency, fund.currency, state.settings.exchangeRates), fund.currency)} في الصندوق
+          بسعر النهارده ≈ {formatMoney(convertCurrency(amount, currency, fund.currency, state.settings.rates), fund.currency)} في الصندوق
         </AppText>
       )}
       <View style={styles.note}>

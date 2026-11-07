@@ -132,3 +132,9 @@ export function snapshotById(snapshots: readonly RateSnapshot[], id: string): Ra
   }
   return index.get(id);
 }
+
+// The table with EGP, SAR and USD set from "how many EGP one SAR / one USD is worth" (what the Settings
+// screen edits); every other currency keeps its rate.
+export function withEgpRates(table: RateTable, egp: { SAR_EGP: number; USD_EGP: number }): RateTable {
+  return { base: 'USD', perUsd: { ...table.perUsd, EGP: egp.USD_EGP, SAR: egp.USD_EGP / egp.SAR_EGP, USD: 1 } };
+}
