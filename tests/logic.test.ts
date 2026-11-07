@@ -21,6 +21,11 @@ import * as legacySel from '@/store/legacy/selectors.v7';
 import * as legacyPlan from '@/store/legacy/planning.v7';
 import * as legacyAnalytics from '@/store/legacy/analytics.v7';
 import * as planning from '@/store/planning';
+import { COUNTRY_REGISTRY, countryCodes, countryName, isKnownCountry } from '@/constants/countries';
+import { CURRENCY_REGISTRY, decimalsOf, isKnownCurrency, UnknownCurrencyError } from '@/constants/currencyRegistry';
+import * as legacyCurrency from '@/store/legacy/currency.v7';
+import { roundMoney, roundTo, splitMoney, splitTo, sumTo } from '@/utils/money';
+import { convert, hasRate, makeSnapshot, RateMissingError, rateBetween, sameTable, snapshotById, snapshotForWrite, snapshotId, tableFromEgpRates } from '@/utils/rates';
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
 import { FinanceValidationError } from '@/store/errors';
@@ -5187,5 +5192,176 @@ describe('v7 oracle: report on the rich fixture (hand-checked numbers)', () => {
     assert.equal(report.plans['2026-10'].lines['cat-lifestyle-dining'], 90);
     // September (EGP plan): rent 700 SAR at 12 = 8,400.
     assert.equal(report.plans['2026-09'].lines['cat-essentials-rent'], 8400);
+  });
+});
+
+// --- v8 engine: money, registries, rate tables, snapshots -------------------------
+
+describe('money: rounding and exact sums', () => {
+  const REGISTRY = {
+    ...CURRENCY_REGISTRY,
+    KWD: { code: 'KWD', symbol: 'د.ك', nameAr: 'دينار كويتي', nameEn: 'Kuwaiti Dinar', decimals: 3 },
+    JPY: { code: 'JPY', symbol: '¥', nameAr: 'ين', nameEn: 'Japanese Yen', decimals: 0 },
+  };
+
+  it('rounds half away from zero on the decimal text (1.005 → 1.01)', () => {
+    assert.equal(roundTo(1.005, 2), 1.01);
+    assert.equal(roundTo(-1.005, 2), -1.01);
+    assert.equal(roundTo(2.5, 0), 3);
+    assert.equal(roundTo(-2.5, 0), -3);
+    assert.equal(roundTo(1.45, 1), 1.5);
+    assert.equal(roundTo(0.1 + 0.2, 2), 0.3);
+  });
+
+  it('handles numbers JS prints in exponent form, and never returns -0', () => {
+    assert.equal(roundTo(1e-7, 2), 0);
+    assert.equal(roundTo(5e-7, 6), 0.000001);
+    assert.equal(roundTo(1.5e21, 2), 1.5e21);
+    assert.ok(Object.is(roundTo(-0.001, 2), 0));
+    assert.ok(Object.is(roundTo(-0, 2), 0));
+    assert.ok(Number.isNaN(roundTo(NaN, 2)));
+  });
+
+  it('uses the currency registry: JPY has 0 decimals, KWD 3, and adding them is data-only', () => {
+    assert.equal(roundMoney(100.5, 'JPY', REGISTRY), 101);
+    assert.equal(roundMoney(149.37, 'JPY', REGISTRY), 149);
+    assert.equal(roundMoney(-0.0005, 'KWD', REGISTRY), -0.001);
+    assert.equal(roundMoney(0.0004, 'KWD', REGISTRY), 0);
+    assert.equal(roundMoney(1.23456, 'USD'), 1.23);
+    assert.throws(() => roundMoney(1, 'KWD'), UnknownCurrencyError, 'not in the shipped registry');
+    assert.equal(decimalsOf('KWD', REGISTRY), 3);
+    assert.ok(isKnownCurrency('JPY', REGISTRY) && !isKnownCurrency('JPY'));
+  });
+
+  it('sums in integer minor units: 1,000 × 0.01 is exactly 10.00 and back to 0', () => {
+    const cents = Array.from({ length: 1000 }, () => 0.01);
+    assert.equal(sumTo(cents, 2), 10);
+    assert.equal(sumTo([10, ...cents.map((c) => -c)], 2), 0);
+    assert.equal(sumTo([0.1, 0.2], 2), 0.3);
+    // The plain float sum is off, which is why the helper exists.
+    assert.notEqual(cents.reduce((a, b) => a + b, 0), 10);
+  });
+
+  it('1,000 expenses of 10.01 on an opening balance stay exact (also KWD and JPY)', () => {
+    const expenses = Array.from({ length: 1000 }, () => -10.01);
+    assert.equal(sumTo([5000, ...expenses], 2), 5000 - 10010);
+    assert.equal(sumTo([100, ...Array.from({ length: 1000 }, () => -0.001)], 3), 99);
+    assert.equal(sumTo(Array.from({ length: 1000 }, () => 7), 0), 7000);
+  });
+
+  it('splits a total so the parts add up exactly (largest remainder, the last part takes a tie)', () => {
+    assert.deepEqual(splitTo(1, [1, 1, 1], 3), [0.333, 0.333, 0.334]);
+    assert.deepEqual(splitTo(100, [1, 1, 1], 0), [33, 33, 34]);
+    assert.deepEqual(splitTo(505, [2000, 500], 2), [404, 101]);
+    assert.deepEqual(splitTo(10, [], 2), []);
+    assert.deepEqual(splitTo(10, [0, 0], 2), [10, 0]);
+    assert.deepEqual(splitTo(-10, [1, 1, 1], 2), [-3.33, -3.33, -3.34]);
+    assert.deepEqual(splitMoney(1, [1, 1, 1], 'KWD', REGISTRY), [0.333, 0.333, 0.334]);
+  });
+
+  it('every split of a random total sums to the rounded total (1,000 seeded cases)', () => {
+    let seed = 7;
+    const rand = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+    for (let i = 0; i < 1000; i++) {
+      const decimals = [0, 2, 3][i % 3];
+      const total = roundTo(rand() * 100000, decimals);
+      const weights = Array.from({ length: 1 + Math.floor(rand() * 6) }, () => rand() * 10);
+      const parts = splitTo(total, weights, decimals);
+      assert.equal(sumTo(parts, decimals), total, `case ${i}`);
+      assert.ok(parts.every((p) => p >= 0));
+    }
+  });
+});
+
+describe('registries are data', () => {
+  it('a third country is one entry; unknown codes still show', () => {
+    const countries = { ...COUNTRY_REGISTRY, KW: { code: 'KW', nameAr: 'الكويت', defaultCurrency: 'KWD' } };
+    assert.deepEqual(countryCodes(countries), ['EG', 'SA', 'KW']);
+    assert.equal(countryName('KW', countries), 'الكويت');
+    assert.equal(countryName('KW'), 'KW');
+    assert.ok(isKnownCountry('EG') && !isKnownCountry('KW'));
+  });
+});
+
+describe('rate tables: A → USD → B', () => {
+  const table = { base: 'USD' as const, perUsd: { USD: 1, EGP: 50, SAR: 4 } };
+
+  it('converts through USD and leaves the same currency untouched', () => {
+    assert.equal(convert(100, 'SAR', 'EGP', table), 1250);
+    assert.equal(convert(1250, 'EGP', 'SAR', table), 100);
+    assert.equal(convert(10, 'USD', 'SAR', table), 40);
+    assert.equal(convert(123.456789, 'SAR', 'SAR', table), 123.456789);
+    assert.equal(rateBetween('SAR', 'EGP', table), 12.5);
+  });
+
+  it('a missing or invalid rate is an error, never a silent 0', () => {
+    assert.throws(() => convert(1, 'KWD', 'EGP', table), RateMissingError);
+    assert.throws(() => convert(1, 'EGP', 'KWD', table), RateMissingError);
+    assert.throws(() => convert(1, 'SAR', 'EGP', { base: 'USD', perUsd: { SAR: 0, EGP: 50 } }), RateMissingError);
+    assert.ok(hasRate(table, 'SAR') && !hasRate(table, 'KWD'));
+  });
+
+  it('re-basing the v7 EGP-pivot rates is lossless: 10,000 seeded conversions match the frozen engine', () => {
+    let seed = 42;
+    const rand = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+    const codes = ['EGP', 'SAR', 'USD'] as const;
+    let worst = 0;
+    for (let i = 0; i < 10000; i++) {
+      const rates = { SAR_EGP: 5 + rand() * 15, USD_EGP: 20 + rand() * 60 };
+      const t = tableFromEgpRates({ SAR: rates.SAR_EGP, USD: rates.USD_EGP });
+      const amount = roundTo(rand() * 1e6, 2);
+      const from = codes[Math.floor(rand() * 3)];
+      const to = codes[Math.floor(rand() * 3)];
+      const legacy = legacyCurrency.convertCurrency(amount, from, to, rates);
+      const now = convert(amount, from, to, t);
+      worst = Math.max(worst, Math.abs(now - legacy) / Math.max(1, Math.abs(legacy)));
+      assert.equal(roundTo(now, 2), roundTo(legacy, 2), `case ${i}: ${amount} ${from}→${to}`);
+    }
+    assert.ok(worst < 1e-12, `worst relative difference ${worst}`);
+  });
+
+  it('a record\'s own rate overrides its currency\'s rate, as v7 used for the source leg', () => {
+    const rates = { SAR: 12.5, USD: 50 };
+    const t = tableFromEgpRates(rates, { currency: 'SAR', egpPerUnit: 12.2 });
+    // Conversion is unrounded (1097.9999999999998); the boundary rounds it.
+    assert.equal(roundTo(convert(90, 'SAR', 'EGP', t), 2), 1098);
+    // The other currencies keep the snapshot's rates.
+    assert.ok(Math.abs(convert(90, 'SAR', 'USD', t) - (90 * 12.2) / 50) < 1e-12);
+    // A USD override moves the anchor but keeps every cross rate it implies.
+    const u = tableFromEgpRates(rates, { currency: 'USD', egpPerUnit: 48 });
+    assert.equal(u.perUsd.USD, 1);
+    assert.ok(Math.abs(convert(1, 'USD', 'EGP', u) - 48) < 1e-12);
+    assert.ok(Math.abs(convert(1, 'SAR', 'EGP', u) - 12.5) < 1e-12);
+  });
+});
+
+describe('rate snapshots are immutable and deduplicated', () => {
+  const a = { base: 'USD' as const, perUsd: { USD: 1, EGP: 50, SAR: 4 } };
+  const sameButReordered = { base: 'USD' as const, perUsd: { SAR: 4, EGP: 50, USD: 1 } };
+  const meta = { takenAt: '2026-10-01T00:00:00.000Z', source: 'manual' as const };
+
+  it('the id is the table\'s content: key order does not matter, quality does', () => {
+    assert.equal(snapshotId(a), snapshotId(sameButReordered));
+    assert.notEqual(snapshotId(a), snapshotId({ ...a, perUsd: { ...a.perUsd, SAR: 4.01 } }));
+    assert.notEqual(snapshotId(a, 'recorded'), snapshotId(a, 'estimated'));
+    assert.match(snapshotId(a), /^rs-[0-9a-f]{16}$/);
+    assert.equal(makeSnapshot(a, meta).id, snapshotId(a));
+  });
+
+  it('writing with unchanged rates reuses the snapshot; changed rates add a new one; nothing is mutated', () => {
+    const first = snapshotForWrite([], a, meta);
+    assert.equal(first.isNew, true);
+    const existing = [first.snapshot];
+    const frozen = JSON.stringify(existing);
+    const again = snapshotForWrite(existing, sameButReordered, { takenAt: '2026-10-02T00:00:00.000Z', source: 'manual' });
+    assert.equal(again.isNew, false);
+    assert.equal(again.snapshot, first.snapshot);
+    const changed = snapshotForWrite(existing, { ...a, perUsd: { ...a.perUsd, EGP: 51 } }, meta);
+    assert.equal(changed.isNew, true);
+    assert.notEqual(changed.snapshot.id, first.snapshot.id);
+    assert.equal(JSON.stringify(existing), frozen, 'the existing list is never touched');
+    assert.equal(snapshotById([...existing, changed.snapshot], changed.snapshot.id), changed.snapshot);
+    assert.equal(snapshotById(existing, 'rs-missing'), undefined);
+    assert.ok(sameTable(a, sameButReordered) && !sameTable(a, changed.snapshot));
   });
 });
