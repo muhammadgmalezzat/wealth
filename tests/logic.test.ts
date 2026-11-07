@@ -15,6 +15,12 @@ import * as recUi from '@/components/recurring/recurringUi';
 import * as settingsUi from '@/components/settings/settingsUi';
 import * as assetsUi from '@/components/assets/assetsUi';
 import * as txUi from '@/components/transactions/transactionUi';
+import { exampleSeedV7, localSeedV7, ORACLE_NOW, richV7 } from './legacy/fixtures.v7';
+import { oracleReport } from './legacy/oracle.v7';
+import * as legacySel from '@/store/legacy/selectors.v7';
+import * as legacyPlan from '@/store/legacy/planning.v7';
+import * as legacyAnalytics from '@/store/legacy/analytics.v7';
+import * as planning from '@/store/planning';
 import { GOLD_PRICE_24K } from '@/constants/market';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from '@/store/defaultCategories';
 import { FinanceValidationError } from '@/store/errors';
@@ -53,7 +59,6 @@ import {
   type FinanceStateV1,
 } from '@/store/migrations';
 import * as nba from '@/store/nextActions';
-import * as planning from '@/store/planning';
 import * as reviewLogic from '@/store/review';
 import * as analyticsUi from '@/components/analytics/analyticsUi';
 import * as sankeyLayout from '@/components/analytics/sankeyLayout';
@@ -5090,5 +5095,97 @@ describe('hydration fails closed', () => {
     guard.reset();
     await wrapped.setItem('d', '4');
     assert.deepEqual(calls, ['set:a', 'set:d']);
+  });
+});
+
+// --- Phase B test oracle ---------------------------------------------------------
+// The oracle is the FROZEN v7 code run on v7 states (tests/legacy). These tests prove (1) the frozen
+// copy is faithful to the live v7 code while that code is still unchanged, and (2) the oracle's
+// own numbers are right, by hand.
+
+describe('v7 oracle: the frozen copy is faithful', () => {
+  const fixtures: [string, ReturnType<typeof richV7>][] = [['rich', richV7()], ['example seed', exampleSeedV7()]];
+  const local = localSeedV7();
+  if (local) fixtures.push(['local seed', local]);
+
+  for (const [name, state] of fixtures) {
+    it(`frozen selectors, planning and analytics equal the live ones on the ${name} fixture`, () => {
+      const live = state as unknown as FinanceState;
+      for (const a of state.accounts) assert.equal(legacySel.accountBalance(state, a.id), sel.accountBalance(live, a.id));
+      assert.deepEqual(legacySel.liquidByCurrency(state), sel.liquidByCurrency(live));
+      assert.equal(legacySel.liquidTotalEGP(state), sel.liquidTotalEGP(live));
+      assert.equal(legacySel.holdingsTotalEGP(state), sel.holdingsTotalEGP(live));
+      assert.equal(legacySel.liabilitiesTotalEGP(state), sel.liabilitiesTotalEGP(live));
+      assert.equal(legacySel.netWorthEGP(state), sel.netWorthEGP(live));
+      assert.deepEqual(legacySel.netWorthByLocation(state), sel.netWorthByLocation(live));
+      assert.deepEqual(legacySel.unassignedByCurrency(state), sel.unassignedByCurrency(live));
+      for (const month of ['2026-08', '2026-09', '2026-10']) {
+        assert.deepEqual(legacySel.monthSummary(state, month), sel.monthSummary(live, month));
+        assert.deepEqual(legacySel.monthFlows(state, month), sel.monthFlows(live, month));
+        assert.deepEqual(legacyPlan.planProgress(state, month), planning.planProgress(live, month));
+      }
+      for (const f of state.funds) {
+        assert.equal(legacySel.fundCurrent(state, f.id), sel.fundCurrent(live, f.id));
+        assert.equal(legacySel.fundProgress(state, f.id), sel.fundProgress(live, f.id));
+      }
+      const query = { period: legacyAnalytics.resolvePeriod(state, 'sinceStart', ORACLE_NOW), currency: 'SAR' as const, includeOneTime: true };
+      assert.deepEqual(legacyAnalytics.periodTotals(state, query), analytics.periodTotals(live, query));
+      assert.deepEqual(legacyAnalytics.runway(state, 'EGP', ORACLE_NOW), analytics.runway(live, 'EGP', ORACLE_NOW));
+    });
+  }
+});
+
+describe('v7 oracle: report on the rich fixture (hand-checked numbers)', () => {
+  const report = oracleReport(richV7(), ORACLE_NOW);
+
+  it('balances and liquid money', () => {
+    // a-egp: 60,000 + 10,000 − 1,500 − 4,000 + 12,400 (fx in) − 31,000 (gold) = 45,900
+    assert.equal(report.accounts['a-egp'].balance, 45900);
+    // a-sar-eg: 5,000 − 120 − 90 − 50 − 1,000 (fx out) + 500 (transfer in) = 4,240
+    assert.equal(report.accounts['a-sar-eg'].balance, 4240);
+    // a-sar-sa: 3,000 + 3,000 − 700 − 200 − 500 = 4,600
+    assert.equal(report.accounts['a-sar-sa'].balance, 4600);
+    assert.equal(report.accounts['a-usd'].balance, 270);
+    assert.deepEqual(report.liquidByCurrency, { EGP: 46000, SAR: 8840, USD: 270 });
+    assert.equal(report.totals.liquidEGP, 46000 + 8840 * 12.5 + 270 * 50);
+  });
+
+  it('net worth and its split by location', () => {
+    assert.equal(report.totals.holdingsEGP, 52500 + 30000 + 18000 + 15000);
+    assert.equal(report.totals.liabilitiesEGP, 900 * 50);
+    assert.equal(report.totals.netWorthEGP, 240500);
+    assert.equal(report.totals.EG, 150000);
+    assert.equal(report.totals.SA, 90500);
+  });
+
+  it('historical amounts follow each record\'s own rates', () => {
+    // 700 SAR at 12 EGP = 8,400 EGP; SAR → USD at the snapshot's 48.
+    assert.equal(report.transactions['t-rent-sep'].EGP, 8400);
+    assert.equal(report.transactions['t-rent-sep'].USD, 8400 / 48);
+    assert.equal(report.transactions['t-rent-sep'].SAR, 700);
+    // A typed rate of 12.2 is used for the source leg: 90 SAR = 1,098 EGP.
+    assert.equal(report.transactions['t-custom'].EGP, 1098);
+    // No snapshot: the target leg falls back to today's rates (50 EGP/USD).
+    assert.equal(report.transactions['t-old-sar'].USD, (120 * 12.57) / 50);
+  });
+
+  it('fund totals convert each currency at today\'s rate', () => {
+    // f-emg (EGP): 8,000 + 3,000 (currency-less) + 500 USD × 50 = 36,000.
+    assert.equal(report.funds['f-emg'].allocated, 36000);
+    assert.deepEqual(report.funds['f-emg'].cash, { EGP: 11000, SAR: 0, USD: 500 });
+    // f-trip (SAR): 1,500 − 200 + 2,000 EGP ÷ 12.5 = 1,460.
+    assert.equal(report.funds['f-trip'].allocated, 1460);
+    // f-gold links h-gold-1 (10 g of 21k at 5,250 = 52,500 EGP).
+    assert.equal(report.funds['f-gold'].linked, 52500);
+  });
+
+  it('plan spending is in the plan currency, as recorded', () => {
+    // October (SAR plan): SAR spending is unchanged (200, and 90 even with a typed rate); 1,500 EGP is
+    // 1,500 × 1 ÷ the snapshot's 12.5 = 120 SAR.
+    assert.equal(report.plans['2026-10'].lines['cat-essentials-groceries'], 200);
+    assert.equal(report.plans['2026-10'].lines['cat-essentials-transport'], 1500 / 12.5);
+    assert.equal(report.plans['2026-10'].lines['cat-lifestyle-dining'], 90);
+    // September (EGP plan): rent 700 SAR at 12 = 8,400.
+    assert.equal(report.plans['2026-09'].lines['cat-essentials-rent'], 8400);
   });
 });

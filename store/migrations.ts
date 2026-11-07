@@ -437,8 +437,8 @@ export function migrateV6toV7(persisted: unknown, ctx: MigrationContext): Financ
   return { ...state, netWorthSnapshots };
 }
 
-// Entry point used by zustand persist and backup restore: upgrades any older payload step by step.
-export function migratePersistedState(
+// The frozen part of the chain: any payload up to version 7 (what the v7 app understood).
+export function migrateToV7(
   persisted: unknown,
   version: number,
   ctx: MigrationContext
@@ -453,4 +453,13 @@ export function migratePersistedState(
   if (version < 6) state = migrateV5toV6(state, ctx);
   if (version < 7) state = migrateV6toV7(state, ctx);
   return { state: state as FinanceState, clampedBy };
+}
+
+// Entry point used by zustand persist and backup restore: upgrades any older payload step by step.
+export function migratePersistedState(
+  persisted: unknown,
+  version: number,
+  ctx: MigrationContext
+): MigrationResult {
+  return migrateToV7(persisted, version, ctx);
 }

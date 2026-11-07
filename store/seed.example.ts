@@ -11,7 +11,7 @@ const OPENING_DATE = '2026-08-01';
 
 // Written in the v3 shape and run through the migration chain (updatedAt = createdAt, empty
 // tombstone log, current plan format). The device id stays empty here and is created on first launch.
-const SEED_V3: FinanceStateV3 = {
+export const SEED_V3: FinanceStateV3 = {
   accounts: [
     {
       id: 'acct-sample-egp',
