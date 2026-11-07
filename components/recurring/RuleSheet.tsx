@@ -35,6 +35,11 @@ interface RuleSheetProps {
   onClose: () => void;
 }
 
+// A transfer between accounts of two currencies is saved as an exchange rule (confirmed every time, with the
+// amount that arrives): the form has one "تحويل" tab for both.
+type FormKind = 'income' | 'expense' | 'transfer';
+const formKind = (kind: RecurringKind): FormKind => (kind === 'exchange' ? 'transfer' : kind);
+
 // Add / edit a recurring income, expense or transfer. Order: kind · amount (+ "المبلغ بيتغير") ·
 // name · category + account (or from / to) · frequency (+ interval, day of month) · start date ·
 // mode; "تفاصيل أكتر": end date, note (open when the edited rule uses them) · delete.
@@ -44,7 +49,7 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
   const initial = rule ?? prefill ?? {};
   const today = toDateKey(new Date());
 
-  const [kind, setKind] = useState<RecurringKind>(initial.kind ?? 'expense');
+  const [kind, setKind] = useState<FormKind>(formKind(initial.kind ?? 'expense'));
   const [name, setName] = useState(initial.name ?? '');
   const [amountText, setAmountText] = useState(initial.amount ? String(initial.amount) : '');
   const [accountId, setAccountId] = useState(initial.accountId ?? accounts[0]?.id ?? '');
@@ -65,6 +70,7 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
   const account = accounts.find((a) => a.id === accountId);
   const toAccount = accounts.find((a) => a.id === toAccountId);
   const crossCurrency = kind === 'transfer' && !!account && !!toAccount && account.currency !== toAccount.currency;
+  const savedKind: RecurringKind = kind === 'transfer' ? (crossCurrency ? 'exchange' : 'transfer') : kind;
   const categories = kind === 'transfer' ? [] : pickerCategories(state.categories, kind, [rule?.categoryId]);
   const interval = parseAmount(intervalText) ?? NaN;
   const dayOfMonth = parseAmount(dayText) ?? NaN;
@@ -79,20 +85,23 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
       return null;
     }
     return {
-      name: name.trim() || (kind === 'transfer' ? 'تحويل' : (categories.find((c) => c.id === categoryId)?.name ?? '')),
-      kind,
+      name: name.trim() || (kind === 'transfer' ? (crossCurrency ? 'تحويل عملة' : 'تحويل') : (categories.find((c) => c.id === categoryId)?.name ?? '')),
+      kind: savedKind,
       amount: parseAmount(amountText) ?? NaN,
       currency: account.currency,
       accountId,
-      ...(kind === 'transfer'
-        ? { toAccountId, ...(crossCurrency ? { toAmount: parseAmount(toAmountText) ?? NaN } : {}) }
-        : { categoryId }),
+      ...(savedKind === 'exchange'
+        ? { toAccountId, toAmount: parseAmount(toAmountText) ?? NaN }
+        : kind === 'transfer'
+          ? { toAccountId }
+          : { categoryId }),
       frequency,
       interval,
       ...(frequency !== 'weekly' ? { dayOfMonth } : {}),
       startDate,
       ...(endDate ? { endDate } : {}),
-      mode,
+      // An exchange is always confirmed: an executed rate nobody entered is never recorded.
+      mode: savedKind === 'exchange' ? 'confirm' : mode,
       variableAmount,
       active: rule?.active ?? true,
       ...(note.trim() ? { note: note.trim() } : {}),
@@ -131,7 +140,7 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
 
   return (
     <FormSheet visible title={rule ? 'تعديل المتكرر' : 'معاملة متكررة'} onCancel={onClose} onSave={handleSave}>
-      <Segment<RecurringKind>
+      <Segment<FormKind>
         options={[
           { label: 'دخل', value: 'income' },
           { label: 'مصروف', value: 'expense' },
@@ -171,7 +180,9 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
           <AccountPicker label="إلى" accounts={accounts} selectedId={toAccountId} disabledId={accountId} onSelect={setToAccountId} />
           {/* Required when the currencies differ, so it stays in the main flow. */}
           {crossCurrency && (
-            <FormField label={`المبلغ المستلم (${currencySymbol(toAccount.currency)})`}>
+            <FormField
+              label={`المبلغ المستلم كل مرة (${currencySymbol(toAccount.currency)})`}
+              helper="تحويل العملة بيستناك تأكده كل مرة، وبتكتب فيه اللي وصلك فعلاً.">
               <FormInput value={toAmountText} onChangeText={setToAmountText} placeholder="0" keyboardType="decimal-pad" />
             </FormField>
           )}
@@ -213,15 +224,21 @@ export function RuleSheet({ rule, prefill, linkTransactionId, onClose }: RuleShe
         <FutureDateField value={startDate} onChange={setStartDate} />
       </FormField>
 
-      <FormField label="طريقة التسجيل" helper={mode === 'auto' ? 'بيتسجل لوحده في ميعاده.' : 'بيستناك تأكده من المستحقات.'}>
-        <Segment<RecurringRule['mode']>
-          options={[
-            { label: 'تلقائي', value: 'auto' },
-            { label: 'بتأكيد', value: 'confirm' },
-          ]}
-          value={mode}
-          onChange={setMode}
-        />
+      <FormField
+        label="طريقة التسجيل"
+        helper={savedKind === 'exchange' ? 'بيستناك تأكده من المستحقات.' : mode === 'auto' ? 'بيتسجل لوحده في ميعاده.' : 'بيستناك تأكده من المستحقات.'}>
+        {savedKind === 'exchange' ? (
+          <Segment<RecurringRule['mode']> options={[{ label: 'بتأكيد', value: 'confirm' }]} value="confirm" onChange={() => {}} />
+        ) : (
+          <Segment<RecurringRule['mode']>
+            options={[
+              { label: 'تلقائي', value: 'auto' },
+              { label: 'بتأكيد', value: 'confirm' },
+            ]}
+            value={mode}
+            onChange={setMode}
+          />
+        )}
       </FormField>
 
       <MoreDetails initiallyOpen={ruleDetailsOpen(rule)}>

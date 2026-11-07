@@ -108,7 +108,8 @@ export default function RecurringScreen() {
 
           {/* ── Rules by kind ── */}
           {KINDS.map((kind) => {
-            const rules = state.recurringRules.filter((r) => r.kind === kind);
+            // Exchanges are listed with the transfers.
+            const rules = state.recurringRules.filter((r) => r.kind === kind || (kind === 'transfer' && r.kind === 'exchange'));
             if (rules.length === 0) return null;
             return (
               <View key={kind}>
@@ -117,7 +118,7 @@ export default function RecurringScreen() {
                   {rules.map((rule) => {
                     const st = ruleState(rule);
                     const accounts =
-                      kind === 'transfer'
+                      rule.kind === 'transfer' || rule.kind === 'exchange'
                         ? `من ${accountName(rule.accountId)} إلى ${accountName(rule.toAccountId)}`
                         : accountName(rule.accountId);
                     const next = st === 'active' ? `الجاية: ${formatDateAr(rule.nextDate, { year: false })}` : null;

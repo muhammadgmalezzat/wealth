@@ -1,4 +1,4 @@
-import type { TransactionFilter } from '@/store/selectors';
+import { matchesFilter, type TransactionFilter } from '@/store/selectors';
 import type { Category, Transaction } from '@/store/types';
 
 // Pure UI helpers for the Transactions screen and sheet (no React Native; unit-tested).
@@ -25,7 +25,7 @@ export function emptyFilterMessage(filter: TransactionFilter): string {
 
 // UI-only filter over a month's transactions; "ذهب" = asset_purchase.
 export function filterTransactions(transactions: Transaction[], filter: TransactionFilter): Transaction[] {
-  return filter === 'all' ? transactions : transactions.filter((tx) => tx.type === filter);
+  return filter === 'all' ? transactions : transactions.filter((tx) => matchesFilter(tx, filter));
 }
 
 export interface CategoryChips {

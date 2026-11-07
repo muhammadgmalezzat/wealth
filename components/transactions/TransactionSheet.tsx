@@ -19,21 +19,27 @@ import { DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
 import type { CountryCode, GoldKarat, Transaction } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { convertCurrency } from '@/utils/currency';
+import { roundIn } from '@/utils/money';
 import { monthOf, toDateKey } from '@/utils/dates';
 import { confirmAction, showMessage } from '@/utils/dialogs';
-import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
 import { AccountPicker } from './AccountPicker';
+import { ExchangeFields } from './ExchangeFields';
+import { FeeFields, type FeeDraft } from './FeeFields';
 import { CategoryPicker } from './CategoryPicker';
 import { GoldFields, type KaratOption } from './GoldFields';
 import { MoreDetails } from './MoreDetails';
 
-type TxType = Transaction['type'];
+// The sheet's types: a transfer between accounts of two currencies is saved as an exchange, so the form has
+// one "تحويل" tab for both.
+type TxType = Exclude<Transaction['type'], 'exchange'>;
 type FlowType = 'income' | 'expense';
 
-const round2 = (n: number) => Math.round(n * 100) / 100;
+const formType = (type: Transaction['type']): TxType => (type === 'exchange' ? 'transfer' : type);
+// What the user typed in the amount box: a transfer's amount, an exchange's sent amount.
+const typedAmount = (tx: Transaction): number => (tx.type === 'exchange' ? tx.sentAmount : tx.amount);
 
 interface TransactionSheetProps {
   // Omit to add a new transaction.
@@ -43,7 +49,7 @@ interface TransactionSheetProps {
   onClose: () => void;
 }
 
-// Add / edit sheet for income, expense, transfer and gold-purchase transactions. A gold
+// Add / edit sheet for income, expense, transfer (and exchange between currencies) and gold-purchase transactions. A gold
 // purchase stays a gold purchase when edited (it owns a holding). Mount it only while open:
 // its form state is initialised from `transaction` (or the remembered defaults) on mount.
 //
@@ -63,7 +69,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   const involvedIds = new Set(
     !transaction
       ? []
-      : transaction.type === 'transfer'
+      : transaction.type === 'transfer' || transaction.type === 'exchange'
         ? [transaction.fromAccountId, transaction.toAccountId]
         : [transaction.accountId]
   );
@@ -91,19 +97,26 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
         ? { accountId: transaction.accountId, categoryId: '' }
         : flowDefaults('expense');
   const initialTransfer =
-    transaction?.type === 'transfer'
+    transaction?.type === 'transfer' || transaction?.type === 'exchange'
       ? { from: transaction.fromAccountId, to: transaction.toAccountId }
       : transferDefaults();
 
-  const [type, setType] = useState<TxType>(transaction?.type ?? initialType ?? 'expense');
-  const [amountText, setAmountText] = useState(transaction ? String(transaction.amount) : '');
+  const [type, setType] = useState<TxType>(formType(transaction?.type ?? initialType ?? 'expense'));
+  const [amountText, setAmountText] = useState(transaction ? String(typedAmount(transaction)) : '');
   const [accountId, setAccountId] = useState(initialFlow.accountId);
   const [categoryId, setCategoryId] = useState(initialFlow.categoryId);
   const [fromAccountId, setFromAccountId] = useState(initialTransfer.from);
   const [toAccountId, setToAccountId] = useState(initialTransfer.to);
-  // null = follow the converted amount automatically; a string once the user edits it.
-  const [toAmountText, setToAmountText] = useState<string | null>(
-    transaction?.type === 'transfer' ? String(transaction.toAmount) : null
+  // An exchange's received amount: typed by the user, never filled in from a rate.
+  const [receivedText, setReceivedText] = useState(transaction?.type === 'exchange' ? String(transaction.receivedAmount) : '');
+  const [fees, setFees] = useState<FeeDraft[]>(() =>
+    transaction?.type === 'transfer' || transaction?.type === 'exchange'
+      ? transaction.fees.map((fee, i) => ({
+          key: i + 1,
+          amountText: String(fee.amount),
+          side: fee.accountId === transaction.fromAccountId ? ('from' as const) : ('to' as const),
+        }))
+      : []
   );
   const [date, setDate] = useState(transaction?.date ?? toDateKey(new Date()));
   const [note, setNote] = useState(transaction?.note ?? '');
@@ -134,11 +147,11 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   const impactCategory = state.categories.find((c) => c.id === categoryId)?.name;
   const impactCurrency = planFor(state, monthOf(date))?.currency ?? 'EGP';
   const rates = state.settings.rates;
-  const convertedToAmount =
-    crossCurrency && amount !== null
-      ? round2(convertCurrency(amount, fromAccount.currency, toAccount.currency, rates))
-      : null;
-  const toAmountValue = toAmountText ?? (convertedToAmount !== null ? String(convertedToAmount) : '');
+  // Market values are suggestions only (D3): shown beside the received amount, never saved by themselves.
+  const marketRate = crossCurrency ? convertCurrency(1, fromAccount.currency, toAccount.currency, rates) : 0;
+  const suggestedReceived =
+    crossCurrency && amount !== null ? roundIn(convertCurrency(amount, fromAccount.currency, toAccount.currency, rates), toAccount.currency) : null;
+  const receivedValue = parseAmount(receivedText);
 
   const changeType = (next: TxType) => {
     if (next === type) return;
@@ -182,20 +195,29 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
         showMessage('تنبيه', 'اختر الحساب المحوَّل منه والمحوَّل إليه');
         return;
       }
-      const toAmount = crossCurrency ? (parseAmount(toAmountValue) ?? NaN) : value;
-      const fields = { fromAccountId, toAccountId, amount: value, toAmount, date, ...noteField };
-      const saved = runAction('تعذّر الحفظ', () =>
-        transaction
-          ? state.updateTransaction({
-              ...fields,
-              ...occurrenceLink,
-              type: 'transfer',
-              id: transaction.id,
-              createdAt: transaction.createdAt,
-              rateSnapshotId: transaction.rateSnapshotId,
-            })
-          : state.addTransfer(fields)
-      );
+      // An empty fee row is just not a fee; anything typed in one goes to the store to validate.
+      const feeList = fees
+        .filter((fee) => fee.amountText.trim() !== '')
+        .map((fee) => ({
+          accountId: fee.side === 'from' ? fromAccountId : toAccountId,
+          amount: parseAmount(fee.amountText) ?? NaN,
+        }));
+      const common = { fromAccountId, toAccountId, fees: feeList, date, ...noteField };
+      const existing = transaction
+        ? { ...occurrenceLink, id: transaction.id, createdAt: transaction.createdAt, rateSnapshotId: transaction.rateSnapshotId }
+        : null;
+      const saved = runAction('تعذّر الحفظ', () => {
+        if (crossCurrency) {
+          // The received amount is required: no rate fills it in.
+          const exchange = { ...common, sentAmount: value, receivedAmount: receivedValue ?? NaN };
+          if (existing) state.updateTransaction({ ...exchange, ...existing, type: 'exchange' });
+          else state.addExchange(exchange);
+        } else {
+          const transfer = { ...common, amount: value };
+          if (existing) state.updateTransaction({ ...transfer, ...existing, type: 'transfer' });
+          else state.addTransfer(transfer);
+        }
+      });
       if (saved) onClose();
       return;
     }
@@ -279,15 +301,22 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
                 name: 'تحويل',
                 accountId: transaction.fromAccountId,
                 toAccountId: transaction.toAccountId,
-                toAmount: transaction.toAmount,
               }
-            : {
+            : transaction.type === 'exchange'
+              ? {
+                  kind: 'exchange' as const,
+                  name: 'تحويل عملة',
+                  accountId: transaction.fromAccountId,
+                  toAccountId: transaction.toAccountId,
+                  toAmount: transaction.receivedAmount,
+                }
+              : {
                 kind: transaction.type,
                 name: state.categories.find((c) => c.id === transaction.categoryId)?.name ?? '',
                 accountId: transaction.accountId,
                 categoryId: transaction.categoryId,
               }),
-          amount: transaction.amount,
+          amount: typedAmount(transaction),
           frequency: 'monthly',
           interval: 1,
           dayOfMonth: Number(transaction.date.slice(8, 10)),
@@ -428,12 +457,18 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
             }}
           />
           {crossCurrency && (
-            <FormField
-              label={`المبلغ المستلم (${currencySymbol(toAccount.currency)})`}
-              helper="محسوب بسعر الصرف الحالي، عدّله لو السعر الفعلي أو الرسوم مختلفة.">
-              <FormInput value={toAmountValue} onChangeText={setToAmountText} placeholder="0" keyboardType="decimal-pad" />
-            </FormField>
+            <ExchangeFields
+              fromCurrency={fromAccount.currency}
+              toCurrency={toAccount.currency}
+              sent={amount}
+              receivedText={receivedText}
+              onReceivedText={setReceivedText}
+              marketRate={marketRate}
+              suggestedReceived={suggestedReceived}
+              receivedValue={receivedValue}
+            />
           )}
+          <FeeFields fees={fees} onChange={setFees} from={fromAccount} to={toAccount} />
         </>
       ) : (
         <AccountPicker

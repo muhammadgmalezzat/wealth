@@ -171,7 +171,7 @@ function scan(state: State, period: Pick<Period, 'from' | 'to'>, currency: Displ
   const bucketFor = bucketLookup(state);
   const result: Rec[] = [];
   for (const tx of state.transactions) {
-    if (tx.type === 'transfer' || !inPeriod(tx.date, period)) continue;
+    if (tx.type === 'transfer' || tx.type === 'exchange' || !inPeriod(tx.date, period)) continue;
     const base = { id: tx.id, date: tx.date, month: monthOf(tx.date), amount: transactionAmountIn(state, tx, currency) };
     if (tx.type === 'asset_purchase') {
       result.push({ ...base, kind: 'gold', oneTime: false });
@@ -274,7 +274,7 @@ export function drillTransactions(state: State, query: AnalyticsQuery, filter: D
   const bucketFor = bucketLookup(state);
   const transactions = state.transactions
     .filter((tx) => {
-      if (tx.type === 'transfer' || tx.type !== filter.type || !inPeriod(tx.date, query.period)) return false;
+      if (tx.type === 'transfer' || tx.type === 'exchange' || tx.type !== filter.type || !inPeriod(tx.date, query.period)) return false;
       if (tx.type === 'asset_purchase') return true;
       if (filter.categoryIds && !filter.categoryIds.includes(tx.categoryId)) return false;
       if (filter.excludeCategoryIds?.includes(tx.categoryId)) return false;

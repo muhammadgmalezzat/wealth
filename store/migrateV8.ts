@@ -3,6 +3,7 @@ import { isKnownCurrency } from '@/constants/currencyRegistry';
 import { roundMoney } from '@/utils/money';
 import { makeSnapshot, snapshotId, tableFromEgpRates, type RateQuality, type RateSnapshot, type RateTable } from '@/utils/rates';
 
+import { CATEGORY_IDS } from './defaultCategories';
 import type { MigrationContext } from './migrations';
 import type { FinanceState } from './types';
 
@@ -102,7 +103,7 @@ function stepRates(s: Draft): Draft {
     if ('rateSnapshotId' in tx) return tx;
     const { rateToEGP, ratesSnapshot, ...rest } = tx;
     // The currency rateToEGP is about: the transaction's own, or the source account's for transfers.
-    const currency = tx.type === 'transfer' ? (currencyOf.get(tx.fromAccountId) ?? 'EGP') : tx.currency;
+    const currency = tx.type === 'transfer' || tx.type === 'exchange' ? (currencyOf.get(tx.fromAccountId) ?? 'EGP') : tx.currency;
     const { table, quality } = recordTable(ratesSnapshot, exchangeRates, { currency, rateToEGP });
     return { ...rest, rateSnapshotId: book.add(table, quality, tx.createdAt) };
   });
@@ -157,15 +158,26 @@ function stepRounding(s: Draft): Draft {
   return {
     ...s,
     accounts: s.accounts.map((a: Draft) => ({ ...a, openingBalance: money(a.openingBalance, a.currency) })),
-    transactions: s.transactions.map((tx: Draft) =>
-      tx.type === 'transfer'
-        ? {
-            ...tx,
-            amount: money(tx.amount, currencyOf.get(tx.fromAccountId) ?? ''),
-            toAmount: money(tx.toAmount, currencyOf.get(tx.toAccountId) ?? ''),
-          }
-        : { ...tx, amount: money(tx.amount, tx.currency) }
-    ),
+    // v7 shape (a transfer with toAmount) or the ledger shape of step 7 (transfer / exchange with fees).
+    transactions: s.transactions.map((tx: Draft) => {
+      const fees = (tx.fees ?? []).map((f: Draft) => ({ ...f, amount: money(f.amount, currencyOf.get(f.accountId) ?? '') }));
+      if (tx.type === 'exchange') {
+        return {
+          ...tx,
+          sentAmount: money(tx.sentAmount, currencyOf.get(tx.fromAccountId) ?? ''),
+          receivedAmount: money(tx.receivedAmount, currencyOf.get(tx.toAccountId) ?? ''),
+          fees,
+        };
+      }
+      if (tx.type === 'transfer') {
+        return {
+          ...tx,
+          amount: money(tx.amount, currencyOf.get(tx.fromAccountId) ?? ''),
+          ...('toAmount' in tx ? { toAmount: money(tx.toAmount, currencyOf.get(tx.toAccountId) ?? '') } : { fees }),
+        };
+      }
+      return { ...tx, amount: money(tx.amount, tx.currency) };
+    }),
     fundMovements: s.fundMovements.map((m: Draft) => ({ ...m, amount: money(m.amount, m.currency ?? fundCurrency.get(m.fundId) ?? '') })),
     funds: s.funds.map((f: Draft) => ({
       ...f,
@@ -246,6 +258,45 @@ function stepPreferences(s: Draft): Draft {
   };
 }
 
+// --- 7. the ledger: transfers and exchanges, fees ------------------------------------------------------
+
+// v7 had one `transfer` with `amount` out and `toAmount` in, whatever the currencies. Now a transfer moves
+// the same currency (arrives = amount) and an `exchange` has sent and received amounts. Nothing is invented:
+// an exchange's received amount IS the stored toAmount, so every account balance stays what it was. A v7
+// "same-currency" transfer whose two amounts differ (never offered by the v7 UI) can't be a plain transfer
+// without changing a balance, so it becomes an exchange record with the stored amounts too.
+function stepLedger(s: Draft): Draft {
+  const currencyOf = new Map<string, string>(s.accounts.map((a: Draft) => [a.id, a.currency]));
+  const transactions = s.transactions.map((tx: Draft) => {
+    if (tx.type !== 'transfer' || !('toAmount' in tx)) return tx;
+    const { toAmount, amount, ...rest } = tx;
+    const sameCurrency = currencyOf.get(tx.fromAccountId) === currencyOf.get(tx.toAccountId);
+    if (sameCurrency && toAmount === amount) return { ...rest, amount, fees: [] };
+    return { ...rest, type: 'exchange', sentAmount: amount, receivedAmount: toAmount, fees: [] };
+  });
+  // A recurring transfer between two currencies is an exchange rule: its toAmount is what arrives, and it is
+  // confirmed every time (an unknown executed rate is never recorded by itself).
+  const recurringRules = s.recurringRules.map((r: Draft) => {
+    if (r.kind !== 'transfer') return r;
+    if (currencyOf.get(r.accountId) !== currencyOf.get(r.toAccountId) && r.toAmount !== undefined) {
+      return { ...r, kind: 'exchange', mode: 'confirm' };
+    }
+    const { toAmount: _arrives, ...same } = r;
+    return same;
+  });
+  // The category fees are spending in. A category of the same name the user made already serves.
+  const hasFees = s.categories.some(
+    (c: Draft) => c.id === CATEGORY_IDS.fees || (c.kind === 'expense' && String(c.name).trim() === 'رسوم')
+  );
+  const categories = hasFees
+    ? s.categories
+    : [
+        ...s.categories,
+        { updatedAt: '2026-01-01T00:00:00.000Z', id: CATEGORY_IDS.fees, name: 'رسوم', kind: 'expense', bucket: 'essentials', isDefault: true },
+      ];
+  return { ...s, transactions, recurringRules, categories };
+}
+
 // --- the runner -----------------------------------------------------------------------------------------
 
 // In order; a step's position + 1 is its number in `settings.v8Step`. Only ever append.
@@ -256,6 +307,7 @@ export const V8_STEPS: { name: string; run: (state: Draft) => Draft }[] = [
   { name: 'rounding', run: stepRounding },
   { name: 'holdings', run: stepHoldings },
   { name: 'preferences', run: stepPreferences },
+  { name: 'ledger', run: stepLedger },
 ];
 
 export const LATEST_V8_STEP = V8_STEPS.length;

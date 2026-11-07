@@ -22,4 +22,5 @@ export const KIND_SECTION_TITLES: Record<RecurringRule['kind'], string> = {
   income: 'دخل',
   expense: 'مصروفات',
   transfer: 'تحويلات',
+  exchange: 'تحويلات عملة',
 };

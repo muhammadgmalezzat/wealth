@@ -94,6 +94,7 @@ interface FinanceActions {
 
   addTransaction: (input: ops.NewIncomeExpense) => void;
   addTransfer: (input: ops.NewTransfer) => void;
+  addExchange: (input: ops.NewExchange) => void;
   updateTransaction: (tx: ops.Editable<Transaction>) => void;
   deleteTransaction: (id: string) => void;
 
@@ -231,6 +232,7 @@ export const useFinanceStore = create<FinanceStore>()(
 
       addTransaction: (input) => set(ops.addTransaction(get(), input, ctx)),
       addTransfer: (input) => set(ops.addTransfer(get(), input, ctx)),
+      addExchange: (input) => set(ops.addExchange(get(), input, ctx)),
       updateTransaction: (tx) => set(ops.updateTransaction(get(), tx, ctx)),
       deleteTransaction: (id) => set(ops.deleteTransaction(get(), id, ctx)),
 

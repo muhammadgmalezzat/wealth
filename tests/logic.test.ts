@@ -140,6 +140,8 @@ const addAt = (state: FinanceState, input: ops.NewIncomeExpense, sar: number, ct
 const snapRate = (state: Pick<FinanceState, 'rateSnapshots'>, record: { rateSnapshotId: string }, currency: string): number =>
   convert(1, currency, 'EGP', snapshotById(state.rateSnapshots, record.rateSnapshotId)!);
 const NOW = new Date(2026, 9, 15, 12); // 15 Oct 2026, local time
+// The amount of a transaction that has one (income, expense, transfer, asset purchase); an exchange has sent / received.
+const amountOf = (t: Transaction | undefined): number | undefined => (t && 'amount' in t ? t.amount : undefined);
 const MIGRATION_CTX = { now: '2026-10-15T09:00:00.000Z', newId: () => 'migrated-device' };
 // updatedAt for hand-built fixtures.
 const T0 = '2026-01-01T00:00:00.000Z';
@@ -504,7 +506,7 @@ describe('monthSummary', () => {
     add({ type: 'expense', amount: 80, currency: 'SAR', accountId: 'sar', categoryId: 'cat-giving-sadaqah', date: '2026-10-04' });
     // Other month and transfers are excluded.
     add({ type: 'expense', amount: 999, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-09-30' });
-    s = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100, date: '2026-10-05' }, ctx));
+    s = apply(s, ops.addExchange(s, { fromAccountId: 'sar', toAccountId: 'egp', sentAmount: 100, receivedAmount: 1250, date: '2026-10-05' }, ctx));
 
     // Later rate changes must not rewrite history.
     s = apply(s, ops.updateRates(s, { ...RATES_V7, SAR_EGP: 20 }));
@@ -535,38 +537,160 @@ describe('monthSummary', () => {
 
 // --- Transfers & validation -------------------------------------------------
 
-describe('transfers', () => {
+describe('transfers (same currency) and exchanges (two currencies)', () => {
   const twoAccounts = (): FinanceState => ({
     ...emptyState(),
-    accounts: [account('sar', 'SAR', 1000), account('egp', 'EGP', 0)],
+    accounts: [account('sar', 'SAR', 1000), account('egp', 'EGP', 0), account('sar2', 'SAR', 0)],
+  });
+  const exchange = (input: Partial<ops.NewExchange> = {}): ops.NewExchange => ({
+    fromAccountId: 'sar',
+    toAccountId: 'egp',
+    sentAmount: 400,
+    receivedAmount: 4900,
+    date: '2026-10-05',
+    ...input,
+  });
+  const transfer = (input: Partial<ops.NewTransfer> = {}): ops.NewTransfer => ({
+    fromAccountId: 'sar',
+    toAccountId: 'sar2',
+    amount: 300,
+    date: '2026-10-05',
+    ...input,
   });
 
-  it('moves SAR out and EGP in, converting at current rates by default', () => {
+  it('C1: an exchange moves only what was sent and what was received', () => {
     let s = twoAccounts();
-    const before = liquidTotal(s);
-    s = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 400, date: '2026-10-05' }, makeCtx()));
-    approx(accountBalance(s, 'sar'), 600);
-    approx(accountBalance(s, 'egp'), 5000);
-    approx(liquidTotal(s), before);
+    s = apply(s, ops.addExchange(s, exchange(), makeCtx()));
+    assert.equal(accountBalance(s, 'sar'), 600);
+    assert.equal(accountBalance(s, 'egp'), 4900);
+    assert.equal(accountBalance(s, 'sar2'), 0);
+    const [tx] = s.transactions;
+    assert.equal(tx.type, 'exchange');
+    // The rate is implied by the two amounts and not stored; nothing is computed from today's rates.
+    assert.deepEqual(tx.type === 'exchange' && [tx.sentAmount, tx.receivedAmount, tx.fees], [400, 4900, []]);
+    assert.equal(s.settings.lastUsed?.exchange?.fromAccountId, 'sar');
+  });
+
+  it('C2: a same-currency transfer has no FX gain or loss, whatever the rates are', () => {
+    const s0 = twoAccounts();
+    const s = apply(s0, ops.addTransfer(s0, transfer(), makeCtx()));
+    assert.equal(accountBalance(s, 'sar'), 700);
+    assert.equal(accountBalance(s, 'sar2'), 300);
+    for (const sar of [10, 12.5, 40]) {
+      const rated = withSar(s, sar);
+      assert.equal(sel.liquidTotal(rated, 'SAR'), 1000);
+      assert.equal(sel.liquidTotal(rated, 'EGP'), sel.liquidTotal(withSar(s0, sar), 'EGP'));
+    }
     const [tx] = s.transactions;
     assert.equal(tx.type, 'transfer');
-    approx(snapRate(s, tx, 'SAR'), 12.5);
+    assert.deepEqual(tx.type === 'transfer' && [tx.amount, tx.fees], [300, []]);
   });
 
-  it('records the actual received amount when given (e.g. after fees)', () => {
-    let s = twoAccounts();
-    s = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 400, toAmount: 4900, date: '2026-10-05' }, makeCtx()));
-    approx(accountBalance(s, 'egp'), 4900);
-  });
-
-  it('rejects invalid transfers', () => {
+  it('C3: a transfer must keep the currency, an exchange must change it, and the received amount is required', () => {
     const s = twoAccounts();
+    assert.throws(() => ops.addTransfer(s, transfer({ toAccountId: 'egp' }), makeCtx()), { code: 'TRANSFER_CURRENCY_MISMATCH' });
+    assert.throws(() => ops.addExchange(s, exchange({ toAccountId: 'sar2' }), makeCtx()), { code: 'EXCHANGE_SAME_CURRENCY' });
+    // No default: leaving it out (or zero) is an error, never today's rate.
+    const { receivedAmount: _r, ...noReceived } = exchange();
+    assert.throws(() => ops.addExchange(s, noReceived as ops.NewExchange, makeCtx()), { code: 'NOT_A_NUMBER' });
+    assert.throws(() => ops.addExchange(s, exchange({ receivedAmount: 0 }), makeCtx()), { code: 'NOT_POSITIVE' });
+    assert.throws(() => ops.addExchange(s, exchange({ sentAmount: 0 }), makeCtx()), { code: 'NOT_POSITIVE' });
+    assert.throws(() => ops.addTransfer(s, transfer({ toAccountId: 'sar' }), makeCtx()), { code: 'SAME_ACCOUNT_TRANSFER' });
+    assert.throws(() => ops.addTransfer(s, transfer({ toAccountId: 'missing' }), makeCtx()), { code: 'NOT_FOUND' });
+    assert.throws(() => ops.addTransfer(s, transfer({ amount: 0 }), makeCtx()), { code: 'NOT_POSITIVE' });
+  });
+
+  it('C4: a fee leaves the account it names, in that account’s currency', () => {
+    const s0 = twoAccounts();
+    // Source-side: 1,005 leaves SAR (400 sent + 5 fee); destination-side: 30 EGP leaves what arrived.
+    const a = apply(s0, ops.addExchange(s0, exchange({ fees: [{ accountId: 'sar', amount: 5 }] }), makeCtx()));
+    assert.equal(accountBalance(a, 'sar'), 595);
+    assert.equal(accountBalance(a, 'egp'), 4900);
+    const b = apply(s0, ops.addExchange(s0, exchange({ fees: [{ accountId: 'egp', amount: 30 }] }), makeCtx()));
+    assert.equal(accountBalance(b, 'sar'), 600);
+    assert.equal(accountBalance(b, 'egp'), 4870);
+    const c = apply(s0, ops.addTransfer(s0, transfer({ fees: [{ accountId: 'sar2', amount: 2 }] }), makeCtx()));
+    assert.equal(accountBalance(c, 'sar'), 700);
+    assert.equal(accountBalance(c, 'sar2'), 298);
+    // A fee belongs to one of the two accounts of the move.
+    assert.throws(() => ops.addTransfer(s0, transfer({ fees: [{ accountId: 'egp', amount: 1 }] }), makeCtx()), { code: 'FEE_ACCOUNT_INVALID' });
+    assert.throws(() => ops.addExchange(s0, exchange({ fees: [{ accountId: 'sar2', amount: 1 }] }), makeCtx()), { code: 'FEE_ACCOUNT_INVALID' });
+    assert.throws(() => ops.addExchange(s0, exchange({ fees: [{ accountId: 'sar', amount: 0 }] }), makeCtx()), { code: 'NOT_POSITIVE', details: { field: 'fee' } });
+    assert.throws(() => ops.addExchange(s0, exchange({ fees: [{ accountId: 'sar', amount: 1, categoryId: 'cat-income-salary' }] }), makeCtx()), { code: 'CATEGORY_KIND_MISMATCH' });
+  });
+
+  it('C5: a thousand transfers of 10.01 with a 0.01 fee stay exact', () => {
     const ctx = makeCtx();
-    const transfer = (input: Partial<ops.NewTransfer>) =>
-      ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100, date: '2026-10-05', ...input }, ctx);
-    assert.throws(() => transfer({ amount: 0 }), ops.FinanceValidationError);
-    assert.throws(() => transfer({ toAccountId: 'missing' }), ops.FinanceValidationError);
-    assert.throws(() => transfer({ toAccountId: 'sar' }), ops.FinanceValidationError);
+    let s: FinanceState = { ...emptyState(), accounts: [account('a', 'SAR', 20000), account('b', 'SAR', 0)] };
+    for (let i = 0; i < 1000; i++) {
+      s = apply(s, ops.addTransfer(s, { fromAccountId: 'a', toAccountId: 'b', amount: 10.01, fees: [{ accountId: 'a', amount: 0.01 }], date: '2026-10-01' }, ctx));
+    }
+    assert.equal(accountBalance(s, 'a'), 9980);
+    assert.equal(accountBalance(s, 'b'), 10010);
+  });
+
+  it('each leg is rounded in its own currency, fees in theirs', () => {
+    const s = twoAccounts();
+    const t = apply(s, ops.addExchange(s, exchange({ sentAmount: 100.004, receivedAmount: 1250.555, fees: [{ accountId: 'egp', amount: 1.005 }] }), makeCtx()));
+    const tx = t.transactions[0];
+    assert.deepEqual(tx.type === 'exchange' && [tx.sentAmount, tx.receivedAmount, tx.fees[0].amount], [100, 1250.56, 1.01]);
+  });
+
+  it('C8: a failing operation changes nothing (and cannot leave half an exchange)', () => {
+    const s = twoAccounts();
+    const frozen = JSON.stringify(s);
+    for (const bad of [exchange({ fees: [{ accountId: 'sar', amount: 5 }, { accountId: 'nope', amount: 1 }] }), exchange({ toAccountId: 'sar2' })]) {
+      assert.throws(() => ops.addExchange(s, bad, makeCtx()), ops.FinanceValidationError);
+    }
+    assert.equal(JSON.stringify(s), frozen);
+  });
+
+  it('C6: editing an exchange reverses both legs and its fees, then applies the new values; deleting restores everything', () => {
+    const s0 = twoAccounts();
+    const s1 = apply(s0, ops.addExchange(s0, exchange({ fees: [{ accountId: 'sar', amount: 5 }] }), makeCtx()));
+    const tx = s1.transactions[0];
+    assert.equal(tx.type, 'exchange');
+    if (tx.type !== 'exchange') return;
+    // New amounts, and the fee moved to the other account.
+    const s2 = apply(s1, ops.updateTransaction(s1, { ...tx, sentAmount: 500, receivedAmount: 6000, fees: [{ accountId: 'egp', amount: 20 }] }, makeCtx()));
+    assert.equal(accountBalance(s2, 'sar'), 500);
+    assert.equal(accountBalance(s2, 'egp'), 5980);
+    assert.equal(s2.transactions.length, 1);
+    // An exchange can't be edited into a same-currency one, and a failed edit changes nothing.
+    assert.throws(() => ops.updateTransaction(s2, { ...tx, toAccountId: 'sar2' }, makeCtx()), { code: 'EXCHANGE_SAME_CURRENCY' });
+    // Delete: one record goes, both legs and the fee with it, and the tombstone is logged once.
+    const s3 = apply(s2, ops.deleteTransaction(s2, tx.id, makeCtx()));
+    assert.equal(accountBalance(s3, 'sar'), 1000);
+    assert.equal(accountBalance(s3, 'egp'), 0);
+    assert.deepEqual(s3.transactions, []);
+    assert.deepEqual(s3.tombstones.map((x) => [x.entity, x.id]), [['transaction', tx.id]]);
+  });
+
+  it('a transfer can become an exchange (and back) when its accounts change, through updateTransaction', () => {
+    const s0 = twoAccounts();
+    const s1 = apply(s0, ops.addTransfer(s0, transfer(), makeCtx()));
+    const tx = s1.transactions[0];
+    const base = { id: tx.id, fromAccountId: 'sar', date: tx.date, createdAt: tx.createdAt, rateSnapshotId: tx.rateSnapshotId, fees: [] };
+    const asExchange = apply(s1, ops.updateTransaction(s1, { ...base, type: 'exchange', toAccountId: 'egp', sentAmount: 300, receivedAmount: 3700 }, makeCtx()));
+    assert.equal(asExchange.transactions[0].type, 'exchange');
+    assert.equal(accountBalance(asExchange, 'sar'), 700);
+    assert.equal(accountBalance(asExchange, 'sar2'), 0);
+    assert.equal(accountBalance(asExchange, 'egp'), 3700);
+    assert.ok(!('amount' in asExchange.transactions[0]));
+    assert.throws(() => ops.updateTransaction(s1, { ...base, type: 'transfer', toAccountId: 'egp', amount: 300 }, makeCtx()), { code: 'TRANSFER_CURRENCY_MISMATCH' });
+  });
+
+  it('an account with an exchange cannot be deleted or change currency', () => {
+    const s0 = twoAccounts();
+    const s1 = apply(s0, ops.addExchange(s0, exchange(), makeCtx()));
+    assert.throws(() => ops.deleteAccount(s1, 'egp', makeCtx()), { code: 'ACCOUNT_IN_USE' });
+    assert.throws(() => ops.updateAccount(s1, { ...s1.accounts[1], currency: 'USD' }, makeCtx()), { code: 'ACCOUNT_CURRENCY_LOCKED' });
+  });
+
+  it('the fees category exists and is found by id or by a user-made name', () => {
+    assert.equal(ops.feeCategoryId(emptyState().categories), 'cat-essentials-fees');
+    assert.equal(ops.feeCategoryId([{ id: 'mine', name: ' رسوم ', kind: 'expense' }]), 'mine');
+    assert.equal(ops.feeCategoryId([{ id: 'x', name: 'رسوم', kind: 'income' }]), undefined);
   });
 });
 
@@ -641,7 +765,7 @@ describe('set current balance', () => {
     let s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 1000), account('sar', 'SAR', 0)] };
     s = apply(s, ops.addTransaction(s, { type: 'income', amount: 500, currency: 'EGP', accountId: 'egp', categoryId: 'cat-income-salary', date: '2026-10-01' }, ctx));
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 200, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-10-02' }, ctx));
-    s = apply(s, ops.addTransfer(s, { fromAccountId: 'egp', toAccountId: 'sar', amount: 100, date: '2026-10-03' }, ctx));
+    s = apply(s, ops.addExchange(s, { fromAccountId: 'egp', toAccountId: 'sar', sentAmount: 100, receivedAmount: 8, date: '2026-10-03' }, ctx));
     approx(accountBalance(s, 'egp'), 1200);
 
     const egp = s.accounts[0];
@@ -736,7 +860,7 @@ describe('transaction lists', () => {
     add({ type: 'expense', amount: 300, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-10-01' });
     add({ type: 'expense', amount: 10, currency: 'SAR', accountId: 'sar', categoryId: 'cat-lifestyle-dining', date: '2026-10-03' }, 13);
     add({ type: 'expense', amount: 50, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-rent', date: '2026-09-30' });
-    s = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100, date: '2026-10-03' }, ctx));
+    s = apply(s, ops.addExchange(s, { fromAccountId: 'sar', toAccountId: 'egp', sentAmount: 100, receivedAmount: 1250, date: '2026-10-03' }, ctx));
     return s;
   };
 
@@ -762,14 +886,14 @@ describe('transaction lists', () => {
     approx(groups[0].net, -10 * 13); // the transfer is neutral
     approx(groups[1].net, 1000 * 12 - 300);
     // Within a day, the later-created transaction comes first.
-    assert.equal(groups[0].transactions[0].type, 'transfer');
+    assert.equal(groups[0].transactions[0].type, 'exchange');
   });
 
   it('remembers the last account and category per type', () => {
     assert.deepEqual(build().settings.lastUsed, {
       income: { accountId: 'sar', categoryId: 'cat-income-salary' },
       expense: { accountId: 'egp', categoryId: 'cat-essentials-rent' },
-      transfer: { fromAccountId: 'sar', toAccountId: 'egp' },
+      exchange: { fromAccountId: 'sar', toAccountId: 'egp' },
     });
   });
 });
@@ -799,7 +923,7 @@ describe('editing transactions', () => {
       ops.updateTransaction(s, { ...tx, amount: 150, accountId: 'sar2', rateSnapshotId: 'rs-tampered', createdAt: 'tampered' }, makeCtx())
     );
     const updated = after.transactions[0];
-    assert.equal(updated.amount, 150);
+    assert.equal(amountOf(updated), 150);
     approx(snapRate(after, updated, 'SAR'), 11);
     assert.equal(updated.rateSnapshotId, tx.rateSnapshotId);
     assert.equal(updated.createdAt, tx.createdAt);
@@ -824,11 +948,12 @@ describe('editing transactions', () => {
       s,
       ops.updateTransaction(s, {
         id: tx.id,
-        type: 'transfer',
+        type: 'exchange',
         fromAccountId: 'sar',
         toAccountId: 'egp',
-        amount: 100,
-        toAmount: 1400,
+        sentAmount: 100,
+        receivedAmount: 1400,
+        fees: [],
         date: tx.date,
         rateSnapshotId: tx.rateSnapshotId,
         createdAt: tx.createdAt,
@@ -1358,7 +1483,7 @@ function richState(): FinanceState {
     clock.advance();
   };
   step(ops.addTransaction(s, { type: 'expense', amount: 250, currency: 'SAR', accountId: 'sar', categoryId: 'cat-essentials-rent', date: '2026-10-02', note: 'إيجار ✓' }, clock.ctx));
-  step(ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100, date: '2026-10-03' }, clock.ctx));
+  step(ops.addExchange(s, { fromAccountId: 'sar', toAccountId: 'egp', sentAmount: 100, receivedAmount: 1250, date: '2026-10-03' }, clock.ctx));
   step(ops.buyGold(s, { accountId: 'egp', amount: 6000, date: '2026-10-04', holding: { name: 'سبيكة 1 جم', weightGrams: 1, karat: 24 } }, clock.ctx));
   step(ops.addFund(s, { name: 'Wedding', type: 'goal', targetAmount: 50000, currency: 'EGP', priority: 1, linkedHoldingIds: [s.holdings[0].id] }, clock.ctx));
   step(ops.allocateToFund(s, s.funds[0].id, 1000, 'first', clock.ctx));
@@ -1383,7 +1508,7 @@ describe('sync bookkeeping', () => {
 
     advance();
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 10, currency: 'EGP', accountId: s.accounts[0].id, categoryId: 'cat-essentials-rent', date: '2026-10-01' }, ctx));
-    const tx = s.transactions[0];
+    const tx = s.transactions[0] as Extract<Transaction, { type: 'income' | 'expense' }>;
     advance();
     s = apply(s, ops.updateTransaction(s, { ...tx, amount: 20, updatedAt: 'ignored' }, ctx));
     assert.equal(s.transactions[0].updatedAt, iso());
@@ -1791,7 +1916,7 @@ describe('plan currency conversion', () => {
 
   it('converts an EGP expense into the SAR plan with its own snapshot, not today’s rate', () => {
     const before = recordedAt13_5();
-    approx(snapRate(before, before.transactions.find((t) => t.amount === 270)!, 'SAR'), 13.5);
+    approx(snapRate(before, before.transactions.find((t) => amountOf(t) === 270)!, 'SAR'), 13.5);
     approx(spent(before, DINING), 20);
     approx(spent(withSarRate(before, 14), DINING), 20);
     approx(spent(withSarRate(before, 27), DINING), 20);
@@ -1832,7 +1957,7 @@ describe('plan currency conversion', () => {
   it('keeps the snapshot when a transaction is edited, and retakes it when its currency changes', () => {
     const s = withSarRate(recordedAt13_5(), 14);
     const ctx = makeCtx();
-    const tx = s.transactions.find((t) => t.amount === 40)!;
+    const tx = s.transactions.find((t) => amountOf(t) === 40)!;
     const edited = apply(s, ops.updateTransaction(s, { ...tx, amount: 45 } as Transaction, ctx)).transactions.find((t) => t.id === tx.id)!;
     assert.equal(edited.rateSnapshotId, tx.rateSnapshotId);
     approx(snapRate(s, edited, 'SAR'), 13.5);
@@ -2176,7 +2301,7 @@ describe('recurring processing', () => {
 
     s = apply(s, ops.confirmOccurrence(s, 'net', '2026-08-05', { amount: 1234, date: '2026-08-07' }, ctx));
     const tx = s.transactions[0];
-    assert.equal(tx.amount, 1234);
+    assert.equal(amountOf(tx), 1234);
     assert.equal(tx.date, '2026-08-07');
     assert.equal(tx.occurrenceDate, '2026-08-05');
     s = apply(s, ops.skipOccurrence(s, 'net', '2026-09-05', ctx));
@@ -3196,31 +3321,33 @@ describe('A1: fundStatus pending vs behind', () => {
   });
 });
 
-describe('A2: transfer edits re-snapshot the rate when the from-currency changes', () => {
+describe('A2: exchange and transfer edits re-snapshot the rate when the from-currency changes', () => {
   const S11 = snapshotOf(11);
   const setup = (): FinanceState => ({
     ...emptyState(),
     rateSnapshots: [S125, S11],
     accounts: [account('sar', 'SAR', 10000, 'SA'), account('egp', 'EGP', 100000), account('egp2', 'EGP', 0)],
     transactions: [
-      { id: 't', type: 'transfer', fromAccountId: 'sar', toAccountId: 'egp', amount: 100, toAmount: 1100, date: '2026-10-02', rateSnapshotId: S11.id, createdAt: T0, updatedAt: T0 },
+      { id: 't', type: 'exchange', fromAccountId: 'sar', toAccountId: 'egp', sentAmount: 100, receivedAmount: 1100, fees: [], date: '2026-10-02', rateSnapshotId: S11.id, createdAt: T0, updatedAt: T0 },
     ],
   });
 
   it('keeps the snapshot when the from-account currency is unchanged', () => {
     const s = setup();
-    const tx = s.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
-    const after = apply(s, ops.updateTransaction(s, { ...tx, amount: 120, toAmount: 1320 }, makeCtx()));
+    const tx = s.transactions[0] as Extract<Transaction, { type: 'exchange' }>;
+    const after = apply(s, ops.updateTransaction(s, { ...tx, sentAmount: 120, receivedAmount: 1320 }, makeCtx()));
     assert.equal(after.transactions[0].rateSnapshotId, S11.id);
   });
 
   it('takes the current rate of the new from-currency', () => {
     const s = setup();
-    const tx = s.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
-    const toEgp = apply(s, ops.updateTransaction(s, { ...tx, fromAccountId: 'egp', toAccountId: 'egp2', toAmount: 100 }, makeCtx()));
+    const tx = s.transactions[0] as Extract<Transaction, { type: 'exchange' }>;
+    const { sentAmount: _s, receivedAmount: _r, ...legs } = tx;
+    const toEgp = apply(s, ops.updateTransaction(s, { ...legs, type: 'transfer', amount: 100, fromAccountId: 'egp', toAccountId: 'egp2' }, makeCtx()));
     assert.equal(toEgp.transactions[0].rateSnapshotId, S125.id);
     const back = toEgp.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
-    const toSar = apply(toEgp, ops.updateTransaction(toEgp, { ...back, fromAccountId: 'sar', toAccountId: 'egp', toAmount: 1250 }, makeCtx()));
+    const { amount: _a, ...moved } = back;
+    const toSar = apply(toEgp, ops.updateTransaction(toEgp, { ...moved, type: 'exchange', sentAmount: 100, receivedAmount: 1250, fromAccountId: 'sar', toAccountId: 'egp' }, makeCtx()));
     assert.equal(toSar.transactions[0].rateSnapshotId, S125.id); // the current rates (SAR 12.5)
   });
 });
@@ -3689,7 +3816,7 @@ describe('native amounts never drift with the rates', () => {
     s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 200.1, currency: 'SAR', accountId: 'a', categoryId: 'cat-essentials-bills', date: '2026-10-02' }, ctx));
     // No conversion between two SAR accounts: the received amount is exactly what was sent.
     s = apply(s, ops.addTransfer(s, { fromAccountId: 'a', toAccountId: 'b', amount: 333.33, date: '2026-10-03' }, ctx));
-    assert.equal(s.transactions[0].type === 'transfer' && s.transactions[0].toAmount, 333.33);
+    assert.equal(accountBalance(s, 'b'), 333.33);
     const natives = [accountBalance(s, 'a'), accountBalance(s, 'b')];
     approx(natives[0], 1000 + 500.55 - 200.1 - 333.33);
     approx(natives[1], 333.33);
@@ -3950,9 +4077,10 @@ describe('analytics', () => {
   const transfer = (id: string, amount: number, date: string): Transaction =>
     ({
       id,
-      type: 'transfer',
-      amount,
-      toAmount: amount / 12.5,
+      type: 'exchange',
+      sentAmount: amount,
+      receivedAmount: amount / 12.5,
+      fees: [],
       fromAccountId: 'egp',
       toAccountId: 'sar',
       date,
@@ -5625,14 +5753,14 @@ describe('rounding: writes are rounded to the currency, sums are exact', () => {
   it('every stored amount is rounded half away from zero, then validated', () => {
     const s = { ...emptyState(), accounts: [account('egp', 'EGP', 0), account('sar', 'SAR', 0)], funds: [fund({ id: 'F' })] };
     const a = apply(s, ops.addTransaction(s, { type: 'expense', amount: 10.005, currency: 'EGP', accountId: 'egp', categoryId: 'cat-lifestyle-dining', date: '2026-10-01' }, ctx));
-    assert.equal(a.transactions[0].amount, 10.01);
+    assert.equal(amountOf(a.transactions[0]), 10.01);
     // Rounds to zero → not positive.
     assert.throws(() => ops.addTransaction(s, { type: 'expense', amount: 0.004, currency: 'EGP', accountId: 'egp', categoryId: 'cat-lifestyle-dining', date: '2026-10-01' }, ctx), { code: 'NOT_POSITIVE' });
-    // A transfer rounds each leg in its own account's currency.
-    const t = apply(s, ops.addTransfer(s, { fromAccountId: 'sar', toAccountId: 'egp', amount: 100.004, toAmount: 1250.555, date: '2026-10-02' }, ctx));
+    // An exchange rounds each leg in its own account's currency.
+    const t = apply(s, ops.addExchange(s, { fromAccountId: 'sar', toAccountId: 'egp', sentAmount: 100.004, receivedAmount: 1250.555, date: '2026-10-02' }, ctx));
     const tx = t.transactions[0];
-    assert.equal(tx.type === 'transfer' && tx.amount, 100);
-    assert.equal(tx.type === 'transfer' && tx.toAmount, 1250.56);
+    assert.equal(tx.type === 'exchange' && tx.sentAmount, 100);
+    assert.equal(tx.type === 'exchange' && tx.receivedAmount, 1250.56);
     // An opening balance, a fund movement, a plan, a holding and a liability too.
     assert.equal(apply(s, ops.addAccount(s, { name: 'x', type: 'cash', currency: 'USD', openingBalance: 99.995, country: 'EG' }, ctx)).accounts.at(-1)!.openingBalance, 100);
     assert.equal(apply(s, ops.allocateToFund(s, 'F', 12.345, undefined, ctx)).fundMovements[0].amount, 12.35);
@@ -5701,9 +5829,9 @@ describe('v7 → v8 sub-steps: any intermediate v8 shape is completed, twice is 
     return { ...state, settings } as unknown as FinanceState;
   };
 
-  it('has the six steps, in order', () => {
-    assert.deepEqual(V8_STEPS.map((s) => s.name), ['countries', 'rates', 'currencies', 'rounding', 'holdings', 'preferences']);
-    assert.equal(LATEST_V8_STEP, 6);
+  it('has the seven steps, in order', () => {
+    assert.deepEqual(V8_STEPS.map((s) => s.name), ['countries', 'rates', 'currencies', 'rounding', 'holdings', 'preferences', 'ledger']);
+    assert.equal(LATEST_V8_STEP, 7);
   });
 
   for (const [name, make] of sources) {
@@ -5743,8 +5871,8 @@ describe('v7 → v8 sub-steps: any intermediate v8 shape is completed, twice is 
     v7.transactions = v7.transactions.map((t) => (t.id === 't-groc-oct' && t.type === 'expense' ? { ...t, amount: 200.004 } : t.id === 't-fx' && t.type === 'transfer' ? { ...t, toAmount: 12400.005 } : t));
     v7.accounts = v7.accounts.map((a) => (a.id === 'a-usd' ? { ...a, openingBalance: 399.996 } : a));
     const v8 = applyV8Steps(v7, ctx);
-    assert.equal(v8.transactions.find((t) => t.id === 't-groc-oct')!.amount, 200);
-    assert.equal((v8.transactions.find((t) => t.id === 't-fx') as { toAmount: number }).toAmount, 12400.01);
+    assert.equal(amountOf(v8.transactions.find((t) => t.id === 't-groc-oct')), 200);
+    assert.equal((v8.transactions.find((t) => t.id === 't-fx') as { receivedAmount: number }).receivedAmount, 12400.01);
     assert.equal(v8.accounts.find((a) => a.id === 'a-usd')!.openingBalance, 400);
     // Everything else is untouched by it.
     assert.deepEqual(v8.holdings.map((h) => h.purchaseCost.amount), richV7().holdings.map((h) => h.purchaseCostEGP));
@@ -5981,5 +6109,84 @@ describe('reporting currency: a projection of the same data (INV-1)', () => {
     for (const c of CODES) assert.doesNotThrow(() => analytics.moneyMap(s, c));
     const q: analytics.AnalyticsQuery = { period: analytics.resolvePeriod(s, 'sinceStart', NOW), currency: 'USD', includeOneTime: true };
     assert.equal(analytics.parseDrillParams({ ...analytics.drillParams(q, { type: 'expense' }) })?.query.currency, 'USD');
+  });
+});
+
+describe('v7 → v8 step 7: transfers and exchanges (C9)', () => {
+  const ctx = MIGRATION_CTX;
+  const balancesV7 = (v7: ReturnType<typeof richV7>) => oracleReport(v7, ORACLE_NOW).accounts;
+
+  it('a cross-currency transfer becomes an exchange with the stored legs; every account balance is identical', () => {
+    const v7 = richV7();
+    const v8 = applyV8Steps(v7, ctx);
+    const fx = v8.transactions.find((t) => t.id === 't-fx')!;
+    const stored = v7.transactions.find((t) => t.id === 't-fx') as unknown as { amount: number; toAmount: number };
+    assert.equal(fx.type, 'exchange');
+    // No invented amounts: sent = amount, received = the stored toAmount.
+    assert.deepEqual(fx.type === 'exchange' && [fx.sentAmount, fx.receivedAmount, fx.fees], [stored.amount, stored.toAmount, []]);
+    assert.ok(!('amount' in fx) && !('toAmount' in fx));
+    for (const [id, expected] of Object.entries(balancesV7(v7))) assert.equal(accountBalance(v8, id), expected.balance, id);
+  });
+
+  it('a same-currency transfer stays a transfer (no toAmount, no fees)', () => {
+    const v8 = applyV8Steps(richV7(), ctx);
+    const same = v8.transactions.find((t) => t.id === 't-same')!;
+    assert.deepEqual(same.type === 'transfer' && [same.amount, same.fees], [500, []]);
+    assert.ok(!('toAmount' in same));
+  });
+
+  it('a v7 same-currency transfer whose two amounts differ keeps both (so no balance moves)', () => {
+    const v7 = richV7();
+    v7.transactions = v7.transactions.map((t) => (t.id === 't-same' && t.type === 'transfer' ? { ...t, toAmount: 499 } : t));
+    const v8 = applyV8Steps(v7, ctx);
+    const odd = v8.transactions.find((t) => t.id === 't-same')!;
+    assert.deepEqual(odd.type === 'exchange' && [odd.sentAmount, odd.receivedAmount], [500, 499]);
+    for (const [id, expected] of Object.entries(balancesV7(v7))) assert.equal(accountBalance(v8, id), expected.balance, id);
+  });
+
+  it('a recurring cross-currency transfer becomes an exchange rule, confirmed every time', () => {
+    const v8 = applyV8Steps(richV7(), ctx);
+    const rule = v8.recurringRules.find((r) => r.id === 'r-fx')!;
+    assert.deepEqual([rule.kind, rule.mode, rule.amount, rule.toAmount], ['exchange', 'confirm', 500, 6200]);
+    // The other rules are untouched.
+    assert.equal(v8.recurringRules.find((r) => r.id === 'r-rent')!.kind, 'expense');
+  });
+
+  it('a recurring auto transfer between currencies is forced to confirm; a same-currency one drops toAmount', () => {
+    const v7 = richV7();
+    v7.recurringRules = v7.recurringRules.map((r) => (r.id === 'r-fx' ? { ...r, mode: 'auto' as const } : r));
+    assert.equal(applyV8Steps(v7, ctx).recurringRules.find((r) => r.id === 'r-fx')!.mode, 'confirm');
+    const same = richV7();
+    same.recurringRules = [
+      { ...same.recurringRules.find((r) => r.id === 'r-fx')!, id: 'r-same', accountId: 'a-sar-sa', toAccountId: 'a-sar-eg', toAmount: 500 },
+    ];
+    const rule = applyV8Steps(same, ctx).recurringRules[0];
+    assert.deepEqual([rule.kind, 'toAmount' in rule], ['transfer', false]);
+  });
+
+  it('the fees category is added once; one the user made with that name serves; running it twice changes nothing', () => {
+    const v8 = applyV8Steps(richV7(), ctx);
+    assert.equal(v8.categories.filter((c) => c.id === 'cat-essentials-fees').length, 1);
+    assert.equal(ops.feeCategoryId(v8.categories), 'cat-essentials-fees');
+    assert.deepEqual(applyV8Steps(v8, ctx), v8);
+    const mine = richV7();
+    mine.categories = [...mine.categories.filter((c) => c.id !== 'cat-essentials-fees'), { id: 'cat-mine', name: 'رسوم', kind: 'expense', bucket: 'lifestyle', isDefault: false, updatedAt: T0 }];
+    const kept = applyV8Steps(mine, ctx);
+    assert.ok(!kept.categories.some((c) => c.id === 'cat-essentials-fees'));
+    assert.equal(ops.feeCategoryId(kept.categories), 'cat-mine');
+  });
+
+  it('data with no cross-currency transfer: only same-currency transfers lose their toAmount, plus the fees category', () => {
+    const v7 = richV7();
+    v7.transactions = v7.transactions.filter((t) => t.id !== 't-fx');
+    v7.recurringRules = v7.recurringRules.filter((r) => r.id !== 'r-fx');
+    const before = applyV8Steps(v7, ctx, 6);
+    const after = applyV8Steps(before, ctx);
+    const notTransfer = (t: { type: string }) => t.type !== 'transfer';
+    assert.deepEqual(after.transactions.filter(notTransfer), before.transactions.filter(notTransfer));
+    assert.deepEqual(after.transactions.filter((t) => t.type === 'exchange'), []);
+    assert.deepEqual(after.accounts, before.accounts);
+    assert.deepEqual(after.recurringRules, before.recurringRules);
+    assert.deepEqual(after.categories.filter((c) => c.id !== 'cat-essentials-fees'), before.categories.filter((c) => c.id !== 'cat-essentials-fees'));
   });
 });

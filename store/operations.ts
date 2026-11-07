@@ -9,6 +9,7 @@ import { priceSourceOf, type PriceFetchResult } from '@/utils/prices/fetchPrices
 import { planIdFor } from './migrations';
 import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
+import { CATEGORY_IDS } from './defaultCategories';
 import { snapshotForNow } from './rateSnapshots';
 import { syncSnapshots } from './snapshots';
 import {
@@ -31,6 +32,8 @@ import type {
   ActionDismissal,
   AssetPurchaseTransaction,
   Category,
+  ExchangeTransaction,
+  Fee,
   CountryCode,
   CurrencyCode,
   FinanceState,
@@ -78,12 +81,12 @@ export type Editable<T> = T extends unknown ? Omit<T, 'updatedAt'> & { updatedAt
 export type NewAccount = Omit<Account, 'id' | 'createdAt' | 'updatedAt'>;
 export type NewCategory = Omit<Category, 'id' | 'isDefault' | 'updatedAt'>;
 export type NewIncomeExpense = Omit<IncomeExpenseTransaction, 'id' | 'createdAt' | 'updatedAt' | 'rateSnapshotId'>;
-export type NewTransfer = Omit<
-  TransferTransaction,
-  'id' | 'type' | 'createdAt' | 'updatedAt' | 'rateSnapshotId' | 'toAmount'
-> & {
-  // Defaults to `amount` converted at current rates.
-  toAmount?: number;
+export type NewTransfer = Omit<TransferTransaction, 'id' | 'type' | 'createdAt' | 'updatedAt' | 'rateSnapshotId' | 'fees'> & {
+  fees?: Fee[];
+};
+// `receivedAmount` is required: what actually arrived. No operation ever computes it from a rate.
+export type NewExchange = Omit<ExchangeTransaction, 'id' | 'type' | 'createdAt' | 'updatedAt' | 'rateSnapshotId' | 'fees'> & {
+  fees?: Fee[];
 };
 
 // The rate snapshot a patch must also save when the current rates have none yet (see snapshotForNow).
@@ -165,15 +168,27 @@ const isIncomeExpense = (tx: Transaction): tx is IncomeExpenseTransaction =>
 const money = (amount: number, currency: CurrencyCode): number =>
   isKnownCurrency(currency) ? roundMoney(amount, currency) : amount;
 
-// Amounts of a transaction: in its own currency, a transfer's in each account's.
+// Fees are in the currency of the account they are charged to.
+function roundFees(state: State, fees: Fee[]): Fee[] {
+  return fees.map((fee) => {
+    const account = state.accounts.find((a) => a.id === fee.accountId);
+    return { ...fee, amount: account ? money(fee.amount, account.currency) : fee.amount };
+  });
+}
+
+// Amounts of a transaction: in its own currency; a transfer's in its accounts' (the same); an exchange's
+// sent amount in the source account's currency and received amount in the target's.
 function roundTransaction<T extends Editable<Transaction>>(state: State, tx: T): T {
-  if (tx.type === 'transfer') {
+  if (tx.type === 'transfer' || tx.type === 'exchange') {
     const from = state.accounts.find((a) => a.id === tx.fromAccountId);
     const to = state.accounts.find((a) => a.id === tx.toAccountId);
+    const fees = roundFees(state, tx.fees);
+    if (tx.type === 'transfer') return { ...tx, amount: from ? money(tx.amount, from.currency) : tx.amount, fees };
     return {
       ...tx,
-      amount: from ? money(tx.amount, from.currency) : tx.amount,
-      toAmount: to ? money(tx.toAmount, to.currency) : tx.toAmount,
+      sentAmount: from ? money(tx.sentAmount, from.currency) : tx.sentAmount,
+      receivedAmount: to ? money(tx.receivedAmount, to.currency) : tx.receivedAmount,
+      fees,
     };
   }
   return { ...tx, amount: money(tx.amount, tx.currency) };
@@ -205,7 +220,7 @@ function logDeletes(state: State, entity: SyncEntity, ids: string[], ctx: OpCont
 function accountInUse(state: State, accountId: string): boolean {
   return (
     state.transactions.some((tx) =>
-      tx.type === 'transfer'
+      tx.type === 'transfer' || tx.type === 'exchange'
         ? tx.fromAccountId === accountId || tx.toAccountId === accountId
         : tx.accountId === accountId
     ) || state.recurringRules.some((r) => r.accountId === accountId)
@@ -325,13 +340,46 @@ function validateIncomeExpense(state: State, tx: IncomeExpenseTransaction) {
   }
 }
 
+// The default category of a fee: the default "رسوم" category, or one the user made with that name.
+export function feeCategoryId(categories: Pick<Category, 'id' | 'name' | 'kind'>[]): string | undefined {
+  return (
+    categories.find((c) => c.id === CATEGORY_IDS.fees) ?? categories.find((c) => c.kind === 'expense' && c.name.trim() === 'رسوم')
+  )?.id;
+}
+
+// Each fee is charged to the source or the target of the move, in that account's currency; its category (the
+// fees category by default) is an expense one.
+function validateFees(state: State, tx: TransferTransaction | ExchangeTransaction) {
+  for (const fee of tx.fees) {
+    assertPositive(fee.amount, 'fee');
+    if (fee.accountId !== tx.fromAccountId && fee.accountId !== tx.toAccountId) fail('FEE_ACCOUNT_INVALID');
+    const categoryId = fee.categoryId ?? feeCategoryId(state.categories);
+    const category = requireById(state.categories, categoryId ?? '', 'category');
+    if (category.kind !== 'expense') fail('CATEGORY_KIND_MISMATCH', { id: category.id });
+  }
+}
+
+function validateMove(state: State, tx: TransferTransaction | ExchangeTransaction) {
+  assertDate(tx.date, 'date');
+  const from = requireById(state.accounts, tx.fromAccountId, 'account');
+  const to = requireById(state.accounts, tx.toAccountId, 'account');
+  if (tx.fromAccountId === tx.toAccountId) fail('SAME_ACCOUNT_TRANSFER');
+  validateFees(state, tx);
+  return { from, to };
+}
+
 function validateTransfer(state: State, tx: TransferTransaction) {
   assertPositive(tx.amount, 'amount');
-  assertPositive(tx.toAmount, 'toAmount');
-  assertDate(tx.date, 'date');
-  requireById(state.accounts, tx.fromAccountId, 'account');
-  requireById(state.accounts, tx.toAccountId, 'account');
-  if (tx.fromAccountId === tx.toAccountId) fail('SAME_ACCOUNT_TRANSFER');
+  const { from, to } = validateMove(state, tx);
+  // A transfer moves the same money: a different currency is an exchange.
+  if (from.currency !== to.currency) fail('TRANSFER_CURRENCY_MISMATCH');
+}
+
+function validateExchange(state: State, tx: ExchangeTransaction) {
+  assertPositive(tx.sentAmount, 'sentAmount');
+  assertPositive(tx.receivedAmount, 'receivedAmount');
+  const { from, to } = validateMove(state, tx);
+  if (from.currency === to.currency) fail('EXCHANGE_SAME_CURRENCY');
 }
 
 // Settings with `selection` merged into the remembered form defaults.
@@ -361,16 +409,14 @@ export function addTransaction(state: State, raw: NewIncomeExpense, ctx: OpConte
   };
 }
 
+// Same-currency only (a transfer between currencies is addExchange). Fees are spending; the move itself is not.
 export function addTransfer(state: State, raw: NewTransfer, ctx: OpContext): Patch {
-  const rates = state.settings.rates;
   const use = snapshotForNow(state, ctx.now());
-  const from = requireById(state.accounts, raw.fromAccountId, 'account');
-  const to = requireById(state.accounts, raw.toAccountId, 'account');
-  const amount = money(raw.amount, from.currency);
+  const from = state.accounts.find((a) => a.id === raw.fromAccountId);
   const input = {
     ...raw,
-    amount,
-    toAmount: money(raw.toAmount ?? convertCurrency(amount, from.currency, to.currency, rates), to.currency),
+    amount: from ? money(raw.amount, from.currency) : raw.amount,
+    fees: roundFees(state, raw.fees ?? []),
   };
   const tx: TransferTransaction = stamp(
     {
@@ -392,9 +438,41 @@ export function addTransfer(state: State, raw: NewTransfer, ctx: OpContext): Pat
   };
 }
 
-// The currency a transaction's rates are about: its own, or the source account's for transfers.
+// A currency exchange: money out of one account in its currency, the amount that actually arrived in
+// another, and optional fees. Validated as a whole and written as ONE record, so it is all or nothing.
+export function addExchange(state: State, raw: NewExchange, ctx: OpContext): Patch {
+  const use = snapshotForNow(state, ctx.now());
+  const from = state.accounts.find((a) => a.id === raw.fromAccountId);
+  const to = state.accounts.find((a) => a.id === raw.toAccountId);
+  const input = {
+    ...raw,
+    sentAmount: from ? money(raw.sentAmount, from.currency) : raw.sentAmount,
+    receivedAmount: to ? money(raw.receivedAmount, to.currency) : raw.receivedAmount,
+    fees: roundFees(state, raw.fees ?? []),
+  };
+  const tx: ExchangeTransaction = stamp(
+    {
+      ...input,
+      type: 'exchange' as const,
+      id: ctx.newId(),
+      createdAt: ctx.now().toISOString(),
+      rateSnapshotId: use.id,
+    },
+    ctx
+  );
+  validateExchange(state, tx);
+  return {
+    ...ratePatch(use),
+    transactions: [tx, ...state.transactions],
+    settings: rememberSelection(state, {
+      exchange: { fromAccountId: tx.fromAccountId, toAccountId: tx.toAccountId },
+    }),
+  };
+}
+
+// The currency a transaction's rates are about: its own, or the source account's for a move between accounts.
 function transactionCurrency(state: State, tx: Editable<Transaction>): CurrencyCode | undefined {
-  if (tx.type !== 'transfer') return tx.currency;
+  if (tx.type !== 'transfer' && tx.type !== 'exchange') return tx.currency;
   return state.accounts.find((a) => a.id === tx.fromAccountId)?.currency;
 }
 
@@ -408,6 +486,7 @@ function validateAssetPurchase(state: State, tx: AssetPurchaseTransaction) {
 
 function validateTransaction(state: State, tx: Transaction) {
   if (tx.type === 'transfer') validateTransfer(state, tx);
+  else if (tx.type === 'exchange') validateExchange(state, tx);
   else if (tx.type === 'asset_purchase') validateAssetPurchase(state, tx);
   else validateIncomeExpense(state, tx);
 }
@@ -1057,10 +1136,18 @@ function validateRecurringRule(state: State, rule: NewRecurringRule) {
   if (rule.mode !== 'auto' && rule.mode !== 'confirm') fail('INVALID_MODE');
   const account = requireById(state.accounts, rule.accountId, 'account');
   if (rule.currency !== account.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
-  if (rule.kind === 'transfer') {
+  if (rule.kind === 'transfer' || rule.kind === 'exchange') {
     const to = requireById(state.accounts, rule.toAccountId ?? '', 'account');
     if (to.id === account.id) fail('SAME_ACCOUNT_TRANSFER');
-    if (to.currency !== account.currency) assertPositive(rule.toAmount ?? NaN, 'toAmount');
+    if (rule.kind === 'transfer') {
+      if (to.currency !== account.currency) fail('TRANSFER_CURRENCY_MISMATCH');
+    } else {
+      if (to.currency === account.currency) fail('EXCHANGE_SAME_CURRENCY');
+      // What arrives each time is part of the rule; an unknown executed rate is never guessed, so it is
+      // always confirmed by the user.
+      assertPositive(rule.toAmount ?? NaN, 'receivedAmount');
+      if (rule.mode !== 'confirm') fail('INVALID_MODE');
+    }
   } else {
     const category = requireById(state.categories, rule.categoryId ?? '', 'category');
     if (category.kind !== rule.kind) fail('CATEGORY_KIND_MISMATCH', { id: category.id });
@@ -1071,9 +1158,11 @@ function validateRecurringRule(state: State, rule: NewRecurringRule) {
 function normalizeRuleShape<T extends NewRecurringRule>(rule: T): T {
   const { categoryId, toAccountId, toAmount, ...rest } = rule;
   return (
-    rule.kind === 'transfer'
+    rule.kind === 'exchange'
       ? { ...rest, toAccountId, ...(toAmount !== undefined ? { toAmount } : {}) }
-      : { ...rest, categoryId }
+      : rule.kind === 'transfer'
+        ? { ...rest, toAccountId }
+        : { ...rest, categoryId }
   ) as T;
 }
 
@@ -1085,7 +1174,7 @@ function withNextDate(state: State, rule: RecurringRule, ctx: OpContext): Recurr
 
 // Creates a rule. `linkTransactionId` ("خليها متكررة") links that existing transaction as the
 // occurrence on its date — when the date is an occurrence of the rule — so it isn't due again.
-// A rule's amount is in its currency; a transfer's toAmount in the target account's.
+// A rule's amount is in its currency; an exchange's toAmount in the target account's.
 function roundRule<T extends NewRecurringRule | Editable<RecurringRule>>(state: State, rule: T): T {
   const to = rule.toAccountId ? state.accounts.find((a) => a.id === rule.toAccountId) : undefined;
   return {
@@ -1179,13 +1268,11 @@ function occurrenceTransaction(
   ctx: OpContext,
   rateSnapshotId: string
 ): Transaction {
-  const rates = state.settings.rates;
   const account = requireById(state.accounts, overrides.accountId ?? rule.accountId, 'account');
   const amount = money(overrides.amount ?? rule.amount, account.currency);
   const note = overrides.note?.trim() || rule.note || rule.name;
   const base = {
     id: ctx.newId(),
-    amount,
     date: overrides.date ?? occurrenceDate,
     note,
     rateSnapshotId,
@@ -1195,21 +1282,38 @@ function occurrenceTransaction(
   };
   if (rule.kind === 'transfer') {
     const to = requireById(state.accounts, rule.toAccountId ?? '', 'account');
-    const converted = convertCurrency(amount, account.currency, to.currency, rates);
-    const toAmount = money(
-      overrides.toAmount ??
-        (to.currency === account.currency ? amount : overrides.amount === undefined ? (rule.toAmount ?? converted) : converted),
-      to.currency
-    );
     const tx: TransferTransaction = stamp(
-      { ...base, type: 'transfer' as const, fromAccountId: account.id, toAccountId: to.id, toAmount },
+      { ...base, type: 'transfer' as const, amount, fromAccountId: account.id, toAccountId: to.id, fees: [] },
       ctx
     );
     validateTransfer(state, tx);
     return tx;
   }
+  if (rule.kind === 'exchange') {
+    const to = requireById(state.accounts, rule.toAccountId ?? '', 'account');
+    // What arrives is the rule's received amount, never today's rate. A different amount needs its own
+    // received amount (the user confirms it).
+    const receivedAmount = money(
+      overrides.toAmount ?? (overrides.amount === undefined ? (rule.toAmount ?? NaN) : NaN),
+      to.currency
+    );
+    const tx: ExchangeTransaction = stamp(
+      {
+        ...base,
+        type: 'exchange' as const,
+        sentAmount: amount,
+        receivedAmount,
+        fromAccountId: account.id,
+        toAccountId: to.id,
+        fees: [],
+      },
+      ctx
+    );
+    validateExchange(state, tx);
+    return tx;
+  }
   const tx: IncomeExpenseTransaction = stamp(
-    { ...base, type: rule.kind, currency: account.currency, accountId: account.id, categoryId: rule.categoryId ?? '' },
+    { ...base, type: rule.kind, amount, currency: account.currency, accountId: account.id, categoryId: rule.categoryId ?? '' },
     ctx
   );
   validateIncomeExpense(state, tx);

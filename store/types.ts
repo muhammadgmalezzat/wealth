@@ -48,7 +48,6 @@ export interface Category extends Synced {
 
 interface TransactionBase extends Synced {
   id: string;
-  amount: number;
   date: string;
   note?: string;
   // The immutable rate snapshot (state.rateSnapshots) in force when it was recorded: its amount can
@@ -64,6 +63,7 @@ interface TransactionBase extends Synced {
 
 export interface IncomeExpenseTransaction extends TransactionBase {
   type: 'income' | 'expense';
+  amount: number;
   // Always equals the account's currency.
   currency: CurrencyCode;
   accountId: string;
@@ -73,26 +73,54 @@ export interface IncomeExpenseTransaction extends TransactionBase {
   oneTime?: boolean;
 }
 
+// A charge of a transfer or exchange (bank, wallet or exchange-house fee). It leaves `accountId` (the source or
+// the target of the move), in that account's currency, and counts as spending in the "رسوم" category.
+export interface Fee {
+  accountId: string;
+  // In the account's currency, > 0.
+  amount: number;
+  // Defaults to the fees category.
+  categoryId?: string;
+}
+
+// Money moved between two own accounts of the SAME currency: `amount` leaves `from` and arrives in `to`. Not
+// income, not spending, no FX gain or loss. Its fees are spending.
 export interface TransferTransaction extends TransactionBase {
   type: 'transfer';
   fromAccountId: string;
   toAccountId: string;
-  // `amount` leaves the source account (its currency); `toAmount` arrives in the target
-  // account's currency, so SAR→EGP transfers record the real converted amount.
-  toAmount: number;
+  amount: number;
+  fees: Fee[];
+}
+
+// A currency exchange between two own accounts of DIFFERENT currencies: `sentAmount` leaves `from` (its
+// currency) and `receivedAmount` arrives in `to` (its currency). The received amount is what the user actually
+// got, never computed; the rate is implied (received ÷ sent) and not stored.
+export interface ExchangeTransaction extends TransactionBase {
+  type: 'exchange';
+  fromAccountId: string;
+  toAccountId: string;
+  sentAmount: number;
+  receivedAmount: number;
+  fees: Fee[];
 }
 
 // Cash turned into a holding (e.g. buying gold). Lowers the account balance but is not an
 // expense: it is excluded from spending, savings rate and averages.
 export interface AssetPurchaseTransaction extends TransactionBase {
   type: 'asset_purchase';
+  amount: number;
   accountId: string;
   // Always equals the account's currency.
   currency: CurrencyCode;
   holdingId: string;
 }
 
-export type Transaction = IncomeExpenseTransaction | TransferTransaction | AssetPurchaseTransaction;
+export type Transaction =
+  | IncomeExpenseTransaction
+  | TransferTransaction
+  | ExchangeTransaction
+  | AssetPurchaseTransaction;
 
 export type SinkingFrequency = 'yearly' | 'semiannual' | 'quarterly';
 
@@ -184,10 +212,10 @@ export interface Liability extends Synced {
   country: CountryCode;
 }
 
-export type RecurringKind = 'income' | 'expense' | 'transfer';
+export type RecurringKind = 'income' | 'expense' | 'transfer' | 'exchange';
 export type RecurringFrequency = 'weekly' | 'monthly' | 'yearly';
 
-// A scheduled income, expense or transfer. Occurrences are computed from startDate,
+// A scheduled income, expense, transfer or exchange. Occurrences are computed from startDate,
 // frequency × interval and dayOfMonth (store/recurring.ts); the ones on or before today that
 // have no transaction (matched by recurringRuleId + occurrenceDate) and aren't skipped are
 // "due". 'auto' rules record them automatically; 'confirm' rules wait in the due inbox.
@@ -200,8 +228,8 @@ export interface RecurringRule extends Synced {
   currency: CurrencyCode;
   accountId: string;
   categoryId?: string; // income/expense
-  toAccountId?: string; // transfer
-  toAmount?: number; // transfer, in the target account's currency
+  toAccountId?: string; // transfer / exchange
+  toAmount?: number; // exchange: the amount received, in the target account's currency (required)
   frequency: RecurringFrequency;
   // Every N weeks/months/years (≥ 1).
   interval: number;
@@ -312,6 +340,7 @@ export interface LastUsedSelection {
   expense?: { accountId: string; categoryId: string };
   income?: { accountId: string; categoryId: string };
   transfer?: { fromAccountId: string; toAccountId: string };
+  exchange?: { fromAccountId: string; toAccountId: string };
 }
 
 export interface Settings {

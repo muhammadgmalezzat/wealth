@@ -46,9 +46,13 @@ export function accountNetFlow(state: Pick<State, 'accounts' | 'transactions'>, 
   if (!account) return 0;
   const effects: number[] = [];
   for (const tx of state.transactions) {
-    if (tx.type === 'transfer') {
-      if (tx.fromAccountId === accountId) effects.push(-tx.amount);
-      if (tx.toAccountId === accountId) effects.push(tx.toAmount);
+    if (tx.type === 'transfer' || tx.type === 'exchange') {
+      const sent = tx.type === 'transfer' ? tx.amount : tx.sentAmount;
+      const received = tx.type === 'transfer' ? tx.amount : tx.receivedAmount;
+      if (tx.fromAccountId === accountId) effects.push(-sent);
+      if (tx.toAccountId === accountId) effects.push(received);
+      // Fees leave the account they are charged to, on top of the move itself.
+      for (const fee of tx.fees) if (fee.accountId === accountId) effects.push(-fee.amount);
     } else if (tx.accountId === accountId) {
       // Expenses and asset purchases both take money out of the account.
       effects.push(tx.type === 'income' ? tx.amount : -tx.amount);
@@ -759,7 +763,11 @@ export function defaultCoverFundId(state: State, currency?: CurrencyCode): strin
 }
 // --- Transaction lists ------------------------------------------------------
 
-export type TransactionFilter = 'all' | Transaction['type'];
+// The "تحويل" filter covers transfers and exchanges alike.
+export type TransactionFilter = 'all' | Exclude<Transaction['type'], 'exchange'>;
+
+export const matchesFilter = (tx: Transaction, filter: TransactionFilter): boolean =>
+  filter === 'all' || tx.type === filter || (filter === 'transfer' && tx.type === 'exchange');
 
 // Newest first: by date, then by creation time within the same day.
 export function compareNewestFirst(a: Transaction, b: Transaction): number {
@@ -777,7 +785,7 @@ export function transactionsForMonth(
   filter: TransactionFilter = 'all'
 ): Transaction[] {
   return state.transactions
-    .filter((tx) => monthOf(tx.date) === month && (filter === 'all' || tx.type === filter))
+    .filter((tx) => monthOf(tx.date) === month && matchesFilter(tx, filter))
     .sort(compareNewestFirst);
 }
 

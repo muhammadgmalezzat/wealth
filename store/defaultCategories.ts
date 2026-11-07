@@ -6,6 +6,8 @@ export const CATEGORY_IDS = {
   freelance: 'cat-income-freelance',
   otherIncome: 'cat-income-other',
   groceries: 'cat-essentials-groceries',
+  // Fees of transfers and exchanges are spending in this category.
+  fees: 'cat-essentials-fees',
 } as const;
 
 // Bills that recur at a set amount whatever you do (rent, internet, utilities): suggested
@@ -50,6 +52,7 @@ export const DEFAULT_CATEGORIES: Category[] = [
   expense('cat-essentials-health', 'صحة', 'essentials'),
   expense('cat-essentials-household', 'مستلزمات البيت', 'essentials'),
   expense('cat-essentials-home-setup', 'تجهيز البيت', 'essentials'),
+  expense(CATEGORY_IDS.fees, 'رسوم', 'essentials'),
 
   expense('cat-lifestyle-dining', 'مطاعم وقهوة', 'lifestyle'),
   expense('cat-lifestyle-clothing', 'ملابس', 'lifestyle'),

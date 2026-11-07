@@ -40,7 +40,7 @@ export function reportV8(state: FinanceState, now: Date): OracleReport {
   for (const h of state.holdings) report.holdings[h.id] = { valueEGP: sel.holdingValue(state, h, 'EGP'), costEGP: sel.holdingCost(state, h, 'EGP') };
 
   for (const tx of state.transactions) {
-    if (tx.type === 'transfer') continue;
+    if (tx.type === 'transfer' || tx.type === 'exchange') continue;
     report.transactions[tx.id] = Object.fromEntries(CURRENCIES.map((c) => [c, sel.transactionAmountIn(state, tx, c)]));
   }
 

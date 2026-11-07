@@ -51,7 +51,7 @@ export function RecurringCard({ state, dueShownElsewhere = false, now = new Date
                 key={`${rule.id}-${date}`}
                 title={rule.name}
                 subtitle={days <= 2 ? formatDayLabel(date, now) : `بعد ${days} ${days <= 10 ? 'أيام' : 'يوم'} · ${formatDayLabel(date, now)}`}
-                icon={rule.kind === 'income' ? 'south-west' : rule.kind === 'transfer' ? 'swap-horiz' : 'event'}
+                icon={rule.kind === 'income' ? 'south-west' : rule.kind === 'transfer' || rule.kind === 'exchange' ? 'swap-horiz' : 'event'}
                 iconTone={rule.kind === 'income' ? 'ok' : 'neutral'}
                 trailing={
                   <Money amount={rule.amount} currency={rule.currency} tone={rule.kind === 'income' ? 'positive' : 'default'} />
