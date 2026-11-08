@@ -1,55 +1,56 @@
-import type { CurrencyCode, RatesSnapshot } from '@/store/types';
+import type { RateSnapshot, RateTable } from './rates';
+import { convert, RateMissingError, snapshotById } from './rates';
 
-// Conversion rule (see "Currency" in docs/TECHNICAL.md): amounts that already happened are
-// converted with rates from their own moment and never move when settings rates change; only
-// CURRENT valuations (balances, gold, net worth) and amounts being entered now use today's rates.
+// Conversion rule (see "Currency" in docs/TECHNICAL.md): amounts that already happened are converted
+// with the rate snapshot of their own moment and never move when settings rates change; only CURRENT
+// valuations (balances, gold, net worth) and amounts being entered now use today's table.
+//
+// Everything here is the v8 engine (utils/rates.ts: one table against USD, A → USD → B). Results are
+// unrounded; callers round at the boundary (utils/money.ts).
+
+// --- Current valuations: today's table ---------------------------------------------------------
 
 // How many EGP one unit of `currency` is worth at the given rates.
-export function rateToEGP(currency: CurrencyCode, rates: RatesSnapshot): number {
-  switch (currency) {
-    case 'EGP':
-      return 1;
-    case 'SAR':
-      return rates.SAR_EGP;
-    case 'USD':
-      return rates.USD_EGP;
+export const rateToEGP = (currency: string, rates: RateTable): number => convert(1, currency, 'EGP', rates);
+
+export const toEGP = (amount: number, currency: string, rates: RateTable): number =>
+  convert(amount, currency, 'EGP', rates);
+
+export const fromEGP = (amountEGP: number, targetCurrency: string, rates: RateTable): number =>
+  convert(amountEGP, 'EGP', targetCurrency, rates);
+
+// `amount` from one currency to another at `rates`. The same currency comes back untouched (no rate
+// is involved, so not even float noise).
+export const convertCurrency = (amount: number, from: string, to: string, rates: RateTable): number =>
+  convert(amount, from, to, rates);
+
+// --- Past amounts: the record's own snapshot ---------------------------------------------------
+
+export class RateSnapshotMissingError extends RateMissingError {
+  override name = 'RateSnapshotMissingError';
+  readonly snapshotId: string;
+
+  constructor(snapshotId: string) {
+    super(`snapshot ${snapshotId}`);
+    this.snapshotId = snapshotId;
   }
 }
 
-export function toEGP(amount: number, currency: CurrencyCode, rates: RatesSnapshot): number {
-  return amount * rateToEGP(currency, rates);
+// The snapshot a record points at; a dangling id is corrupt data, never silently today's rates.
+export function requireSnapshot(snapshots: readonly RateSnapshot[], snapshotId: string): RateSnapshot {
+  const snapshot = snapshotById(snapshots, snapshotId);
+  if (!snapshot) throw new RateSnapshotMissingError(snapshotId);
+  return snapshot;
 }
 
-export function fromEGP(
-  amountEGP: number,
-  targetCurrency: CurrencyCode,
-  rates: RatesSnapshot
-): number {
-  return amountEGP / rateToEGP(targetCurrency, rates);
-}
-
-// `amount` from one currency to another with both legs at the same `rates`. The same currency
-// comes back untouched (no rate is involved, so not even float noise).
-export function convertCurrency(amount: number, from: CurrencyCode, to: CurrencyCode, rates: RatesSnapshot): number {
-  return from === to ? amount : fromEGP(toEGP(amount, from, rates), to, rates);
-}
-
-// The rates worth keeping with a record made now.
-export function snapshotRates(rates: RatesSnapshot): RatesSnapshot {
-  return { SAR_EGP: rates.SAR_EGP, USD_EGP: rates.USD_EGP };
-}
-
-// An amount that already happened, in another currency. Same currency: unchanged. Otherwise the
-// source leg uses `sourceRateToEGP` (the record's own rate) and the target leg the record's
-// `snapshot`. Records made before snapshots existed fall back to `currentRates` for the target
-// leg — a known approximation: those amounts still move with today's rates.
-export function historicalAmountIn(
+// An amount that already happened, in another currency, as it was worth then. Same currency:
+// unchanged, and no snapshot is read.
+export function projectAmount(
+  snapshots: readonly RateSnapshot[],
+  snapshotId: string,
   amount: number,
-  from: CurrencyCode,
-  to: CurrencyCode,
-  sourceRateToEGP: number,
-  snapshot: RatesSnapshot | undefined,
-  currentRates: RatesSnapshot
+  from: string,
+  to: string
 ): number {
-  return from === to ? amount : fromEGP(amount * sourceRateToEGP, to, snapshot ?? currentRates);
+  return from === to ? amount : convert(amount, from, to, requireSnapshot(snapshots, snapshotId));
 }

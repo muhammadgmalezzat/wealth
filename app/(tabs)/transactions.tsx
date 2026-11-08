@@ -34,7 +34,7 @@ export default function TransactionsScreen() {
   if (!state.hasHydrated) return <LoadingView />;
 
   const monthTransactions = transactionsForMonth(state, month);
-  const days = groupTransactionsByDay(filterTransactions(monthTransactions, filter));
+  const days = groupTransactionsByDay(state, filterTransactions(monthTransactions, filter));
   const editing = sheet && sheet !== 'add' ? state.transactions.find((t) => t.id === sheet.id) : undefined;
 
   const header = (
@@ -79,7 +79,7 @@ export default function TransactionsScreen() {
               <AppText variant="caption" color="textSecondary" style={styles.dayLabel}>
                 {formatDayLabel(day.date)}
               </AppText>
-              <Money amount={day.netEGP} currency="EGP" size="row" tone="muted" showSign align="left" />
+              <Money amount={day.net} currency={state.settings.reportingCurrency} size="row" tone="muted" showSign align="left" />
             </View>
             <ListGroup>
               {day.transactions.map((tx) => (

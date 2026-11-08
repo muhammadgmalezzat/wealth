@@ -18,6 +18,7 @@ import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { space } from '@/constants/theme';
 import * as analytics from '@/store/analytics';
+import { currencyList } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toDateKey } from '@/utils/dates';
 
@@ -30,13 +31,15 @@ export default function AnalyticsScreen() {
   const [kind, setKind] = useState<analytics.PeriodKind>('month');
   const [custom, setCustom] = useState<{ from: string; to: string } | null>(null);
   const [editingCustom, setEditingCustom] = useState<{ from: string; to: string } | null>(null);
-  const [currency, setCurrency] = useState<analytics.DisplayCurrency>('EGP');
+  // This screen's own choice; never saved. Until it picks one, the reporting currency applies.
+  const [picked, setCurrency] = useState<analytics.DisplayCurrency | null>(null);
   const [includeOneTime, setIncludeOneTime] = useState(true);
   const [location, setLocation] = useState<analytics.NetWorthLocation>('all');
   const [hideEstimated, setHideEstimated] = useState(false);
 
   if (!state.hasHydrated) return <LoadingView />;
 
+  const currency = picked ?? state.settings.reportingCurrency;
   const now = new Date();
   const period = analytics.resolvePeriod(state, kind, now, custom ?? undefined);
   const query: analytics.AnalyticsQuery = { period, currency, includeOneTime };
@@ -69,6 +72,7 @@ export default function AnalyticsScreen() {
       period={period}
       onKindChange={chooseKind}
       currency={currency}
+      currencies={currencyList(state)}
       onCurrencyChange={setCurrency}
       includeOneTime={includeOneTime}
       onIncludeOneTimeChange={setIncludeOneTime}

@@ -1,4 +1,4 @@
-import type { RatesSnapshot } from '@/store/types';
+import type { RateTable } from '@/utils/rates';
 
 // Live price math and response validation. Pure (no fetch, no React Native), unit-tested.
 
@@ -20,22 +20,22 @@ const within = (value: unknown, [min, max]: readonly [number, number]): value is
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
 
-// SAR_EGP = EGP per USD ÷ SAR per USD; USD_EGP = EGP per USD. null unless both are sane.
-export function fxFromUsdRates(usdRates: unknown): RatesSnapshot | null {
+// A table of the currencies the app tracks (units per USD). null unless EGP and SAR are sane.
+export function fxFromUsdRates(usdRates: unknown): RateTable | null {
   if (!isRecord(usdRates)) return null;
   const { EGP, SAR } = usdRates;
   if (!within(EGP, RANGES.EGP_PER_USD) || !within(SAR, RANGES.SAR_PER_USD)) return null;
-  return { SAR_EGP: EGP / SAR, USD_EGP: EGP };
+  return { base: 'USD', perUsd: { USD: 1, EGP, SAR } };
 }
 
 // https://open.er-api.com/v6/latest/USD → { result: 'success', base_code: 'USD', rates: {…} }
-export function parseOpenErApi(json: unknown): RatesSnapshot | null {
+export function parseOpenErApi(json: unknown): RateTable | null {
   if (!isRecord(json) || json.result !== 'success' || json.base_code !== 'USD') return null;
   return fxFromUsdRates(json.rates);
 }
 
 // https://api.exchangerate.fun/latest?base=USD → { base: 'USD', rates: {…} }
-export function parseExchangerateFun(json: unknown): RatesSnapshot | null {
+export function parseExchangerateFun(json: unknown): RateTable | null {
   if (!isRecord(json) || json.base !== 'USD') return null;
   return fxFromUsdRates(json.rates);
 }

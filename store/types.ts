@@ -1,8 +1,13 @@
+import type { CurrentRates, RateSnapshot } from '@/utils/rates';
+
+export type { CurrentRates, RateSnapshot };
+
 // Data model V2. Monetary amounts are stored in the entity's own currency unless the
 // field name says EGP. Dates are local calendar dates ('YYYY-MM-DD'); createdAt is an ISO timestamp.
 // Deliberately no interest/APR fields anywhere.
 
-export type CurrencyCode = 'EGP' | 'SAR' | 'USD';
+// An ISO 4217 code from the currency registry (constants/currencyRegistry.ts).
+export type CurrencyCode = string;
 
 // Every synced entity carries the time it was last created or changed (ISO), so a future
 // server sync can resolve conflicts. Store operations set it; never edit it by hand.
@@ -10,8 +15,9 @@ interface Synced {
   updatedAt: string;
 }
 
-// Country the money or asset physically sits in.
-export type Location = 'EG' | 'SA';
+// Country the money or asset physically sits in: an ISO 3166-1 alpha-2 code from the country
+// registry (constants/countries.ts).
+export type CountryCode = string;
 
 export type Bucket = 'essentials' | 'lifestyle' | 'giving' | 'income';
 export type ExpenseBucket = Exclude<Bucket, 'income'>;
@@ -25,9 +31,12 @@ export interface Account extends Synced {
   openingBalance: number;
   // The date openingBalance refers to.
   openingDate?: string;
-  location: Location;
+  country: CountryCode;
   createdAt: string;
   archived?: boolean;
+  // A genuine overdraft / credit account: its balance may go below zero without asking. Such an account holds no
+  // reservations (they only ever fit in max(0, balance)). Missing = false: going below zero needs a confirmation.
+  allowNegative?: boolean;
 }
 
 export interface Category extends Synced {
@@ -40,24 +49,14 @@ export interface Category extends Synced {
   archived?: boolean;
 }
 
-// Exchange rates kept with a record, so its amount can later be shown in another currency as it
-// was worth then (never at whatever the rates are today).
-export interface RatesSnapshot {
-  SAR_EGP: number;
-  USD_EGP: number;
-}
-
 interface TransactionBase extends Synced {
   id: string;
-  amount: number;
   date: string;
   note?: string;
-  // Exchange rate of the transaction's currency to EGP, snapshotted at creation.
-  rateToEGP: number;
-  // All rates at creation (re-taken with rateToEGP when the currency changes). Missing on
-  // transactions made before it existed: converting those into a third currency falls back to
-  // today's rates for the target leg.
-  ratesSnapshot?: RatesSnapshot;
+  // The immutable rate snapshot (state.rateSnapshots) in force when it was recorded: its amount can
+  // later be shown in another currency as it was worth then, never at whatever the rates are today.
+  // Re-taken only when the transaction's currency changes.
+  rateSnapshotId: string;
   createdAt: string;
   // Set when the transaction records an occurrence of a recurring rule: the rule and the
   // scheduled date it fulfils (the transaction's own `date` may differ).
@@ -67,6 +66,7 @@ interface TransactionBase extends Synced {
 
 export interface IncomeExpenseTransaction extends TransactionBase {
   type: 'income' | 'expense';
+  amount: number;
   // Always equals the account's currency.
   currency: CurrencyCode;
   accountId: string;
@@ -74,28 +74,59 @@ export interface IncomeExpenseTransaction extends TransactionBase {
   liabilityId?: string;
   // A one-off expense (e.g. furnishing): excluded from monthly averages.
   oneTime?: boolean;
+  // Only on the VIRTUAL expense rows that selectors make from the fees of a transfer or exchange (never
+  // stored): the id of that transfer or exchange.
+  feeOfId?: string;
 }
 
+// A charge of a transfer or exchange (bank, wallet or exchange-house fee). It leaves `accountId` (the source or
+// the target of the move), in that account's currency, and counts as spending in the "رسوم" category.
+export interface Fee {
+  accountId: string;
+  // In the account's currency, > 0.
+  amount: number;
+  // Defaults to the fees category.
+  categoryId?: string;
+}
+
+// Money moved between two own accounts of the SAME currency: `amount` leaves `from` and arrives in `to`. Not
+// income, not spending, no FX gain or loss. Its fees are spending.
 export interface TransferTransaction extends TransactionBase {
   type: 'transfer';
   fromAccountId: string;
   toAccountId: string;
-  // `amount` leaves the source account (its currency); `toAmount` arrives in the target
-  // account's currency, so SAR→EGP transfers record the real converted amount.
-  toAmount: number;
+  amount: number;
+  fees: Fee[];
+}
+
+// A currency exchange between two own accounts of DIFFERENT currencies: `sentAmount` leaves `from` (its
+// currency) and `receivedAmount` arrives in `to` (its currency). The received amount is what the user actually
+// got, never computed; the rate is implied (received ÷ sent) and not stored.
+export interface ExchangeTransaction extends TransactionBase {
+  type: 'exchange';
+  fromAccountId: string;
+  toAccountId: string;
+  sentAmount: number;
+  receivedAmount: number;
+  fees: Fee[];
 }
 
 // Cash turned into a holding (e.g. buying gold). Lowers the account balance but is not an
 // expense: it is excluded from spending, savings rate and averages.
 export interface AssetPurchaseTransaction extends TransactionBase {
   type: 'asset_purchase';
+  amount: number;
   accountId: string;
   // Always equals the account's currency.
   currency: CurrencyCode;
   holdingId: string;
 }
 
-export type Transaction = IncomeExpenseTransaction | TransferTransaction | AssetPurchaseTransaction;
+export type Transaction =
+  | IncomeExpenseTransaction
+  | TransferTransaction
+  | ExchangeTransaction
+  | AssetPurchaseTransaction;
 
 export type SinkingFrequency = 'yearly' | 'semiannual' | 'quarterly';
 
@@ -119,22 +150,60 @@ export interface Fund extends Synced {
   nextDueDate?: string;
 }
 
-export interface FundMovement extends Synced {
+// Why a reservation changed. 'reserve' / 'release': the user put money aside / gave it back; 'reallocate': one
+// fund → another on the same account (a pair sharing `groupId`); 'follow_transfer' / 'follow_exchange': the
+// reservation moved with a transfer, or was converted by an exchange at its recorded amounts (pairs sharing
+// `groupId` = the transaction id); 'spend': a sinking-fund payment consumed it; 'cover': released to cover
+// spending or an edit; 'adjust': a migrated v7 movement, or a repair.
+export type ReservationKind =
+  | 'reserve'
+  | 'release'
+  | 'reallocate'
+  | 'follow_transfer'
+  | 'follow_exchange'
+  | 'spend'
+  | 'cover'
+  | 'adjust';
+
+// Money of one account set aside for one fund. `amount` is signed and in the ACCOUNT's currency (a reservation
+// never has a currency of its own), so 1,000 SAR reserved for an EGP fund stays 1,000 SAR whatever the rates do;
+// only its value in the fund's currency moves. reservation(fund, account) = Σ amount, never stored.
+export interface ReservationMovement extends Synced {
   id: string;
   fundId: string;
-  // In `currency`: positive = allocate, negative = withdraw. It never changes with the rates;
-  // only its value in the fund's currency does (see fundAllocated).
+  accountId: string;
   amount: number;
-  // The currency `amount` is in, and so the currency of the money that was set aside. Missing =
-  // the fund's currency, covered by whichever money is available (matching currency first, then
-  // the others at today's rate): every movement saved before currencies existed, and the fund
-  // edit sheet's adjustments.
-  currency?: CurrencyCode;
+  kind: ReservationKind;
+  groupId?: string;
+  sourceTransactionId?: string;
   date: string;
   note?: string;
-  // Rates when the movement was made; used to show it in another currency in history (plan,
-  // review, month totals). Missing on older movements, which convert at today's rates.
-  ratesSnapshot?: RatesSnapshot;
+  // The rate snapshot in force when it was made, to show it in another currency in history (plan, review,
+  // "saved this month").
+  rateSnapshotId: string;
+}
+
+export type UnresolvedReason = 'ambiguous' | 'insufficient' | 'negative' | 'no_account';
+
+// Migration only: a v7 fund movement that could not be assigned to ONE account without guessing. It still counts
+// toward its fund's total (in `currency`) but never against any account's available money, until the user
+// resolves it (picks an account). Empty after resolution.
+export interface UnresolvedMovement extends Synced {
+  id: string;
+  fundId: string;
+  // In `currency`, signed.
+  amount: number;
+  currency: CurrencyCode;
+  date: string;
+  note?: string;
+  rateSnapshotId: string;
+  reason: UnresolvedReason;
+}
+
+// An amount in its own currency.
+export interface Money {
+  amount: number;
+  currency: CurrencyCode;
 }
 
 export type GoldKarat = 18 | 21 | 24;
@@ -145,9 +214,12 @@ export interface GoldHolding extends Synced {
   name: string;
   weightGrams: number;
   karat: GoldKarat;
-  purchaseCostEGP: number;
+  // What it cost, in the currency it was paid in (native: it never changes with the rates)…
+  purchaseCost: Money;
+  // …and the rates then, to show the cost in another currency as it was worth.
+  purchaseRateSnapshotId: string;
   purchaseDate?: string;
-  location?: Location; // treated as 'EG' when missing
+  country: CountryCode;
   note?: string;
 }
 
@@ -157,9 +229,10 @@ export interface CurrencyHolding extends Synced {
   name: string;
   currency: CurrencyCode;
   quantity: number;
-  purchaseCostEGP: number;
+  purchaseCost: Money;
+  purchaseRateSnapshotId: string;
   purchaseDate?: string;
-  location?: Location; // treated as 'EG' when missing
+  country: CountryCode;
   note?: string;
 }
 
@@ -173,12 +246,14 @@ export interface Liability extends Synced {
   monthlyPayment?: number;
   startDate: string;
   notes?: string;
+  // Where the debt is owed; it is subtracted from that country's net worth.
+  country: CountryCode;
 }
 
-export type RecurringKind = 'income' | 'expense' | 'transfer';
+export type RecurringKind = 'income' | 'expense' | 'transfer' | 'exchange';
 export type RecurringFrequency = 'weekly' | 'monthly' | 'yearly';
 
-// A scheduled income, expense or transfer. Occurrences are computed from startDate,
+// A scheduled income, expense, transfer or exchange. Occurrences are computed from startDate,
 // frequency × interval and dayOfMonth (store/recurring.ts); the ones on or before today that
 // have no transaction (matched by recurringRuleId + occurrenceDate) and aren't skipped are
 // "due". 'auto' rules record them automatically; 'confirm' rules wait in the due inbox.
@@ -191,8 +266,8 @@ export interface RecurringRule extends Synced {
   currency: CurrencyCode;
   accountId: string;
   categoryId?: string; // income/expense
-  toAccountId?: string; // transfer
-  toAmount?: number; // transfer, in the target account's currency
+  toAccountId?: string; // transfer / exchange
+  toAmount?: number; // exchange: the amount received, in the target account's currency (required)
   frequency: RecurringFrequency;
   // Every N weeks/months/years (≥ 1).
   interval: number;
@@ -247,19 +322,24 @@ export interface MonthlyPlan extends Synced {
 // recomputed from what existed at the month's end, valued at the rates/prices of `takenAt`
 // (there is no price history).
 // One per month; the id derives from the month (nw-YYYY-MM).
-// What net worth is made of, in EGP, per location (Egypt / Saudi): cash in accounts, gold, and
-// currency holdings. Liabilities have no location and are subtracted from Egypt, so
-// EG + SA - liabilitiesEGP is the net worth.
+// What net worth is made of, in EGP, per country: cash in accounts, gold, currency holdings, and
+// the liabilities owed there. cash + gold + currencies - liabilities, summed over the countries,
+// is the net worth.
 export interface LocationBreakdown {
   cashEGP: number;
   goldEGP: number;
   currenciesEGP: number;
+  liabilitiesEGP: number;
 }
 
-export interface NetWorthBreakdown {
-  EG: LocationBreakdown;
-  SA: LocationBreakdown;
-  liabilitiesEGP: number;
+export type NetWorthBreakdown = Record<CountryCode, LocationBreakdown>;
+
+// The same four parts, computed now in whatever currency a screen asks for (the stored one is always EGP).
+export interface CountryBreakdown {
+  cash: number;
+  gold: number;
+  currencies: number;
+  liabilities: number;
 }
 
 export interface NetWorthSnapshot extends Synced {
@@ -270,8 +350,9 @@ export interface NetWorthSnapshot extends Synced {
   holdingsEGP: number;
   // Optional: snapshots taken before the analytics tab have none (see snapshotDetail).
   breakdown?: NetWorthBreakdown;
-  // The rates the EGP figures were valued at, to show them in another currency as they were.
-  ratesSnapshot?: RatesSnapshot;
+  // The rates the EGP figures were valued at, to show them in another currency as they were. A
+  // snapshot of quality 'estimated' means the month had no rates of its own (see the migration).
+  rateSnapshotId: string;
   takenAt: string;
   estimated?: boolean;
 }
@@ -291,22 +372,29 @@ export interface MonthlyReview extends Synced {
   completedAt: string;
 }
 
-export interface ExchangeRates {
-  SAR_EGP: number;
-  USD_EGP: number;
-  lastUpdated: string;
-}
-
 // Defaults for the next transaction form, remembered per type. Ids may point at entities
 // that were deleted since, so readers must check they still exist.
 export interface LastUsedSelection {
   expense?: { accountId: string; categoryId: string };
   income?: { accountId: string; categoryId: string };
   transfer?: { fromAccountId: string; toAccountId: string };
+  exchange?: { fromAccountId: string; toAccountId: string };
 }
 
 export interface Settings {
-  exchangeRates: ExchangeRates;
+  // The CURRENT rate table (USD base): what current valuations use. Records keep their own snapshot.
+  rates: CurrentRates;
+  // The currencies offered in pickers and kept in rate tables (settings order). Any currency the data
+  // already uses is listed too, whether or not it is here.
+  enabledCurrencies: CurrencyCode[];
+  // The currency Home, Assets, Review and Analytics show totals in by default. A screen may override it for
+  // itself; changing it changes no stored amount.
+  reportingCurrency: CurrencyCode;
+  // The currency a new monthly plan starts in (each plan keeps its own).
+  planCurrency: CurrencyCode;
+  // How many of the v7 → v8 migration's sub-steps this data has had (store/migrateV8.ts). A payload stored
+  // at version 8 by an earlier build has fewer (or none) and is completed on hydration.
+  v8Step: number;
   goldPrice24kEGP: number;
   // Market price of 21k, stored separately (it isn't exactly 24k × 21/24). 18k derives from 24k.
   goldPrice21kEGP: number;
@@ -350,7 +438,8 @@ export type SyncEntity =
   | 'category'
   | 'transaction'
   | 'fund'
-  | 'fundMovement'
+  | 'reservationMovement'
+  | 'unresolvedMovement'
   | 'holding'
   | 'liability'
   | 'recurringRule'
@@ -368,11 +457,15 @@ export interface Tombstone {
 }
 
 export interface FinanceState {
+  // Immutable, append-only, deduplicated rate tables that records point at (utils/rates.ts).
+  rateSnapshots: RateSnapshot[];
   accounts: Account[];
   categories: Category[];
   transactions: Transaction[];
   funds: Fund[];
-  fundMovements: FundMovement[];
+  // Account-backed reservations (replaces the v7 fundMovements) and the migration's quarantine.
+  reservationMovements: ReservationMovement[];
+  unresolvedMovements: UnresolvedMovement[];
   holdings: Holding[];
   liabilities: Liability[];
   recurringRules: RecurringRule[];

@@ -1,24 +1,33 @@
 import { formatMoney } from '@/components/ui/formatMoney';
-import { convertCurrency, fromEGP, toEGP } from '@/utils/currency';
+import { isKnownCurrency } from '@/constants/currencyRegistry';
+import { convertCurrency, fromEGP, requireSnapshot, toEGP } from '@/utils/currency';
+import { addIn, roundIn, sumIn } from '@/utils/money';
+import type { RateTable } from '@/utils/rates';
 import { addMonthsToDate, daysBetween, isDateKey, monthOf, shiftDate, shiftMonth, toDateKey, toMonthKey } from '@/utils/dates';
 import { formatMonthLabel, formatPercent } from '@/utils/formatters';
 import { CATEGORY_IDS } from './defaultCategories';
 import {
+  currencyList,
+  countsAsSaving,
   fundCashByCurrency,
   fundCurrent,
   fundDueDate,
   fundLinkedValue,
+  fundMovementRows,
   fundProgress,
   fundsByPriority,
+  feeExpenses,
   fundStatus,
   goldPricePerGram,
-  holdingValueEGP,
+  holdingCost,
+  holdingValue,
   liquidByCurrency,
   movementAmountIn,
   movementValueInFund,
   netWorthBreakdown,
-  netWorthEGP,
+  netWorth,
   netWorthFigures,
+  toStoredBreakdown,
   transactionAmountIn,
   unassignedSummary,
 } from './selectors';
@@ -27,10 +36,9 @@ import type {
   CurrencyCode,
   ExpenseBucket,
   FinanceState,
+  CountryCode,
   GoldKarat,
-  Location,
   NetWorthBreakdown,
-  RatesSnapshot,
   Transaction,
 } from './types';
 
@@ -49,7 +57,8 @@ type State = FinanceState;
 const sum = (values: number[]) => values.reduce((total, v) => total + v, 0);
 const EPSILON = 0.005;
 
-export type DisplayCurrency = 'EGP' | 'SAR';
+// Any currency the registry knows; the reporting currency unless the screen picks another.
+export type DisplayCurrency = CurrencyCode;
 export type PeriodKind = 'month' | '3m' | '6m' | 'year' | 'sinceStart' | 'custom';
 
 export const BUCKET_LABELS: Record<ExpenseBucket, string> = {
@@ -164,8 +173,9 @@ function bucketLookup(state: State) {
 function scan(state: State, period: Pick<Period, 'from' | 'to'>, currency: DisplayCurrency, includeOneTime: boolean): Rec[] {
   const bucketFor = bucketLookup(state);
   const result: Rec[] = [];
-  for (const tx of state.transactions) {
-    if (tx.type === 'transfer' || !inPeriod(tx.date, period)) continue;
+  // Fees of transfers and exchanges are spending too (virtual expense rows).
+  for (const tx of [...state.transactions, ...feeExpenses(state)]) {
+    if (tx.type === 'transfer' || tx.type === 'exchange' || !inPeriod(tx.date, period)) continue;
     const base = { id: tx.id, date: tx.date, month: monthOf(tx.date), amount: transactionAmountIn(state, tx, currency) };
     if (tx.type === 'asset_purchase') {
       result.push({ ...base, kind: 'gold', oneTime: false });
@@ -180,8 +190,11 @@ function scan(state: State, period: Pick<Period, 'from' | 'to'>, currency: Displ
 
 // Net fund movements in the period (allocations minus withdrawals), as made.
 function fundsNet(state: State, period: Pick<Period, 'from' | 'to'>, currency: DisplayCurrency): number {
-  return sum(
-    state.fundMovements.filter((m) => inPeriod(m.date, period)).map((m) => movementAmountIn(state, m, currency))
+  return sumIn(
+    fundMovementRows(state)
+      .filter((m) => inPeriod(m.date, period) && countsAsSaving(m.kind))
+      .map((m) => movementAmountIn(state, m, currency)),
+    currency
   );
 }
 
@@ -214,19 +227,20 @@ function totalsOf(state: State, query: AnalyticsQuery, period: Pick<Period, 'fro
     fundsNet: fundsNet(state, period, query.currency),
   };
   for (const r of scan(state, period, query.currency, query.includeOneTime)) {
-    if (r.kind === 'gold') totals.gold += r.amount;
+    const c = query.currency;
+    if (r.kind === 'gold') totals.gold = addIn(totals.gold, r.amount, c);
     else if (r.kind === 'income') {
-      totals.income += r.amount;
-      totals.incomeByCategory.set(r.categoryId!, (totals.incomeByCategory.get(r.categoryId!) ?? 0) + r.amount);
+      totals.income = addIn(totals.income, r.amount, c);
+      totals.incomeByCategory.set(r.categoryId!, addIn(totals.incomeByCategory.get(r.categoryId!) ?? 0, r.amount, c));
     } else {
-      totals.expense += r.amount;
-      totals.byBucket[r.bucket!] += r.amount;
+      totals.expense = addIn(totals.expense, r.amount, c);
+      totals.byBucket[r.bucket!] = addIn(totals.byBucket[r.bucket!], r.amount, c);
       const entry = totals.byCategory.get(r.categoryId!) ?? { amount: 0, bucket: r.bucket! };
-      entry.amount += r.amount;
+      entry.amount = addIn(entry.amount, r.amount, c);
       totals.byCategory.set(r.categoryId!, entry);
     }
   }
-  totals.net = totals.income - totals.expense;
+  totals.net = roundIn(totals.income - totals.expense, query.currency);
   totals.savingsRate = totals.income > EPSILON ? totals.net / totals.income : null;
   return totals;
 }
@@ -237,10 +251,11 @@ export function periodTotals(state: State, query: AnalyticsQuery): PeriodTotals 
 
 // One-time expenses in the period, whatever the toggle says.
 export function oneTimeSpend(state: State, query: AnalyticsQuery): number {
-  return sum(
+  return sumIn(
     scan(state, query.period, query.currency, true)
       .filter((r) => r.kind === 'expense' && r.oneTime)
-      .map((r) => r.amount)
+      .map((r) => r.amount),
+    query.currency
   );
 }
 
@@ -263,9 +278,9 @@ export interface DrillResult {
 
 export function drillTransactions(state: State, query: AnalyticsQuery, filter: DrillFilter): DrillResult {
   const bucketFor = bucketLookup(state);
-  const transactions = state.transactions
+  const matched = [...state.transactions, ...feeExpenses(state)]
     .filter((tx) => {
-      if (tx.type === 'transfer' || tx.type !== filter.type || !inPeriod(tx.date, query.period)) return false;
+      if (tx.type === 'transfer' || tx.type === 'exchange' || tx.type !== filter.type || !inPeriod(tx.date, query.period)) return false;
       if (tx.type === 'asset_purchase') return true;
       if (filter.categoryIds && !filter.categoryIds.includes(tx.categoryId)) return false;
       if (filter.excludeCategoryIds?.includes(tx.categoryId)) return false;
@@ -277,7 +292,19 @@ export function drillTransactions(state: State, query: AnalyticsQuery, filter: D
       return true;
     })
     .sort((a, b) => (a.date !== b.date ? (a.date < b.date ? 1 : -1) : a.createdAt < b.createdAt ? 1 : -1));
-  return { transactions, total: sum(transactions.map((tx) => transactionAmountIn(state, tx as never, query.currency))) };
+  // The total counts every matching row. A fee has no row of its own: the list shows (and opens) the transfer or
+  // exchange it belongs to, once however many of its fees match.
+  const total = sumIn(matched.map((tx) => transactionAmountIn(state, tx as never, query.currency)), query.currency);
+  const seen = new Set<string>();
+  const transactions: Transaction[] = [];
+  for (const tx of matched) {
+    const row = tx.type === 'expense' && tx.feeOfId ? state.transactions.find((t) => t.id === tx.feeOfId) : tx;
+    if (row && !seen.has(row.id)) {
+      seen.add(row.id);
+      transactions.push(row);
+    }
+  }
+  return { transactions, total };
 }
 
 // Route params for the drill-down screen, and back (anything invalid → null).
@@ -308,7 +335,7 @@ export function parseDrillParams(
   const currency = one('currency');
   if (!from || !to || !isDateKey(from) || !isDateKey(to) || from > to) return null;
   if (type !== 'income' && type !== 'expense' && type !== 'asset_purchase') return null;
-  if (currency !== 'EGP' && currency !== 'SAR') return null;
+  if (!currency || !isKnownCurrency(currency)) return null;
   const bucket = one('bucket');
   const list = (key: string) => {
     const value = one(key);
@@ -385,15 +412,15 @@ export function spendingFlow(state: State, query: AnalyticsQuery): SpendingFlow 
   const fundsOut = Math.max(0, totals.fundsNet);
   const fundsIn = Math.max(0, -totals.fundsNet);
   const spending = totals.expense;
-  const out = spending + fundsOut + totals.gold;
-  const inKnown = totals.income + fundsIn;
-  const fromBalance = Math.max(0, out - inKnown);
-  const surplus = Math.max(0, inKnown - out);
+  const out = sumIn([spending, fundsOut, totals.gold], query.currency);
+  const inKnown = sumIn([totals.income, fundsIn], query.currency);
+  const fromBalance = Math.max(0, roundIn(out - inKnown, query.currency));
+  const surplus = Math.max(0, roundIn(inKnown - out, query.currency));
 
   const sources: FlowNode[] = [];
   const salary = totals.incomeByCategory.get(CATEGORY_IDS.salary) ?? 0;
   const freelance = totals.incomeByCategory.get(CATEGORY_IDS.freelance) ?? 0;
-  const otherIncome = totals.income - salary - freelance;
+  const otherIncome = roundIn(totals.income - salary - freelance, query.currency);
   const incomeSource = (id: string, label: string, value: number, drill: DrillFilter): void => {
     if (value > EPSILON) sources.push({ id, label, kind: 'source', value, group: 'income', drill });
   };
@@ -420,8 +447,8 @@ export function spendingFlow(state: State, query: AnalyticsQuery): SpendingFlow 
   if (surplus > EPSILON) leaves.push({ id: 'dest:surplus', label: 'فايض', kind: 'leaf', value: surplus, group: 'surplus', drill: null });
   const destinations = [...buckets, ...leaves];
 
-  const totalIn = sum(sources.map((s) => s.value));
-  const totalOut = sum(destinations.map((d) => d.value));
+  const totalIn = sumIn(sources.map((s) => s.value), query.currency);
+  const totalOut = sumIn(destinations.map((d) => d.value), query.currency);
   const nodes: FlowNode[] = [...sources, ...destinations];
   const links: FlowLink[] = [];
   if (totalIn > EPSILON) {
@@ -452,7 +479,7 @@ export function spendingFlow(state: State, query: AnalyticsQuery): SpendingFlow 
       links.push({ source: bucket.id, target: id, value: entry.amount });
     }
     const rest = ranked.slice(TOP_CATEGORIES_PER_BUCKET);
-    const restValue = sum(rest.map(([, e]) => e.amount));
+    const restValue = sumIn(rest.map(([, e]) => e.amount), query.currency);
     if (restValue > EPSILON) {
       const id = `cat:${key}:rest`;
       nodes.push({
@@ -493,8 +520,8 @@ export function monthlyTrend(state: State, query: AnalyticsQuery): MonthlyTrend 
   for (const r of scan(state, query.period, query.currency, query.includeOneTime)) {
     const entry = byMonth.get(r.month);
     if (!entry) continue;
-    if (r.kind === 'income') entry.income += r.amount;
-    else if (r.kind === 'expense') entry.expense += r.amount;
+    if (r.kind === 'income') entry.income = addIn(entry.income, r.amount, query.currency);
+    else if (r.kind === 'expense') entry.expense = addIn(entry.expense, r.amount, query.currency);
   }
   const rows: TrendMonth[] = months.map((month) => {
     const { income, expense } = byMonth.get(month)!;
@@ -502,7 +529,7 @@ export function monthlyTrend(state: State, query: AnalyticsQuery): MonthlyTrend 
       month,
       income,
       expense,
-      net: income - expense,
+      net: roundIn(income - expense, query.currency),
       savingsRate: income > EPSILON ? (income - expense) / income : null,
       overspent: expense > income + EPSILON,
     };
@@ -591,7 +618,7 @@ export function spendingBreakdown(state: State, query: AnalyticsQuery): Spending
 
 // --- 4. Net worth over time ---------------------------------------------------------------
 
-export type NetWorthLocation = 'all' | Location;
+export type NetWorthLocation = 'all' | CountryCode;
 
 export interface NetWorthPoint {
   month: string;
@@ -616,13 +643,13 @@ export interface NetWorthSeries {
 // Each snapshot's figures are in EGP at the rates it was valued at; showing them in SAR uses
 // those same rates (today's for the current month and for snapshots that didn't keep theirs).
 function breakdownPart(b: NetWorthBreakdown, location: NetWorthLocation) {
-  const parts = location === 'all' ? [b.EG, b.SA] : [b[location]];
+  const parts = location === 'all' ? Object.values(b) : b[location] ? [b[location]] : [];
   return {
-    cash: sum(parts.map((p) => p.cashEGP)),
-    gold: sum(parts.map((p) => p.goldEGP)),
-    currencies: sum(parts.map((p) => p.currenciesEGP)),
-    // Liabilities are Egypt's.
-    liabilities: location === 'SA' ? 0 : b.liabilitiesEGP,
+    cash: sumIn(parts.map((p) => p.cashEGP), 'EGP'),
+    gold: sumIn(parts.map((p) => p.goldEGP), 'EGP'),
+    currencies: sumIn(parts.map((p) => p.currenciesEGP), 'EGP'),
+    // Liabilities belong to the country they are owed in.
+    liabilities: sumIn(parts.map((p) => p.liabilitiesEGP), 'EGP'),
   };
 }
 
@@ -632,11 +659,12 @@ export function netWorthSeries(
 ): NetWorthSeries {
   const { location, currency, includeEstimated, now } = options;
   const current = toMonthKey(now);
-  const liveRates = state.settings.exchangeRates;
+  const liveRates = state.settings.rates;
   const points: NetWorthPoint[] = [];
   let skipped = 0;
   const stored = state.netWorthSnapshots.filter((s) => s.month !== current);
-  const live = netWorthFigures(state);
+  // Snapshots keep EGP; the live month is valued the same way, then everything is shown through its own rates.
+  const live = netWorthFigures(state, 'EGP');
   const entries = [
     ...stored.map((s) => ({
       month: s.month,
@@ -644,11 +672,11 @@ export function netWorthSeries(
       live: false,
       breakdown: s.breakdown,
       totalEGP: s.netWorthEGP,
-      rates: s.ratesSnapshot ?? liveRates,
+      rates: requireSnapshot(state.rateSnapshots, s.rateSnapshotId),
     })),
-    { month: current, estimated: false, live: true, breakdown: live.breakdown, totalEGP: live.netWorthEGP, rates: liveRates },
+    { month: current, estimated: false, live: true, breakdown: toStoredBreakdown(live.breakdown), totalEGP: live.netWorth, rates: liveRates },
   ].sort((a, b) => (a.month < b.month ? -1 : 1));
-  const show = (egp: number, rates: RatesSnapshot) => (currency === 'EGP' ? egp : fromEGP(egp, currency, rates));
+  const show = (egp: number, rates: RateTable) => roundIn(currency === 'EGP' ? egp : fromEGP(egp, currency, rates), currency);
   for (const e of entries) {
     if (e.estimated && !includeEstimated) continue;
     if (!e.breakdown) {
@@ -668,7 +696,7 @@ export function netWorthSeries(
       cash: show(part.cash, e.rates),
       gold: show(part.gold, e.rates),
       currencies: show(part.currencies, e.rates),
-      total: show(part.cash + part.gold + part.currencies - part.liabilities, e.rates),
+      total: show(sumIn([part.cash, part.gold, part.currencies, -part.liabilities], 'EGP'), e.rates),
     });
   }
   return { points, estimatedCount: points.filter((p) => p.estimated).length, skipped };
@@ -696,7 +724,7 @@ export interface GoldRow {
 export interface MoneyMap {
   liquid: LiquidRow[];
   liquidTotal: number;
-  byLocation: { location: Location; cash: number; gold: number; currencies: number; total: number }[];
+  byLocation: { location: CountryCode; cash: number; gold: number; currencies: number; total: number }[];
   gold: { rows: GoldRow[]; grams: number; value: number; cost: number; pnl: number };
   netWorth: number;
   // Gold's share of net worth (0..1); null when net worth isn't positive.
@@ -704,61 +732,61 @@ export interface MoneyMap {
 }
 
 export function moneyMap(state: State, currency: DisplayCurrency): MoneyMap {
-  const rates = state.settings.exchangeRates;
-  const show = (egp: number) => (currency === 'EGP' ? egp : fromEGP(egp, currency, rates));
+  const rates = state.settings.rates;
   const native = liquidByCurrency(state);
-  const liquid: LiquidRow[] = (['EGP', 'SAR', 'USD'] as CurrencyCode[])
+  const liquid: LiquidRow[] = currencyList(state)
     .filter((c) => state.accounts.some((a) => a.currency === c) || Math.abs(native[c]) > EPSILON)
     .map((c) => ({
       currency: c,
       native: native[c],
-      valueEGP: toEGP(native[c], c, rates),
-      value: convertCurrency(native[c], c, currency, rates),
+      valueEGP: roundIn(toEGP(native[c], c, rates), 'EGP'),
+      value: roundIn(convertCurrency(native[c], c, currency, rates), currency),
     }));
 
-  const breakdown = netWorthBreakdown(state);
-  const byLocation = (['EG', 'SA'] as Location[]).map((location) => {
+  // Every item is valued in the display currency and rounded there before it is summed (INV-7).
+  const breakdown = netWorthBreakdown(state, currency);
+  const byLocation = Object.keys(breakdown).map((location) => {
     const b = breakdown[location];
     return {
       location,
-      cash: show(b.cashEGP),
-      gold: show(b.goldEGP),
-      currencies: show(b.currenciesEGP),
-      total: show(b.cashEGP + b.goldEGP + b.currenciesEGP),
+      cash: b.cash,
+      gold: b.gold,
+      currencies: b.currencies,
+      total: sumIn([b.cash, b.gold, b.currencies], currency),
     };
   });
 
-  const karats = new Map<GoldKarat, { grams: number; valueEGP: number; costEGP: number }>();
+  const karats = new Map<GoldKarat, { grams: number; value: number; cost: number }>();
   for (const h of state.holdings) {
     if (h.type !== 'gold') continue;
-    const row = karats.get(h.karat) ?? { grams: 0, valueEGP: 0, costEGP: 0 };
+    const row = karats.get(h.karat) ?? { grams: 0, value: 0, cost: 0 };
     row.grams += h.weightGrams;
-    row.valueEGP += h.weightGrams * goldPricePerGram(state.settings, h.karat);
-    row.costEGP += h.purchaseCostEGP;
+    row.value = addIn(row.value, holdingValue(state, h, currency), currency);
+    row.cost = addIn(row.cost, holdingCost(state, h, currency), currency);
     karats.set(h.karat, row);
   }
   const goldRows: GoldRow[] = ([24, 21, 18] as GoldKarat[])
     .filter((k) => karats.has(k))
     .map((karat) => {
       const r = karats.get(karat)!;
-      return { karat, grams: r.grams, value: show(r.valueEGP), cost: show(r.costEGP), pnl: show(r.valueEGP - r.costEGP) };
+      return { karat, grams: r.grams, value: r.value, cost: r.cost, pnl: roundIn(r.value - r.cost, currency) };
     });
-  const goldValueEGP = sum(state.holdings.filter((h) => h.type === 'gold').map((h) => holdingValueEGP(state, h)));
-  const goldCostEGP = sum(state.holdings.filter((h) => h.type === 'gold').map((h) => h.purchaseCostEGP));
-  const net = netWorthEGP(state);
+  const goldValue = sumIn(state.holdings.filter((h) => h.type === 'gold').map((h) => holdingValue(state, h, currency)), currency);
+  const goldCost = sumIn(state.holdings.filter((h) => h.type === 'gold').map((h) => holdingCost(state, h, currency)), currency);
+  const net = netWorth(state, currency);
   return {
     liquid,
-    liquidTotal: sum(liquid.map((l) => l.value)),
+    liquidTotal: sumIn(liquid.map((l) => l.value), currency),
     byLocation,
     gold: {
       rows: goldRows,
       grams: sum(goldRows.map((r) => r.grams)),
-      value: show(goldValueEGP),
-      cost: show(goldCostEGP),
-      pnl: show(goldValueEGP - goldCostEGP),
+      value: goldValue,
+      cost: goldCost,
+      pnl: roundIn(goldValue - goldCost, currency),
     },
-    netWorth: show(net),
-    goldShare: net > EPSILON ? goldValueEGP / net : null,
+    netWorth: net,
+    goldShare: net > EPSILON ? goldValue / net : null,
   };
 }
 
@@ -795,29 +823,31 @@ export function runway(state: State, currency: DisplayCurrency, now: Date): Runw
   const window = Array.from({ length: RUNWAY_WINDOW }, (_, i) => shiftMonth(current, -(i + 1))).filter((m) => m >= startMonth);
   const bucketFor = bucketLookup(state);
   const perMonth = new Map<string, number>();
-  const nativeTotals: Record<CurrencyCode, number> = { EGP: 0, SAR: 0, USD: 0 };
+  const nativeTotals: Record<CurrencyCode, number> = Object.fromEntries(currencyList(state).map((c) => [c, 0]));
   const monthsWithEssentials = new Set<string>();
-  for (const tx of state.transactions) {
+  for (const tx of [...state.transactions, ...feeExpenses(state)]) {
     if (tx.type !== 'expense' || tx.oneTime) continue;
     const month = monthOf(tx.date);
     if (!window.includes(month) || tx.date < state.settings.trackingStartDate) continue;
     if (bucketFor(tx.categoryId) !== 'essentials') continue;
     monthsWithEssentials.add(month);
-    perMonth.set(month, (perMonth.get(month) ?? 0) + transactionAmountIn(state, tx, currency));
-    nativeTotals[tx.currency] += tx.amount;
+    perMonth.set(month, addIn(perMonth.get(month) ?? 0, transactionAmountIn(state, tx, currency), currency));
+    nativeTotals[tx.currency] = addIn(nativeTotals[tx.currency], tx.amount, tx.currency);
   }
   const monthsObserved = monthsWithEssentials.size;
-  const avg = monthsObserved > 0 ? sum([...perMonth.values()]) / monthsObserved : 0;
+  const avg = monthsObserved > 0 ? sumIn([...perMonth.values()], currency) / monthsObserved : 0;
   const months = (amount: number, per: number) => (per > EPSILON ? Math.max(0, amount) / per : null);
 
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const unassigned = unassignedSummary(state);
   const liquidNative = liquidByCurrency(state);
-  const liquidAmount = sum((['EGP', 'SAR', 'USD'] as CurrencyCode[]).map((c) => convertCurrency(liquidNative[c], c, currency, rates)));
-  const unassignedAmount = sum(
-    (['EGP', 'SAR', 'USD'] as CurrencyCode[]).map((c) => convertCurrency(unassigned.byCurrency[c], c, currency, rates))
+  const codes = currencyList(state);
+  const liquidAmount = sumIn(codes.map((c) => roundIn(convertCurrency(liquidNative[c], c, currency, rates), currency)), currency);
+  const unassignedAmount = sumIn(
+    codes.map((c) => roundIn(convertCurrency(unassigned.byCurrency[c], c, currency, rates), currency)),
+    currency
   );
-  const perCurrency: RunwayCurrencyRow[] = (['EGP', 'SAR', 'USD'] as CurrencyCode[])
+  const perCurrency: RunwayCurrencyRow[] = codes
     .filter((c) => Math.abs(liquidNative[c]) > EPSILON || nativeTotals[c] > EPSILON)
     .map((c) => {
       const avgNative = monthsObserved > 0 ? nativeTotals[c] / monthsObserved : 0;
@@ -869,12 +899,12 @@ export function fundsProjection(state: State, now: Date): FundProjection[] {
   const today = toDateKey(now);
   const window = Array.from({ length: RUNWAY_WINDOW }, (_, i) => shiftMonth(month, -(i + 1)));
   return fundsByPriority(state).map((fund) => {
-    const moves = state.fundMovements.filter((m) => m.fundId === fund.id);
+    const moves = fundMovementRows(state).filter((m) => m.fundId === fund.id && countsAsSaving(m.kind));
     const first = moves.map((m) => monthOf(m.date)).sort()[0];
     // The completed months the fund has existed in; a fund started this month is judged on it.
     const observed = first === undefined ? [] : window.filter((m) => m >= first);
     const paced = observed.length > 0 ? observed : [month];
-    const pace = sum(moves.filter((m) => paced.includes(monthOf(m.date))).map((m) => movementValueInFund(state, m))) / paced.length;
+    const pace = sumIn(moves.filter((m) => paced.includes(monthOf(m.date))).map((m) => movementValueInFund(state, m)), fund.currency) / paced.length;
     const current = fundCurrent(state, fund.id);
     const remaining = Math.max(0, fund.targetAmount - current);
     const dueDate = fundDueDate(fund) ?? null;

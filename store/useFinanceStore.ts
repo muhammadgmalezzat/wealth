@@ -6,17 +6,17 @@ import { persist, type StateStorage } from 'zustand/middleware';
 import { newId } from '@/utils/id';
 import { fetchLivePrices, priceSourceOf, shouldAutoFetch } from '@/utils/prices/fetchPrices';
 import { createPersistOptions, createWriteGuard, type HydrationFailure } from './hydration';
+import { applyV8Steps, LATEST_V8_STEP } from './migrateV8';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import * as ops from './operations';
+import type { CoverSelection, OpOptions } from './cover';
 import { stateSummary, type FundAmount } from './selectors';
 import type {
   Account,
   Category,
   CurrencyCode,
-  ExchangeRates,
   FinanceState,
   Fund,
-  FundMovement,
   Holding,
   Liability,
   RecurringRule,
@@ -53,11 +53,13 @@ let storageWasEmpty = false;
 // backup contains.
 export function dataOf(s: FinanceState): FinanceState {
   return {
+    rateSnapshots: s.rateSnapshots,
     accounts: s.accounts,
     categories: s.categories,
     transactions: s.transactions,
     funds: s.funds,
-    fundMovements: s.fundMovements,
+    reservationMovements: s.reservationMovements,
+    unresolvedMovements: s.unresolvedMovements,
     holdings: s.holdings,
     liabilities: s.liabilities,
     recurringRules: s.recurringRules,
@@ -81,7 +83,7 @@ async function saveSnapshot(key: string, state: FinanceState) {
 // Every action validates its input and throws FinanceValidationError on bad data.
 interface FinanceActions {
   addAccount: (input: ops.NewAccount) => void;
-  updateAccount: (account: ops.Editable<Account>) => void;
+  updateAccount: (account: ops.Editable<Account>, options?: OpOptions) => void;
   deleteAccount: (id: string) => void;
 
   addCategory: (input: ops.NewCategory) => void;
@@ -91,10 +93,11 @@ interface FinanceActions {
   // Returns the new category's id.
   addCategoryWithPlanLine: (input: Pick<ops.NewCategory, 'name' | 'bucket'>, line: ops.NewPlanLine) => string;
 
-  addTransaction: (input: ops.NewIncomeExpense) => void;
-  addTransfer: (input: ops.NewTransfer) => void;
-  updateTransaction: (tx: ops.Editable<Transaction>) => void;
-  deleteTransaction: (id: string) => void;
+  addTransaction: (input: ops.NewIncomeExpense, options?: OpOptions) => void;
+  addTransfer: (input: ops.NewTransfer, options?: OpOptions) => void;
+  addExchange: (input: ops.NewExchange, options?: OpOptions) => void;
+  updateTransaction: (tx: ops.Editable<Transaction>, options?: OpOptions) => void;
+  deleteTransaction: (id: string, options?: OpOptions) => void;
 
   addFund: (input: ops.NewFund) => void;
   updateFund: (fund: ops.Editable<Fund>) => void;
@@ -102,12 +105,13 @@ interface FinanceActions {
   editFund: (fundId: string, edit: ops.FundEdit) => void;
   allocateMany: (allocations: FundAmount[], note?: string) => void;
   withdrawMany: (withdrawals: FundAmount[], note?: string) => void;
-  paySinkingFund: (payment: ops.SinkingPayment) => void;
+  paySinkingFund: (payment: ops.SinkingPayment, options?: OpOptions) => void;
   // `currency`: the currency of `amount` (the fund's when omitted).
   allocateToFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode) => void;
-  withdrawFromFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode) => void;
-  updateFundMovement: (movement: ops.Editable<FundMovement>) => void;
-  deleteFundMovement: (id: string) => void;
+  withdrawFromFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode, accountId?: string) => void;
+  reallocate: (input: ops.Reallocation) => void;
+  reReserveCovers: (covers: CoverSelection[], sourceTransactionId: string) => void;
+  resolveUnresolved: (input: ops.Resolution) => void;
 
   addHolding: (input: ops.NewHolding) => void;
   updateHolding: (holding: ops.Editable<Holding>) => void;
@@ -124,7 +128,7 @@ interface FinanceActions {
   setRecurringActive: (id: string, active: boolean) => void;
   // Records due occurrences of 'auto' rules. Safe to call any time (idempotent).
   processDue: () => void;
-  confirmOccurrence: (ruleId: string, occurrenceDate: string, overrides: ops.OccurrenceOverrides) => void;
+  confirmOccurrence: (ruleId: string, occurrenceDate: string, overrides: ops.OccurrenceOverrides, options?: OpOptions) => void;
   skipOccurrence: (ruleId: string, occurrenceDate: string) => void;
 
   savePlan: (plan: ops.PlanInput) => void;
@@ -137,16 +141,17 @@ interface FinanceActions {
   dismissAction: (actionId: string) => void;
   completeMonthlyReview: (month: string) => void;
 
-  updateRates: (rates: ExchangeRates) => void;
+  updateRates: (rates: ops.EgpRatesInput & { lastUpdated: string }) => void;
   updateSettings: (update: ops.SettingsUpdate) => void;
   setPricePreferences: (prefs: ops.PricePreferences) => void;
+  setCurrencyPreferences: (prefs: ops.CurrencyPreferences) => void;
   // Fetches live prices and applies them (auto mode only; manual mode resolves without a
   // request). `force` skips the 6-hour throttle ("تحديث الأسعار الآن"). Never throws; the
   // outcome is in settings.lastPriceFetchAt / lastPriceFetchError.
   refreshPrices: (options?: { force?: boolean }) => Promise<void>;
 
-  buyGold: (purchase: ops.GoldPurchase) => void;
-  updateGoldPurchase: (txId: string, purchase: ops.GoldPurchase) => void;
+  buyGold: (purchase: ops.GoldPurchase, options?: OpOptions) => void;
+  updateGoldPurchase: (txId: string, purchase: ops.GoldPurchase, options?: OpOptions) => void;
 
   // Backs up the current data, then replaces it with the opening seed.
   importOpeningData: () => Promise<void>;
@@ -214,7 +219,7 @@ export const useFinanceStore = create<FinanceStore>()(
       hasHydrated: false,
 
       addAccount: (input) => set(ops.addAccount(get(), input, ctx)),
-      updateAccount: (account) => set(ops.updateAccount(get(), account, ctx)),
+      updateAccount: (account, options) => set(ops.updateAccount(get(), account, ctx, options)),
       deleteAccount: (id) => set(ops.deleteAccount(get(), id, ctx)),
 
       addCategory: (input) => set(ops.addCategory(get(), input, ctx)),
@@ -227,10 +232,11 @@ export const useFinanceStore = create<FinanceStore>()(
         return patch.categories![patch.categories!.length - 1].id;
       },
 
-      addTransaction: (input) => set(ops.addTransaction(get(), input, ctx)),
-      addTransfer: (input) => set(ops.addTransfer(get(), input, ctx)),
-      updateTransaction: (tx) => set(ops.updateTransaction(get(), tx, ctx)),
-      deleteTransaction: (id) => set(ops.deleteTransaction(get(), id, ctx)),
+      addTransaction: (input, options) => set(ops.addTransaction(get(), input, ctx, options)),
+      addTransfer: (input, options) => set(ops.addTransfer(get(), input, ctx, options)),
+      addExchange: (input, options) => set(ops.addExchange(get(), input, ctx, options)),
+      updateTransaction: (tx, options) => set(ops.updateTransaction(get(), tx, ctx, options)),
+      deleteTransaction: (id, options) => set(ops.deleteTransaction(get(), id, ctx, options)),
 
       addFund: (input) => set(ops.addFund(get(), input, ctx)),
       updateFund: (fund) => set(ops.updateFund(get(), fund, ctx)),
@@ -238,13 +244,14 @@ export const useFinanceStore = create<FinanceStore>()(
       editFund: (fundId, edit) => set(ops.editFund(get(), fundId, edit, ctx)),
       allocateMany: (allocations, note) => set(ops.allocateMany(get(), allocations, note, ctx)),
       withdrawMany: (withdrawals, note) => set(ops.withdrawMany(get(), withdrawals, note, ctx)),
-      paySinkingFund: (payment) => set(ops.paySinkingFund(get(), payment, ctx)),
+      paySinkingFund: (payment, options) => set(ops.paySinkingFund(get(), payment, ctx, options)),
       allocateToFund: (fundId, amount, note, currency) =>
         set(ops.allocateToFund(get(), fundId, amount, note, ctx, currency)),
-      withdrawFromFund: (fundId, amount, note, currency) =>
-        set(ops.withdrawFromFund(get(), fundId, amount, note, ctx, currency)),
-      updateFundMovement: (movement) => set(ops.updateFundMovement(get(), movement, ctx)),
-      deleteFundMovement: (id) => set(ops.deleteFundMovement(get(), id, ctx)),
+      reallocate: (input) => set(ops.reallocate(get(), input, ctx)),
+      reReserveCovers: (covers, sourceTransactionId) => set(ops.reReserveCovers(get(), covers, sourceTransactionId, ctx)),
+      resolveUnresolved: (input) => set(ops.resolveUnresolved(get(), input, ctx)),
+      withdrawFromFund: (fundId, amount, note, currency, accountId) =>
+        set(ops.withdrawFromFund(get(), fundId, amount, note, ctx, currency, accountId)),
 
       addHolding: (input) => set(ops.addHolding(get(), input, ctx)),
       updateHolding: (holding) => set(ops.updateHolding(get(), holding, ctx)),
@@ -262,8 +269,8 @@ export const useFinanceStore = create<FinanceStore>()(
         const patch = ops.processDue(get(), ctx);
         if (Object.keys(patch).length > 0) set(patch);
       },
-      confirmOccurrence: (ruleId, occurrenceDate, overrides) =>
-        set(ops.confirmOccurrence(get(), ruleId, occurrenceDate, overrides, ctx)),
+      confirmOccurrence: (ruleId, occurrenceDate, overrides, options) =>
+        set(ops.confirmOccurrence(get(), ruleId, occurrenceDate, overrides, ctx, options)),
       skipOccurrence: (ruleId, occurrenceDate) => set(ops.skipOccurrence(get(), ruleId, occurrenceDate, ctx)),
 
       savePlan: (plan) => set(ops.savePlan(get(), plan, ctx)),
@@ -283,6 +290,7 @@ export const useFinanceStore = create<FinanceStore>()(
       updateRates: (rates) => set(ops.updateRates(get(), rates)),
       updateSettings: (update) => set(ops.updateSettings(get(), update, ctx)),
       setPricePreferences: (prefs) => set(ops.setPricePreferences(get(), prefs, ctx)),
+      setCurrencyPreferences: (prefs) => set(ops.setCurrencyPreferences(get(), prefs, ctx)),
       refreshPrices: async ({ force = false } = {}) => {
         const { settings } = get();
         if (priceSourceOf(settings) !== 'auto') return;
@@ -304,8 +312,8 @@ export const useFinanceStore = create<FinanceStore>()(
         await priceFetchInFlight;
       },
 
-      buyGold: (purchase) => set(ops.buyGold(get(), purchase, ctx)),
-      updateGoldPurchase: (txId, purchase) => set(ops.updateGoldPurchase(get(), txId, purchase, ctx)),
+      buyGold: (purchase, options) => set(ops.buyGold(get(), purchase, ctx, options)),
+      updateGoldPurchase: (txId, purchase, options) => set(ops.updateGoldPurchase(get(), txId, purchase, ctx, options)),
 
       // Snapshots are written before anything changes, so a mistaken import or restore can
       // always be undone by hand.
@@ -333,6 +341,17 @@ export const useFinanceStore = create<FinanceStore>()(
       // so nothing reads storage, migrates, or calls setState; `hasHydrated` stays false and the
       // server renders the loading state, matching the client's first render.
       skipHydration: isServer,
+      // A payload stored at version 8 by an earlier build (data v8 grew over several builds) is completed here.
+      // The untouched copy is kept first, so a wrong completion can always be undone by hand.
+      normalize: (persisted) => {
+        const done = (persisted as { settings?: { v8Step?: number } }).settings?.v8Step ?? 0;
+        if (done >= LATEST_V8_STEP) return persisted;
+        void AsyncStorage.setItem(
+          `${BACKUP_KEY_PREFIX}8_before_step_${done}`,
+          JSON.stringify({ state: persisted, version: CURRENT_VERSION })
+        );
+        return applyV8Steps(persisted, { now: new Date().toISOString(), newId });
+      },
       // Persist data only — never actions or hydration flags.
       partialize: (s: FinanceStore) => dataOf(s),
       onFailure: (failure) => useHydrationFailure.setState({ failure }),

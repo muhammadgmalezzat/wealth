@@ -5,7 +5,8 @@ import { FormField } from '@/components/ui/FormField';
 import { FormInput } from '@/components/ui/FormSheet';
 import { Segment } from '@/components/ui/Segment';
 import { colors, radius, space, weight } from '@/constants/theme';
-import type { GoldKarat, Location } from '@/store/types';
+import { COUNTRY_OPTIONS } from '@/components/ui/countryOptions';
+import type { CountryCode, GoldKarat } from '@/store/types';
 
 export type KaratOption = `${GoldKarat}`;
 
@@ -14,8 +15,8 @@ interface GoldFieldsProps {
   onWeightText: (text: string) => void;
   karat: KaratOption;
   onKarat: (karat: KaratOption) => void;
-  location: Location;
-  onLocation: (location: Location) => void;
+  location: CountryCode;
+  onLocation: (location: CountryCode) => void;
   name: string;
   onName: (name: string) => void;
 }
@@ -49,11 +50,8 @@ export function GoldFields({ weightText, onWeightText, karat, onKarat, location,
       </FormField>
 
       <FormField label="مكانه">
-        <Segment<Location>
-          options={[
-            { label: 'مصر', value: 'EG' },
-            { label: 'السعودية', value: 'SA' },
-          ]}
+        <Segment<CountryCode>
+          options={COUNTRY_OPTIONS}
           value={location}
           onChange={onLocation}
         />

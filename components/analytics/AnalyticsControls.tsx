@@ -6,13 +6,15 @@ import { Segment } from '@/components/ui/Segment';
 import { colors, space } from '@/constants/theme';
 import type { DisplayCurrency, Period, PeriodKind } from '@/store/analytics';
 
-import { CURRENCY_OPTIONS, PERIOD_OPTIONS, periodLabel } from './analyticsUi';
+import { currencyOptions, PERIOD_OPTIONS, periodLabel } from './analyticsUi';
 
 interface AnalyticsControlsProps {
   kind: PeriodKind;
   period: Period;
   onKindChange: (kind: PeriodKind) => void;
   currency: DisplayCurrency;
+  // The currencies the switch offers.
+  currencies: DisplayCurrency[];
   onCurrencyChange: (currency: DisplayCurrency) => void;
   includeOneTime: boolean;
   onIncludeOneTimeChange: (include: boolean) => void;
@@ -25,6 +27,7 @@ export function AnalyticsControls({
   period,
   onKindChange,
   currency,
+  currencies,
   onCurrencyChange,
   includeOneTime,
   onIncludeOneTimeChange,
@@ -41,7 +44,7 @@ export function AnalyticsControls({
       </AppText>
       <View style={styles.row}>
         <View style={styles.currency}>
-          <Segment<DisplayCurrency> options={CURRENCY_OPTIONS} value={currency} onChange={onCurrencyChange} />
+          <Segment<DisplayCurrency> options={currencyOptions(currencies)} value={currency} onChange={onCurrencyChange} />
         </View>
         <AppText variant="caption" style={styles.flex}>
           اشمل المصاريف اللي لمرة واحدة

@@ -2,7 +2,7 @@ import { formatDateAr } from '@/components/ui/formatDateAr';
 import type { ColorToken } from '@/constants/theme';
 import type { CategoryRow, FlowNode, FundProjection, Period, PeriodKind, SpendingFlow, DisplayCurrency } from '@/store/analytics';
 import { monthOf } from '@/utils/dates';
-import { formatMonthLabel, formatPercent } from '@/utils/formatters';
+import { currencySymbol, formatMonthLabel, formatPercent } from '@/utils/formatters';
 
 // Pure UI helpers for the Analytics tab (no React Native; unit-tested).
 
@@ -15,10 +15,9 @@ export const PERIOD_OPTIONS: { label: string; value: PeriodKind }[] = [
   { label: 'مخصص', value: 'custom' },
 ];
 
-export const CURRENCY_OPTIONS: { label: string; value: DisplayCurrency }[] = [
-  { label: 'ج.م', value: 'EGP' },
-  { label: 'ر.س', value: 'SAR' },
-];
+// The display-currency switch offers every currency the data uses (the enabled ones first).
+export const currencyOptions = (codes: DisplayCurrency[]): { label: string; value: DisplayCurrency }[] =>
+  codes.map((code) => ({ label: currencySymbol(code), value: code }));
 
 // "أكتوبر ٢٠٢٦" · "أغسطس ٢٠٢٦ – أكتوبر ٢٠٢٦" · "١ أغسطس ٢٠٢٦ – ١٠ أغسطس ٢٠٢٦".
 export function periodLabel(period: Pick<Period, 'kind' | 'from' | 'to'>): string {

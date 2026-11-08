@@ -1,21 +1,24 @@
 import { router } from 'expo-router';
+import { Fragment } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { AppText } from '@/components/ui/AppText';
 import { Card } from '@/components/ui/Card';
 import { Money } from '@/components/ui/Money';
+import { countryName } from '@/constants/countries';
 import { colors, opacity, radius, space } from '@/constants/theme';
-import { holdingsTotalEGP, liquidTotalEGP, netWorthByLocation, netWorthEGP } from '@/store/selectors';
+import { holdingsTotal, liquidTotal, netWorth, netWorthByCountry } from '@/store/selectors';
 import { netWorthChange } from '@/store/snapshots';
-import type { FinanceState } from '@/store/types';
+import type { CurrencyCode, FinanceState } from '@/store/types';
 import { formatMonthLabel, formatPercent } from '@/utils/formatters';
 
 // "صافي الثروة" (tap → الأصول): total, the change since last month's snapshot (hidden without one), the
-// Egypt / Saudi split, and liquid vs gold & investments (all EGP).
+// country split, and liquid vs gold & investments (all in the reporting currency).
 export function NetWorthCard({ state, now = new Date() }: { state: FinanceState; now?: Date }) {
-  const byLocation = netWorthByLocation(state);
-  const change = netWorthChange(state, now);
-  const tone = change && change.amountEGP < -0.005 ? 'danger' : 'positive';
+  const currency = state.settings.reportingCurrency;
+  const byCountry = netWorthByCountry(state, currency);
+  const change = netWorthChange(state, now, currency);
+  const tone = change && change.amount < -0.005 ? 'danger' : 'positive';
   return (
     <Pressable
       onPress={() => router.push('/assets')}
@@ -26,10 +29,10 @@ export function NetWorthCard({ state, now = new Date() }: { state: FinanceState;
       <AppText variant="secondary" color="textSecondary">
         صافي الثروة
       </AppText>
-      <Money amount={netWorthEGP(state)} currency="EGP" size="lg" />
+      <Money amount={netWorth(state, currency)} currency={currency} size="lg" />
       {change && (
         <View style={styles.change} accessibilityLabel="التغير عن الشهر اللي فات">
-          <Money amount={change.amountEGP} currency="EGP" size="row" showSign tone={tone} />
+          <Money amount={change.amount} currency={currency} size="row" showSign tone={tone} />
           <AppText variant="caption" color={tone === 'danger' ? 'danger' : 'primary700'}>
             {change.pct !== null ? `${formatPercent(change.pct, true)} ` : ''}عن {formatMonthLabel(change.fromMonth)}
           </AppText>
@@ -37,32 +40,35 @@ export function NetWorthCard({ state, now = new Date() }: { state: FinanceState;
       )}
 
       <View style={styles.lines}>
-        <Line label="مصر" amount={byLocation.EG} />
-        <View style={styles.separator} />
-        <Line label="السعودية" amount={byLocation.SA} />
+        {Object.keys(byCountry).map((country, index) => (
+          <Fragment key={country}>
+            {index > 0 && <View style={styles.separator} />}
+            <Line label={countryName(country)} amount={byCountry[country]} currency={currency} />
+          </Fragment>
+        ))}
       </View>
 
       <View style={styles.split}>
-        <Part label="سيولة" amount={liquidTotalEGP(state)} />
-        <Part label="ذهب واستثمارات" amount={holdingsTotalEGP(state)} gold />
+        <Part label="سيولة" amount={liquidTotal(state, currency)} currency={currency} />
+        <Part label="ذهب واستثمارات" amount={holdingsTotal(state, currency)} currency={currency} gold />
       </View>
     </Card>
     </Pressable>
   );
 }
 
-function Line({ label, amount }: { label: string; amount: number }) {
+function Line({ label, amount, currency }: { label: string; amount: number; currency: CurrencyCode }) {
   return (
     <View style={styles.line}>
       <AppText variant="body" style={styles.flex}>
         {label}
       </AppText>
-      <Money amount={amount} currency="EGP" size="row" />
+      <Money amount={amount} currency={currency} size="row" />
     </View>
   );
 }
 
-function Part({ label, amount, gold = false }: { label: string; amount: number; gold?: boolean }) {
+function Part({ label, amount, currency, gold = false }: { label: string; amount: number; currency: CurrencyCode; gold?: boolean }) {
   return (
     <View style={styles.part}>
       <View style={styles.partLabel}>
@@ -71,7 +77,7 @@ function Part({ label, amount, gold = false }: { label: string; amount: number; 
           {label}
         </AppText>
       </View>
-      <Money amount={amount} currency="EGP" size="row" />
+      <Money amount={amount} currency={currency} size="row" />
     </View>
   );
 }

@@ -2,7 +2,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
-import { ACCOUNT_TYPE_ICONS, groupAccounts, holdingTitle, LOCATION_LABELS, signedDifference } from '@/components/assets/assetsUi';
+import { ACCOUNT_TYPE_ICONS, groupAccounts, holdingTitle, signedDifference } from '@/components/assets/assetsUi';
 import { EditAccountSheet } from '@/components/assets/EditAccountSheet';
 import { HoldingSheet } from '@/components/assets/HoldingSheet';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
@@ -25,19 +25,20 @@ import { StatusChip } from '@/components/ui/StatusChip';
 import { colors, opacity, space } from '@/constants/theme';
 import {
   accountBalance,
-  accountBalanceEGP,
+  accountValue,
   goldTotals,
-  holdingPnlEGP,
-  holdingsTotalEGP,
-  holdingValueEGP,
-  liabilitiesTotalEGP,
+  holdingPnl,
+  holdingsTotal,
+  holdingValue,
+  liabilitiesTotal,
   liabilityRemaining,
-  liquidTotalEGP,
-  totalAssetsEGP,
+  liquidTotal,
+  totalAssets,
 } from '@/store/selectors';
-import type { Account, CurrencyCode, GoldKarat, Holding, Location } from '@/store/types';
+import { countryName } from '@/constants/countries';
+import { COUNTRY_OPTIONS, DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
+import type { Account, CountryCode, CurrencyCode, GoldKarat, Holding } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
-import { toEGP } from '@/utils/currency';
 import { showMessage } from '@/utils/dialogs';
 import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
@@ -57,7 +58,7 @@ interface FormState {
   weightGrams: string;
   karat: KaratOption;
   purchasePrice: string;
-  location: Location;
+  country: CountryCode;
 }
 
 const INITIAL_FORM: FormState = {
@@ -68,7 +69,7 @@ const INITIAL_FORM: FormState = {
   weightGrams: '',
   karat: '24',
   purchasePrice: '',
-  location: 'EG',
+  country: DEFAULT_COUNTRY,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,7 +93,8 @@ export default function AssetsScreen() {
   const groups = groupAccounts(accounts);
   const gold = holdings.filter((h) => h.type === 'gold');
   const otherHoldings = holdings.filter((h) => h.type !== 'gold');
-  const totals = goldTotals(state);
+  const reporting = state.settings.reportingCurrency;
+  const totals = goldTotals(state, reporting);
   const fundOf = (holdingIdToFind: string) => state.funds.find((f) => f.linkedHoldingIds.includes(holdingIdToFind))?.name;
 
   // Helpers
@@ -121,13 +123,9 @@ export default function AssetsScreen() {
               name,
               weightGrams: num(form.weightGrams) ?? 0,
               karat: Number(form.karat) as GoldKarat,
-              location: form.location,
-              // Entered in the selected currency; holdings store cost in EGP.
-              purchaseCostEGP: toEGP(
-                num(form.purchasePrice) ?? 0,
-                form.currency,
-                state.settings.exchangeRates
-              ),
+              country: form.country,
+              // Entered in the selected currency and kept in it.
+              purchaseCost: { amount: num(form.purchasePrice) ?? 0, currency: form.currency },
             })
           )
         : runAction('تعذّر الحفظ', () =>
@@ -136,7 +134,7 @@ export default function AssetsScreen() {
               type,
               currency: form.currency,
               openingBalance: num(form.amount) ?? 0,
-              location: form.location,
+              country: form.country,
             })
           );
     if (saved) {
@@ -154,7 +152,7 @@ export default function AssetsScreen() {
     <ListRow
       key={account.id}
       title={account.name}
-      subtitle={`${LOCATION_LABELS[account.location]} · ${currencySymbol(account.currency)}`}
+      subtitle={`${countryName(account.country)} · ${currencySymbol(account.currency)}`}
       subtitleLines={1}
       icon={ACCOUNT_TYPE_ICONS[account.type]}
       archived={account.archived}
@@ -163,7 +161,7 @@ export default function AssetsScreen() {
           amount={accountBalance(state, account.id)}
           currency={account.currency}
           align="left"
-          converted={account.currency !== 'EGP' ? { amount: accountBalanceEGP(state, account), currency: 'EGP' } : undefined}
+          converted={account.currency !== reporting ? { amount: accountValue(state, account, reporting), currency: reporting } : undefined}
         />
       }
       onPress={() => setEditingAccountId(account.id)}
@@ -172,26 +170,26 @@ export default function AssetsScreen() {
 
   const holdingRow = (holding: Holding) => {
     const fundName = fundOf(holding.id);
-    const hasCost = holding.purchaseCostEGP > 0;
+    const hasCost = holding.purchaseCost.amount > 0;
     return (
       <ListRow
         key={holding.id}
         title={holdingTitle(holding)}
         // A currency holding's truth is its quantity; the EGP figure on the left is its value now.
-        subtitle={`${LOCATION_LABELS[holding.location ?? 'EG']} · ${
+        subtitle={`${countryName(holding.country)} · ${
           holding.type === 'currency' ? formatMoney(holding.quantity, holding.currency) : 'القيمة الحالية'
         }`}
         subtitleLines={1}
         icon={holding.type === 'gold' ? 'diamond' : 'payments'}
         iconTone={holding.type === 'gold' ? 'gold' : 'neutral'}
-        trailing={<Money amount={holdingValueEGP(state, holding)} currency="EGP" align="left" />}
+        trailing={<Money amount={holdingValue(state, holding, reporting)} currency={reporting} align="left" />}
         accessory={
           hasCost || fundName ? (
             <View style={styles.holdingMeta}>
               {hasCost && (
                 <AppText variant="caption" color="textSecondary" style={styles.tabular}>
-                  تكلفة الشراء {formatMoney(holding.purchaseCostEGP, 'EGP')} · فرق القيمة{' '}
-                  {signedDifference(holdingPnlEGP(state, holding))}
+                  تكلفة الشراء {formatMoney(holding.purchaseCost.amount, holding.purchaseCost.currency)} · فرق القيمة{' '}
+                  {signedDifference(holdingPnl(state, holding, reporting), reporting)}
                 </AppText>
               )}
               {fundName && <StatusChip label={`مربوط بـ ${fundName}`} tone="gold" icon="link" />}
@@ -214,17 +212,17 @@ export default function AssetsScreen() {
         <AppText variant="secondary" color="textSecondary">
           إجمالي الأصول
         </AppText>
-        <Money amount={totalAssetsEGP(state)} currency="EGP" size="lg" />
+        <Money amount={totalAssets(state, reporting)} currency={reporting} size="lg" />
         <MetricGroup
           metrics={[
-            { label: 'سيولة', value: <Money amount={liquidTotalEGP(state)} currency="EGP" align="center" /> },
+            { label: 'سيولة', value: <Money amount={liquidTotal(state, reporting)} currency={reporting} align="center" /> },
             {
               label: 'ذهب واستثمارات',
               tone: 'gold',
-              value: <Money amount={holdingsTotalEGP(state)} currency="EGP" align="center" />,
+              value: <Money amount={holdingsTotal(state, reporting)} currency={reporting} align="center" />,
             },
             ...(state.liabilities.length > 0
-              ? [{ label: 'التزامات', value: <Money amount={liabilitiesTotalEGP(state)} currency="EGP" align="center" /> }]
+              ? [{ label: 'التزامات', value: <Money amount={liabilitiesTotal(state, reporting)} currency={reporting} align="center" /> }]
               : []),
           ]}
         />
@@ -239,16 +237,14 @@ export default function AssetsScreen() {
           </AppText>
         ) : (
           <View style={styles.groups}>
-            {(['EG', 'SA'] as Location[]).map((loc) =>
-              groups[loc].length === 0 ? null : (
-                <View key={loc} style={styles.group}>
-                  <AppText variant="caption" color="textSecondary">
-                    {LOCATION_LABELS[loc]}
-                  </AppText>
-                  <ListGroup>{groups[loc].map(accountRow)}</ListGroup>
-                </View>
-              )
-            )}
+            {groups.byCountry.map(({ country, accounts: inCountry }) => (
+              <View key={country} style={styles.group}>
+                <AppText variant="caption" color="textSecondary">
+                  {countryName(country)}
+                </AppText>
+                <ListGroup>{inCountry.map(accountRow)}</ListGroup>
+              </View>
+            ))}
             {groups.archived.length > 0 && (
               <View style={styles.group}>
                 <Pressable
@@ -363,14 +359,7 @@ export default function AssetsScreen() {
         )}
 
         <FormField label="المكان">
-          <Segment<Location>
-            options={[
-              { label: 'مصر', value: 'EG' },
-              { label: 'السعودية', value: 'SA' },
-            ]}
-            value={form.location}
-            onChange={(v) => set('location', v)}
-          />
+          <Segment<CountryCode> options={COUNTRY_OPTIONS} value={form.country} onChange={(v) => set('country', v)} />
         </FormField>
 
         <FormField label="العملة">

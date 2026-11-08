@@ -1,7 +1,21 @@
 # Currency + Funds Architecture — Design (data v8)
 
-**Status:** proposal. Documentation only; no code, tests, data or config were changed. Implementation starts
-only after your approval (and your answers to §J).
+**Status (2026-11-07):** approved (all of §J as recommended). **Phase B — engine and precision — is implemented on branch
+`currency-v8`** (rates as a USD table with immutable snapshots, countries, currencies as data, rounding INV-7, holdings
+cost in native currency, reporting and plan currency preferences, selectors and screens on the reporting currency, the
+frozen-v7 oracle and the v7 → v8 sub-steps). Dry run on the owner's real backup: every difference to v7 is rounding,
+within half a minor unit per contributing row. **Phase C — ledger — is implemented on the same branch** (transfer vs exchange, fees as spending in "رسوم", atomic edit / delete,
+recurring exchanges confirm-only, migration sub-step 7), and so is **Phase D — account-backed funds** (reservations on
+accounts, INV-5 enforced by the cover gate on every balance-reducing operation, follow rules for transfers and exchanges, the
+cover / conversion / overdraft sheet, reallocate, the Q4 offer, the resolver for unresolved migrated reservations,
+`processDue` guard, migration sub-step 8). Deviations from this document, decided with the owner: a v7 same-currency
+transfer with unequal amounts migrates to a transfer + a fee (sent > received) or a "تسوية" income (received > sent); the
+"تسوية" category is created only when needed; `needsCover` is a thrown `NeedsCoverError` carrying the shortfalls (not a
+returned value), which `runAction` always turns into the cover sheet; unresolved migrated money is NOT free money — unassigned
+= Σ available − Σ unresolved, shown as its own line; one cover sheet carries a conversion, a cover and an overdraft together;
+overdraft needs a confirmation unless the account has `allowNegative`. **Not built:** the gold price object, the
+exchange-rate list UI, per-country gold pricing (product phase), reporting-currency totals on the funds side (unassigned,
+fund suggestions, emergency target stay in EGP / the fund's currency).
 
 **Based on:** a read of `store/*`, `utils/currency.ts`, `utils/formatters.ts`, `utils/prices/*`, `constants/*`,
 `components/**` and `app/**` as of data v7 / app 1.2.0 (unbuilt), plus a read-only run of the current logic against

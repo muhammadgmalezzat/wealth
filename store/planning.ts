@@ -1,9 +1,18 @@
 import { convertCurrency } from '@/utils/currency';
+import { addIn, roundIn, sumIn } from '@/utils/money';
 import { fromDateKey, monthOf, shiftMonth, toDateKey } from '@/utils/dates';
-import { FIXED_CATEGORY_IDS } from './defaultCategories';
+import { feeCategoryId, FIXED_CATEGORY_IDS } from './defaultCategories';
 import type { PlanInput } from './operations';
 import { isLive, monthlyEquivalent } from './recurring';
-import { fundsByPriority, fundSuggestedMonthly, movementAmountIn, transactionAmountIn } from './selectors';
+import {
+  countsAsSaving,
+  fundMovementRows,
+  fundsByPriority,
+  fundSuggestedMonthly,
+  incomeExpenseRows,
+  movementAmountIn,
+  transactionAmountIn,
+} from './selectors';
 import { daysInMonth, daysLeftInMonth } from './shared';
 import type {
   CurrencyCode,
@@ -26,7 +35,6 @@ import type {
 
 type State = FinanceState;
 
-export const DEFAULT_PLAN_CURRENCY: CurrencyCode = 'SAR';
 const EXPENSE_BUCKETS: ExpenseBucket[] = ['essentials', 'lifestyle', 'giving'];
 // How many completed months the suggestion looks back at (at most).
 const SUGGESTION_MONTHS = 3;
@@ -42,12 +50,13 @@ export const amountInCurrency = transactionAmountIn;
 
 // For amounts that haven't happened yet: today's rates (the same currency stays untouched).
 function convert(state: Pick<State, 'settings'>, amount: number, from: CurrencyCode, to: CurrencyCode): number {
-  return convertCurrency(amount, from, to, state.settings.exchangeRates);
+  return convertCurrency(amount, from, to, state.settings.rates);
 }
 
+// Expenses of the month: the recorded ones plus the fees of transfers and exchanges (spending in the fees category).
 function monthExpenses(state: State, month: string, { excludeOneTime = false } = {}): IncomeExpenseTransaction[] {
-  return state.transactions.filter(
-    (tx): tx is IncomeExpenseTransaction =>
+  return incomeExpenseRows(state).filter(
+    (tx) =>
       tx.type === 'expense' &&
       monthOf(tx.date) === month &&
       tx.date >= state.settings.trackingStartDate &&
@@ -60,7 +69,7 @@ function monthExpenses(state: State, month: string, { excludeOneTime = false } =
 export function spendByCategory(state: State, month: string, currency: CurrencyCode): Map<string, number> {
   const totals = new Map<string, number>();
   for (const tx of monthExpenses(state, month)) {
-    totals.set(tx.categoryId, (totals.get(tx.categoryId) ?? 0) + amountInCurrency(state, tx, currency));
+    totals.set(tx.categoryId, addIn(totals.get(tx.categoryId) ?? 0, amountInCurrency(state, tx, currency), currency));
   }
   return totals;
 }
@@ -104,10 +113,10 @@ export function recurringMonthly(state: State, currency: CurrencyCode, now: Date
   const result: RecurringMonthly = { income: 0, expenseByCategory: new Map() };
   for (const rule of state.recurringRules) {
     if (!isLive(rule, today)) continue;
-    const monthly = convert(state, monthlyEquivalent(rule), rule.currency, currency);
-    if (rule.kind === 'income') result.income += monthly;
+    const monthly = roundIn(convert(state, monthlyEquivalent(rule), rule.currency, currency), currency);
+    if (rule.kind === 'income') result.income = addIn(result.income, monthly, currency);
     if (rule.kind === 'expense' && rule.categoryId) {
-      result.expenseByCategory.set(rule.categoryId, (result.expenseByCategory.get(rule.categoryId) ?? 0) + monthly);
+      result.expenseByCategory.set(rule.categoryId, addIn(result.expenseByCategory.get(rule.categoryId) ?? 0, monthly, currency));
     }
   }
   return result;
@@ -126,7 +135,7 @@ export function recurringMonthly(state: State, currency: CurrencyCode, now: Date
 export function planSuggestion(
   state: State,
   month: string,
-  currency: CurrencyCode = DEFAULT_PLAN_CURRENCY,
+  currency: CurrencyCode = state.settings.planCurrency,
   now: Date = new Date()
 ): PlanInput {
   const window = suggestionWindow(state, month);
@@ -135,11 +144,11 @@ export function planSuggestion(
   let income = 0;
   for (const { month: m } of window) {
     for (const tx of monthExpenses(state, m, { excludeOneTime: true })) {
-      perCategory.set(tx.categoryId, (perCategory.get(tx.categoryId) ?? 0) + amountInCurrency(state, tx, currency));
+      perCategory.set(tx.categoryId, addIn(perCategory.get(tx.categoryId) ?? 0, amountInCurrency(state, tx, currency), currency));
     }
     for (const tx of state.transactions) {
       if (tx.type === 'income' && monthOf(tx.date) === m && tx.date >= state.settings.trackingStartDate) {
-        income += amountInCurrency(state, tx, currency);
+        income = addIn(income, amountInCurrency(state, tx, currency), currency);
       }
     }
   }
@@ -195,7 +204,7 @@ export function suggestedContributions(
 }
 
 // "ابدأ من الصفر": no lines or income yet; fund contributions prefilled.
-export function emptyPlan(state: State, month: string, currency: CurrencyCode = DEFAULT_PLAN_CURRENCY, now?: Date): PlanInput {
+export function emptyPlan(state: State, month: string, currency: CurrencyCode = state.settings.planCurrency, now?: Date): PlanInput {
   return {
     month,
     currency,
@@ -251,8 +260,11 @@ export interface PlanProgress {
 
 // expectedIncome − (line limits + planned fund contributions). Zero-based: 0 is the goal;
 // positive means income still without a job, negative means more planned than earned.
-export function unplannedAmount(plan: Pick<MonthlyPlan, 'expectedIncome' | 'lines' | 'fundContributions'>): number {
-  return plan.expectedIncome - sum(plan.lines.map((l) => l.limit)) - sum(plan.fundContributions.map((c) => c.amount));
+export function unplannedAmount(plan: Pick<MonthlyPlan, 'currency' | 'expectedIncome' | 'lines' | 'fundContributions'>): number {
+  return roundIn(
+    plan.expectedIncome - sumIn(plan.lines.map((l) => l.limit), plan.currency) - sumIn(plan.fundContributions.map((c) => c.amount), plan.currency),
+    plan.currency
+  );
 }
 
 export function planProgress(state: State, month: string): PlanProgress | null {
@@ -272,29 +284,30 @@ export function planProgress(state: State, month: string): PlanProgress | null {
       kind: line.kind,
       limit: line.limit,
       spent: lineSpent,
-      remaining: line.limit - lineSpent,
+      remaining: roundIn(line.limit - lineSpent, plan.currency),
       pct: line.limit > 0 ? lineSpent / line.limit : lineSpent > 0 ? 1 : 0,
     };
   });
 
   const buckets = { essentials: { planned: 0, spent: 0 }, lifestyle: { planned: 0, spent: 0 }, giving: { planned: 0, spent: 0 } };
   for (const line of lines) {
-    buckets[line.bucket].planned += line.limit;
-    buckets[line.bucket].spent += line.spent;
+    buckets[line.bucket].planned = addIn(buckets[line.bucket].planned, line.limit, plan.currency);
+    buckets[line.bucket].spent = addIn(buckets[line.bucket].spent, line.spent, plan.currency);
   }
 
   const planned = new Set(plan.lines.map((l) => l.categoryId));
-  const totalSpent = sum([...spent.values()]);
-  const unplannedSpent = sum([...spent.entries()].filter(([id]) => !planned.has(id)).map(([, v]) => v));
+  const totalSpent = sumIn([...spent.values()], plan.currency);
+  const unplannedSpent = sumIn([...spent.entries()].filter(([id]) => !planned.has(id)).map(([, v]) => v), plan.currency);
 
   const contributions = plan.fundContributions.map((c) => {
     return {
       fundId: c.fundId,
       planned: c.amount,
-      allocated: sum(
-        state.fundMovements
-          .filter((m) => m.fundId === c.fundId && monthOf(m.date) === month)
-          .map((m) => movementAmountIn(state, m, plan.currency))
+      allocated: sumIn(
+        fundMovementRows(state)
+          .filter((m) => m.fundId === c.fundId && monthOf(m.date) === month && countsAsSaving(m.kind))
+          .map((m) => movementAmountIn(state, m, plan.currency)),
+        plan.currency
       ),
     };
   });
@@ -303,7 +316,7 @@ export function planProgress(state: State, month: string): PlanProgress | null {
     plan,
     lines,
     buckets,
-    totalPlanned: sum(lines.map((l) => l.limit)),
+    totalPlanned: sumIn(lines.map((l) => l.limit), plan.currency),
     totalSpent,
     unplannedSpent,
     contributions,
@@ -316,7 +329,7 @@ export function planProgress(state: State, month: string): PlanProgress | null {
 export function safeToSpend(state: State, month: string): number | null {
   const progress = planProgress(state, month);
   if (!progress) return null;
-  return sum(progress.lines.filter((l) => l.kind === 'flexible').map((l) => Math.max(0, l.remaining)));
+  return sumIn(progress.lines.filter((l) => l.kind === 'flexible').map((l) => Math.max(0, l.remaining)), progress.plan.currency);
 }
 
 // safeToSpend spread over the days left in the month (today included); 0 once it's over.
@@ -336,6 +349,23 @@ export interface SpendImpact {
   // In the plan currency; negative when the line would be overspent.
   remainingAfter: number;
   overBy: number;
+}
+
+// How the fees of a transfer or exchange being entered would land on the fees line of the plan: every fee in its
+// account's currency, at current rates. null without a fee, a plan or a fees line.
+export function feeSpendImpact(
+  state: State,
+  month: string,
+  fees: { amount: number; currency: CurrencyCode }[]
+): SpendImpact | null {
+  const categoryId = feeCategoryId(state.categories);
+  const planned = planFor(state, month);
+  if (!categoryId || !planned || fees.length === 0) return null;
+  const total = sumIn(
+    fees.map((fee) => roundIn(convert(state, fee.amount, fee.currency, planned.currency), planned.currency)),
+    planned.currency
+  );
+  return spendImpact(state, month, categoryId, total);
 }
 
 // How a new expense would land on its category's line. `amount` is in `amountCurrency`

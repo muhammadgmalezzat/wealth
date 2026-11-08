@@ -9,30 +9,40 @@ import { PastDateField } from '@/components/ui/DateFields';
 import { FormField } from '@/components/ui/FormField';
 import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { formatMoney } from '@/components/ui/formatMoney';
+import { Card } from '@/components/ui/Card';
 import { Segment } from '@/components/ui/Segment';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { colors, space } from '@/constants/theme';
 import type { NewRecurringRule } from '@/store/operations';
-import { planFor, spendImpact } from '@/store/planning';
+import { coversOf, followPreview, mergeOptions, type OpOptions } from '@/store/cover';
+import { feeCategoryId } from '@/store/defaultCategories';
+import { feeSpendImpact, planFor, spendImpact } from '@/store/planning';
 import { pickerCategories } from '@/store/selectors';
-import type { GoldKarat, Location, Transaction } from '@/store/types';
+import { DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
+import type { CountryCode, GoldKarat, Transaction } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { convertCurrency } from '@/utils/currency';
+import { roundIn } from '@/utils/money';
 import { monthOf, toDateKey } from '@/utils/dates';
 import { confirmAction, showMessage } from '@/utils/dialogs';
-import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
 import { AccountPicker } from './AccountPicker';
+import { ExchangeFields } from './ExchangeFields';
+import { FeeFields, type FeeDraft } from './FeeFields';
 import { CategoryPicker } from './CategoryPicker';
 import { GoldFields, type KaratOption } from './GoldFields';
 import { MoreDetails } from './MoreDetails';
 
-type TxType = Transaction['type'];
+// The sheet's types: a transfer between accounts of two currencies is saved as an exchange, so the form has
+// one "تحويل" tab for both.
+type TxType = Exclude<Transaction['type'], 'exchange'>;
 type FlowType = 'income' | 'expense';
 
-const round2 = (n: number) => Math.round(n * 100) / 100;
+const formType = (type: Transaction['type']): TxType => (type === 'exchange' ? 'transfer' : type);
+// What the user typed in the amount box: a transfer's amount, an exchange's sent amount.
+const typedAmount = (tx: Transaction): number => (tx.type === 'exchange' ? tx.sentAmount : tx.amount);
 
 interface TransactionSheetProps {
   // Omit to add a new transaction.
@@ -42,7 +52,7 @@ interface TransactionSheetProps {
   onClose: () => void;
 }
 
-// Add / edit sheet for income, expense, transfer and gold-purchase transactions. A gold
+// Add / edit sheet for income, expense, transfer (and exchange between currencies) and gold-purchase transactions. A gold
 // purchase stays a gold purchase when edited (it owns a holding). Mount it only while open:
 // its form state is initialised from `transaction` (or the remembered defaults) on mount.
 //
@@ -62,7 +72,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   const involvedIds = new Set(
     !transaction
       ? []
-      : transaction.type === 'transfer'
+      : transaction.type === 'transfer' || transaction.type === 'exchange'
         ? [transaction.fromAccountId, transaction.toAccountId]
         : [transaction.accountId]
   );
@@ -90,19 +100,28 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
         ? { accountId: transaction.accountId, categoryId: '' }
         : flowDefaults('expense');
   const initialTransfer =
-    transaction?.type === 'transfer'
+    transaction?.type === 'transfer' || transaction?.type === 'exchange'
       ? { from: transaction.fromAccountId, to: transaction.toAccountId }
       : transferDefaults();
 
-  const [type, setType] = useState<TxType>(transaction?.type ?? initialType ?? 'expense');
-  const [amountText, setAmountText] = useState(transaction ? String(transaction.amount) : '');
+  const [type, setType] = useState<TxType>(formType(transaction?.type ?? initialType ?? 'expense'));
+  const [amountText, setAmountText] = useState(transaction ? String(typedAmount(transaction)) : '');
   const [accountId, setAccountId] = useState(initialFlow.accountId);
   const [categoryId, setCategoryId] = useState(initialFlow.categoryId);
   const [fromAccountId, setFromAccountId] = useState(initialTransfer.from);
   const [toAccountId, setToAccountId] = useState(initialTransfer.to);
-  // null = follow the converted amount automatically; a string once the user edits it.
-  const [toAmountText, setToAmountText] = useState<string | null>(
-    transaction?.type === 'transfer' ? String(transaction.toAmount) : null
+  // An exchange's received amount: typed by the user, never filled in from a rate.
+  const [receivedText, setReceivedText] = useState(transaction?.type === 'exchange' ? String(transaction.receivedAmount) : '');
+  // The reserved money that travels with a new transfer, as the user edited it (null = the proportional default).
+  const [followEdit, setFollowEdit] = useState<Record<string, string> | null>(null);
+  const [fees, setFees] = useState<FeeDraft[]>(() =>
+    transaction?.type === 'transfer' || transaction?.type === 'exchange'
+      ? transaction.fees.map((fee, i) => ({
+          key: i + 1,
+          amountText: String(fee.amount),
+          side: fee.accountId === transaction.fromAccountId ? ('from' as const) : ('to' as const),
+        }))
+      : []
   );
   const [date, setDate] = useState(transaction?.date ?? toDateKey(new Date()));
   const [note, setNote] = useState(transaction?.note ?? '');
@@ -110,7 +129,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   // Gold purchase fields.
   const [weightText, setWeightText] = useState(editedGold ? String(editedGold.weightGrams) : '');
   const [karat, setKarat] = useState<KaratOption>(editedGold ? `${editedGold.karat}` : '21');
-  const [goldLocation, setGoldLocation] = useState<Location>(editedGold?.location ?? 'EG');
+  const [goldLocation, setGoldLocation] = useState<CountryCode>(editedGold?.country ?? accountById(initialFlow.accountId)?.country ?? DEFAULT_COUNTRY);
   const [holdingName, setHoldingName] = useState(editedGold?.name ?? '');
   // Inline copies of the validation messages, shown under the related field.
   const [errors, setErrors] = useState<{ amount?: string; account?: string; category?: string }>({});
@@ -125,19 +144,39 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
 
   const amount = parseAmount(amountText);
 
-  // Live budget hint for new expenses (never blocks saving).
-  const impact =
-    !transaction && type === 'expense' && categoryId && amount !== null && flowAccount
+  // Live budget hint for new expenses, and for the fees of a new transfer or exchange (never blocks saving).
+  const typedFees = fees.flatMap((fee) => {
+    const feeAmount = parseAmount(fee.amountText);
+    const feeCurrency = (fee.side === 'from' ? fromAccount : toAccount)?.currency;
+    return feeAmount !== null && feeCurrency ? [{ amount: feeAmount, currency: feeCurrency }] : [];
+  });
+  // Reserved money that has to leave the source account WITH a new transfer or exchange (design C3 / C4): a notice,
+  // not a question; an exchange converts it at its own rate and the cover sheet asks for that.
+  const feeOnSource = fees.filter((f) => f.side === 'from').reduce((sum, f) => sum + (parseAmount(f.amountText) ?? 0), 0);
+  const followNotice =
+    !transaction && isTransfer && fromAccount && amount !== null ? followPreview(state, fromAccount.id, amount, feeOnSource) : null;
+  const fundName = (id: string) => state.funds.find((f) => f.id === id)?.name ?? '—';
+  const followOverride = (): OpOptions | undefined => {
+    if (!followNotice || followNotice.need <= 0 || !followEdit) return undefined;
+    return {
+      follow: followNotice.split.map((s) => ({ fundId: s.fundId, amount: parseAmount(followEdit[s.fundId] ?? '') ?? NaN })),
+    };
+  };
+  const impact = transaction
+    ? null
+    : type === 'expense' && categoryId && amount !== null && flowAccount
       ? spendImpact(state, monthOf(date), categoryId, amount, flowAccount.currency)
-      : null;
-  const impactCategory = state.categories.find((c) => c.id === categoryId)?.name;
+      : isTransfer
+        ? feeSpendImpact(state, monthOf(date), typedFees)
+        : null;
+  const impactCategory = state.categories.find((c) => c.id === (isTransfer ? feeCategoryId(state.categories) : categoryId))?.name;
   const impactCurrency = planFor(state, monthOf(date))?.currency ?? 'EGP';
-  const rates = state.settings.exchangeRates;
-  const convertedToAmount =
-    crossCurrency && amount !== null
-      ? round2(convertCurrency(amount, fromAccount.currency, toAccount.currency, rates))
-      : null;
-  const toAmountValue = toAmountText ?? (convertedToAmount !== null ? String(convertedToAmount) : '');
+  const rates = state.settings.rates;
+  // Market values are suggestions only (D3): shown beside the received amount, never saved by themselves.
+  const marketRate = crossCurrency ? convertCurrency(1, fromAccount.currency, toAccount.currency, rates) : 0;
+  const suggestedReceived =
+    crossCurrency && amount !== null ? roundIn(convertCurrency(amount, fromAccount.currency, toAccount.currency, rates), toAccount.currency) : null;
+  const receivedValue = parseAmount(receivedText);
 
   const changeType = (next: TxType) => {
     if (next === type) return;
@@ -181,20 +220,31 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
         showMessage('تنبيه', 'اختر الحساب المحوَّل منه والمحوَّل إليه');
         return;
       }
-      const toAmount = crossCurrency ? (parseAmount(toAmountValue) ?? NaN) : value;
-      const fields = { fromAccountId, toAccountId, amount: value, toAmount, date, ...noteField };
-      const saved = runAction('تعذّر الحفظ', () =>
-        transaction
-          ? state.updateTransaction({
-              ...fields,
-              ...occurrenceLink,
-              type: 'transfer',
-              id: transaction.id,
-              createdAt: transaction.createdAt,
-              rateToEGP: transaction.rateToEGP,
-            })
-          : state.addTransfer(fields)
-      );
+      // An empty fee row is just not a fee; anything typed in one goes to the store to validate.
+      const feeList = fees
+        .filter((fee) => fee.amountText.trim() !== '')
+        .map((fee) => ({
+          accountId: fee.side === 'from' ? fromAccountId : toAccountId,
+          amount: parseAmount(fee.amountText) ?? NaN,
+        }));
+      const common = { fromAccountId, toAccountId, fees: feeList, date, ...noteField };
+      const existing = transaction
+        ? { ...occurrenceLink, id: transaction.id, createdAt: transaction.createdAt, rateSnapshotId: transaction.rateSnapshotId }
+        : null;
+      const override = followOverride();
+      const saved = runAction('تعذّر الحفظ', (decided) => {
+        const options = override ? mergeOptions(override, decided) : decided;
+        if (crossCurrency) {
+          // The received amount is required: no rate fills it in.
+          const exchange = { ...common, sentAmount: value, receivedAmount: receivedValue ?? NaN };
+          if (existing) state.updateTransaction({ ...exchange, ...existing, type: 'exchange' }, options);
+          else state.addExchange(exchange, options);
+        } else {
+          const transfer = { ...common, amount: value };
+          if (existing) state.updateTransaction({ ...transfer, ...existing, type: 'transfer' }, options);
+          else state.addTransfer(transfer, options);
+        }
+      }, onClose);
       if (saved) onClose();
       return;
     }
@@ -215,12 +265,14 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
           name: holdingName.trim() || `ذهب ${weightText.trim()} جم عيار ${karatValue}`,
           weightGrams: parseAmount(weightText) ?? NaN,
           karat: karatValue,
-          location: goldLocation,
+          country: goldLocation,
           ...(editedGold?.note ? { note: editedGold.note } : {}),
         },
       };
-      const saved = runAction('تعذّر الحفظ', () =>
-        transaction ? state.updateGoldPurchase(transaction.id, purchase) : state.buyGold(purchase)
+      const saved = runAction(
+        'تعذّر الحفظ',
+        (options) => (transaction ? state.updateGoldPurchase(transaction.id, purchase, options) : state.buyGold(purchase, options)),
+        onClose
       );
       if (saved) onClose();
       return;
@@ -241,9 +293,9 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       ...noteField,
       ...(type === 'expense' && oneTime ? { oneTime: true } : {}),
     };
-    const saved = runAction('تعذّر الحفظ', () => {
+    const saved = runAction('تعذّر الحفظ', (options) => {
       if (!transaction) {
-        state.addTransaction(fields);
+        state.addTransaction(fields, options);
         return;
       }
       // Keep links that the form doesn't edit (recurring occurrence, liability payment).
@@ -254,15 +306,18 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
               ...(transaction.liabilityId && type === 'expense' ? { liabilityId: transaction.liabilityId } : {}),
             }
           : occurrenceLink;
-      state.updateTransaction({
-        ...fields,
-        ...links,
-        id: transaction.id,
-        createdAt: transaction.createdAt,
-        // The store keeps this unless the currency changed.
-        rateToEGP: transaction.rateToEGP,
-      });
-    });
+      state.updateTransaction(
+        {
+          ...fields,
+          ...links,
+          id: transaction.id,
+          createdAt: transaction.createdAt,
+          // The store keeps this unless the currency changed.
+          rateSnapshotId: transaction.rateSnapshotId,
+        },
+        options
+      );
+    }, onClose);
     if (saved) onClose();
   };
 
@@ -278,15 +333,22 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
                 name: 'تحويل',
                 accountId: transaction.fromAccountId,
                 toAccountId: transaction.toAccountId,
-                toAmount: transaction.toAmount,
               }
-            : {
+            : transaction.type === 'exchange'
+              ? {
+                  kind: 'exchange' as const,
+                  name: 'تحويل عملة',
+                  accountId: transaction.fromAccountId,
+                  toAccountId: transaction.toAccountId,
+                  toAmount: transaction.receivedAmount,
+                }
+              : {
                 kind: transaction.type,
                 name: state.categories.find((c) => c.id === transaction.categoryId)?.name ?? '',
                 accountId: transaction.accountId,
                 categoryId: transaction.categoryId,
               }),
-          amount: transaction.amount,
+          amount: typedAmount(transaction),
           frequency: 'monthly',
           interval: 1,
           dayOfMonth: Number(transaction.date.slice(8, 10)),
@@ -307,7 +369,21 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       confirmText: 'حذف',
       cancelText: 'إلغاء',
       onConfirm: () => {
-        if (runAction('تعذّر الحذف', () => state.deleteTransaction(transaction.id))) onClose();
+        // Q4: what a cover took from the funds for this transaction is NOT re-reserved by itself; offer it, once.
+        const covers = coversOf(state, transaction.id);
+        const afterDelete = () => {
+          if (covers.length > 0) {
+            confirmAction({
+              title: 'رجّع للصناديق؟',
+              message: 'المعاملة دي كانت واخدة فلوس من صناديق. تحب ترجّعها لهم (على قد المتاح في الحسابات)؟',
+              confirmText: 'رجّع',
+              cancelText: 'لأ',
+              onConfirm: () => runAction('تعذّر الرجوع', () => state.reReserveCovers(covers, transaction.id)),
+            });
+          }
+          onClose();
+        };
+        if (runAction('تعذّر الحذف', (options) => state.deleteTransaction(transaction.id, options), afterDelete)) afterDelete();
       },
     });
   };
@@ -427,11 +503,46 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
             }}
           />
           {crossCurrency && (
-            <FormField
-              label={`المبلغ المستلم (${currencySymbol(toAccount.currency)})`}
-              helper="محسوب بسعر الصرف الحالي، عدّله لو السعر الفعلي أو الرسوم مختلفة.">
-              <FormInput value={toAmountValue} onChangeText={setToAmountText} placeholder="0" keyboardType="decimal-pad" />
-            </FormField>
+            <ExchangeFields
+              fromCurrency={fromAccount.currency}
+              toCurrency={toAccount.currency}
+              sent={amount}
+              receivedText={receivedText}
+              onReceivedText={setReceivedText}
+              marketRate={marketRate}
+              suggestedReceived={suggestedReceived}
+              receivedValue={receivedValue}
+            />
+          )}
+          <FeeFields fees={fees} onChange={setFees} from={fromAccount} to={toAccount} />
+          {followNotice && followNotice.need > 0 && (
+            <Card variant="subtle" style={styles.follow}>
+              <AppText variant="bodyStrong">
+                {formatMoney(followNotice.need, followNotice.currency)} من فلوس الصناديق هتتنقل مع {crossCurrency ? 'التحويل (وهتتحوّل بسعره، وهيطلب تأكيدك)' : 'التحويل'}.
+              </AppText>
+              {followNotice.split.map((s) =>
+                followEdit && !crossCurrency ? (
+                  <FormField key={s.fundId} label={fundName(s.fundId)}>
+                    <FormInput
+                      value={followEdit[s.fundId] ?? ''}
+                      onChangeText={(text) => setFollowEdit((prev) => ({ ...(prev ?? {}), [s.fundId]: text }))}
+                      keyboardType="decimal-pad"
+                    />
+                  </FormField>
+                ) : (
+                  <AppText key={s.fundId} variant="secondary" color="textSecondary">
+                    {fundName(s.fundId)}: {formatMoney(s.amount, followNotice.currency)}
+                  </AppText>
+                )
+              )}
+              {!crossCurrency && (
+                <Button
+                  label={followEdit ? 'خلّيها تلقائي' : 'عدّل التقسيم'}
+                  variant="tertiary"
+                  onPress={() => setFollowEdit(followEdit ? null : Object.fromEntries(followNotice.split.map((s) => [s.fundId, String(s.amount)])))}
+                />
+              )}
+            </Card>
           )}
         </>
       ) : (
@@ -511,6 +622,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
 }
 
 const styles = StyleSheet.create({
+  follow: { gap: space.xs, marginTop: space.sm },
   lockedType: { gap: space.xs, alignItems: 'flex-end' },
   hint: { marginTop: space.sm },
   date: { marginTop: space.lg, gap: space.sm },

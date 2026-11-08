@@ -38,7 +38,7 @@ export default function PeriodTransactionsScreen() {
 
   const { query, filter } = parsed;
   const result = drillTransactions(state, query, filter);
-  const days = groupTransactionsByDay(result.transactions);
+  const days = groupTransactionsByDay(state, result.transactions);
   const editing = editingId ? state.transactions.find((t) => t.id === editingId) : undefined;
   const title = describeFilter(state, filter);
 

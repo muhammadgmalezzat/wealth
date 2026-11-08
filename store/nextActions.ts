@@ -1,5 +1,6 @@
 import { formatMoney } from '@/components/ui/formatMoney';
 import { toEGP } from '@/utils/currency';
+import { roundIn, sumIn } from '@/utils/money';
 import { daysBetween, monthOf, shiftMonth, toDateKey, toMonthKey } from '@/utils/dates';
 import { pricesFetchedRecently } from '@/utils/prices/fetchPrices';
 import { daysAgoPhrase, dueCountPhrase, formatMonthLabel, withinDaysPhrase } from '@/utils/formatters';
@@ -24,8 +25,8 @@ type State = FinanceState;
 
 export type ActionSeverity = 'urgent' | 'warning' | 'opportunity' | 'info';
 
-// Screens, or a sheet Home opens itself ('cover', 'assign', 'new-emergency').
-export type ActionRoute = '/due' | '/plan' | '/review' | '/settings' | '/fund/[id]' | 'cover' | 'assign' | 'new-emergency';
+// Screens, or a sheet Home opens itself ('resolve', 'assign', 'new-emergency').
+export type ActionRoute = '/due' | '/plan' | '/review' | '/settings' | '/fund/[id]' | 'resolve' | 'assign' | 'new-emergency';
 
 export interface NextAction {
   // Stable per situation ('due', 'sinking-<fundId>', 'review-2026-09'…): snoozes are keyed by it.
@@ -42,7 +43,7 @@ export interface NextAction {
 }
 
 // Due items and spent fund money can't be snoozed: they make the numbers wrong until handled.
-export const NON_DISMISSIBLE_ACTION_IDS = ['due', 'cover'];
+export const NON_DISMISSIBLE_ACTION_IDS = ['due', 'needsCover', 'resolve'];
 export const SNOOZE_MS = 24 * 60 * 60 * 1000;
 // Prices and backups older than this many days get a nudge.
 export const STALE_DAYS = 7;
@@ -109,14 +110,16 @@ function amountToShow(parts: CurrencyAmount[], totalEGP: number): { amount: numb
 }
 
 // Every applicable action, snoozed ones included, sorted by priority. Rules, in order:
-//  1 due 'confirm' items          2 fund money spent (unassigned < 0)   3 overspent plan lines
+//  1 due 'confirm' items          2 automatic items needing a cover / unresolved reservations   3 overspent plan lines
 //  4 last month not reviewed       5 no plan this month                  6 no / thin emergency fund
 //  7 sinking fund due ≤ 14 days    8 fund behind this month              9 money without a job
 // 10 gold / FX prices ≥ 7 days old 11 last backup ≥ 7 days old (or never)
-export function allActions(state: State, now: Date = new Date()): NextAction[] {
+// `blockedAuto`: how many automatic recurring items could not be recorded because they would eat into reserved money
+// (ops.blockedDue; passed in because the operations import this module).
+export function allActions(state: State, now: Date = new Date(), blockedAuto = 0): NextAction[] {
   const today = toDateKey(now);
   const month = toMonthKey(now);
-  const rates = state.settings.exchangeRates;
+  const rates = state.settings.rates;
   const unassigned = unassignedSummary(state);
   const actions: NextAction[] = [];
   const add = (priority: number, draft: Draft) =>
@@ -134,16 +137,25 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
     });
   }
 
-  // 2
-  if (unassigned.deficits.length > 0) {
-    const shown = amountToShow(unassigned.deficits, unassigned.deficitEGP);
+  // 2 — nothing can be spent from reserved money without a cover any more, so the old "you spent fund money" action is
+  // gone. What is left: automatic items waiting for a cover, and migrated reservations without an account.
+  if (blockedAuto > 0) {
     add(2, {
-      id: 'cover',
+      id: 'needsCover',
       severity: 'urgent',
-      title: `صرفت ${formatMoney(shown.amount, shown.currency)} من فلوس مخصصة`,
-      subtitle: 'رجّع الفرق من صندوق عشان أرقام الصناديق تفضل حقيقية.',
-      ...shown,
-      cta: { label: 'غطّي الفرق', route: 'cover' },
+      title: `${blockedAuto === 1 ? 'معاملة تلقائية' : `${blockedAuto} معاملات تلقائية`} محتاجة تغطية`,
+      subtitle: 'هتاخد من فلوس صناديق لو أكدتها، فمتسجلتش لوحدها.',
+      cta: { label: 'راجعها', route: '/due' },
+    });
+  }
+  if (state.unresolvedMovements.length > 0) {
+    const groups = new Set(state.unresolvedMovements.map((m) => `${m.fundId}|${m.currency}`)).size;
+    add(2, {
+      id: 'resolve',
+      severity: 'urgent',
+      title: `${groups === 1 ? 'فلوس محجوزة' : `${groups} مبالغ محجوزة`} ومش محدد حسابها`,
+      subtitle: 'اختار الحساب اللي فيه الفلوس دي عشان الأرقام تتظبط.',
+      cta: { label: 'حدّد الحساب', route: 'resolve' },
     });
   }
 
@@ -151,7 +163,7 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
   const plan = planFor(state, month);
   const overspent = overspentLines(state, month);
   if (plan && overspent.length > 0) {
-    const over = overspent.reduce((total, l) => total - l.remaining, 0);
+    const over = sumIn(overspent.map((l) => -l.remaining), plan.currency);
     const names = overspent.map((l) => state.categories.find((c) => c.id === l.categoryId)?.name ?? '—');
     add(3, {
       id: 'overspent',
@@ -201,7 +213,7 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
   } else {
     const target = suggestedEmergencyTarget(state, 3, now);
     const monthlyEssentials = target === null ? null : target / 3;
-    const savedEGP = emergency.reduce((total, f) => total + toEGP(fundCurrent(state, f.id), f.currency, rates), 0);
+    const savedEGP = sumIn(emergency.map((f) => roundIn(toEGP(fundCurrent(state, f.id), f.currency, rates), 'EGP')), 'EGP');
     if (monthlyEssentials !== null && savedEGP < monthlyEssentials - EPSILON) {
       add(6, {
         id: 'emergency',
@@ -275,7 +287,7 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
     return days === null || days >= STALE_DAYS ? (days ?? Infinity) : null;
   };
   const goldAge = usesGold ? stale(state.settings.goldPriceUpdatedAt) : null;
-  const fxAge = usesFx ? stale(rates.lastUpdated) : null;
+  const fxAge = usesFx ? stale(rates.updatedAt) : null;
   // Auto mode that fetched everything in the last 24 hours has nothing to update.
   if ((goldAge !== null || fxAge !== null) && !pricesFetchedRecently(state.settings, now)) {
     const what = goldAge !== null && fxAge !== null ? 'أسعار الذهب والصرف' : goldAge !== null ? 'سعر الذهب' : 'أسعار الصرف';
@@ -307,6 +319,6 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
 }
 
 // What to show now: allActions without the snoozed ones.
-export function nextActions(state: State, now: Date = new Date()): NextAction[] {
-  return allActions(state, now).filter((a) => !isSnoozed(state, a, now));
+export function nextActions(state: State, now: Date = new Date(), blockedAuto = 0): NextAction[] {
+  return allActions(state, now, blockedAuto).filter((a) => !isSnoozed(state, a, now));
 }

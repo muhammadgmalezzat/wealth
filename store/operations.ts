@@ -1,11 +1,19 @@
-import { convertCurrency, rateToEGP, snapshotRates } from '@/utils/currency';
+import { isKnownCountry } from '@/constants/countries';
+import { isKnownCurrency } from '@/constants/currencyRegistry';
+import { decimalsFor, roundIn, roundMoney, splitTo, sumIn } from '@/utils/money';
+import { convertCurrency, projectAmount, rateToEGP } from '@/utils/currency';
+import { withEgpRates } from '@/utils/rates';
 import { addMonthsToDate, isDateKey, isMonthKey, shiftDate, toDateKey } from '@/utils/dates';
 import { goldPricesEGP, isValidPremiumPct } from '@/utils/prices/calc';
 import { priceSourceOf, type PriceFetchResult } from '@/utils/prices/fetchPrices';
 import { planIdFor } from './migrations';
 import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
-import { syncedSnapshots } from './snapshots';
+import { coversOf, followPreview, NeedsCoverError, planRelease, planReserve, shortfallsBetween, type CoverSelection, type OpOptions, type Shortfall } from './cover';
+import { invariantViolations } from './invariants';
+import { feeCategoryId } from './defaultCategories';
+import { snapshotForNow } from './rateSnapshots';
+import { syncSnapshots } from './snapshots';
 import {
   FinanceValidationError,
   type FinanceEntity,
@@ -14,10 +22,12 @@ import {
   type FinanceField,
 } from './errors';
 import {
+  accountAvailable,
+  accountBalance,
+  accountReserved,
   fundAllocated,
-  fundAllocatedIn,
+  reservation,
   SINKING_CYCLE_MONTHS,
-  unassignedSummary,
   withdrawalPlan,
   type FundAmount,
 } from './selectors';
@@ -26,22 +36,26 @@ import type {
   ActionDismissal,
   AssetPurchaseTransaction,
   Category,
+  ExchangeTransaction,
+  Fee,
+  CountryCode,
   CurrencyCode,
-  ExchangeRates,
   FinanceState,
   Fund,
-  FundMovement,
+  ReservationKind,
+  ReservationMovement,
   GoldHolding,
   GoldKarat,
   Holding,
+  Money,
   IncomeExpenseTransaction,
   LastUsedSelection,
   Liability,
-  Location,
   MonthlyPlan,
   MonthlyReview,
   PlanLine,
   PriceSource,
+  RateSnapshot,
   RecurringRule,
   Settings,
   SinkingFrequency,
@@ -71,21 +85,23 @@ export type Editable<T> = T extends unknown ? Omit<T, 'updatedAt'> & { updatedAt
 
 export type NewAccount = Omit<Account, 'id' | 'createdAt' | 'updatedAt'>;
 export type NewCategory = Omit<Category, 'id' | 'isDefault' | 'updatedAt'>;
-export type NewIncomeExpense = Omit<IncomeExpenseTransaction, 'id' | 'createdAt' | 'updatedAt' | 'rateToEGP'> & {
-  rateToEGP?: number;
+export type NewIncomeExpense = Omit<IncomeExpenseTransaction, 'id' | 'createdAt' | 'updatedAt' | 'rateSnapshotId'>;
+export type NewTransfer = Omit<TransferTransaction, 'id' | 'type' | 'createdAt' | 'updatedAt' | 'rateSnapshotId' | 'fees'> & {
+  fees?: Fee[];
 };
-export type NewTransfer = Omit<
-  TransferTransaction,
-  'id' | 'type' | 'createdAt' | 'updatedAt' | 'rateToEGP' | 'toAmount'
-> & {
-  // Defaults to `amount` converted at current rates.
-  toAmount?: number;
-  rateToEGP?: number;
+// `receivedAmount` is required: what actually arrived. No operation ever computes it from a rate.
+export type NewExchange = Omit<ExchangeTransaction, 'id' | 'type' | 'createdAt' | 'updatedAt' | 'rateSnapshotId' | 'fees'> & {
+  fees?: Fee[];
 };
+
+// The rate snapshot a patch must also save when the current rates have none yet (see snapshotForNow).
+type RateSnapshotUse = ReturnType<typeof snapshotForNow>;
+const ratePatch = (use: RateSnapshotUse): { rateSnapshots?: RateSnapshot[] } =>
+  use.rateSnapshots ? { rateSnapshots: use.rateSnapshots } : {};
 export type NewFund = Omit<Fund, 'id' | 'createdAt' | 'updatedAt' | 'linkedHoldingIds'> & {
   linkedHoldingIds?: string[];
 };
-export type NewHolding = DistributiveOmit<Holding, 'id' | 'updatedAt'>;
+export type NewHolding = DistributiveOmit<Holding, 'id' | 'updatedAt' | 'purchaseRateSnapshotId'>;
 export type NewLiability = Omit<Liability, 'id' | 'updatedAt'>;
 export type NewRecurringRule = Omit<RecurringRule, 'id' | 'updatedAt' | 'createdAt' | 'nextDate' | 'skippedDates'> & {
   skippedDates?: string[];
@@ -130,6 +146,10 @@ function assertNonNegative(value: number, field: FinanceField) {
   if (value < 0) fail('NEGATIVE', { field });
 }
 
+function assertCountry(country: CountryCode) {
+  if (!isKnownCountry(country)) fail('UNKNOWN_COUNTRY');
+}
+
 function assertDate(value: string, field: FinanceField) {
   if (!isDateKey(value)) fail('INVALID_DATE', { field });
 }
@@ -145,6 +165,45 @@ function replaceById<T extends { id: string }>(list: T[], item: T, entity: Finan
 
 const isIncomeExpense = (tx: Transaction): tx is IncomeExpenseTransaction =>
   tx.type === 'income' || tx.type === 'expense';
+
+// --- Rounding at the write boundary (INV-7) ---------------------------------
+
+// Every amount is rounded to its currency's decimals before it is validated and stored (half away from
+// zero). A currency the registry doesn't know is left alone: validation rejects it right after.
+const money = (amount: number, currency: CurrencyCode): number =>
+  isKnownCurrency(currency) ? roundMoney(amount, currency) : amount;
+
+// Fees are in the currency of the account they are charged to.
+function roundFees(state: State, fees: Fee[]): Fee[] {
+  return fees.map((fee) => {
+    const account = state.accounts.find((a) => a.id === fee.accountId);
+    return { ...fee, amount: account ? money(fee.amount, account.currency) : fee.amount };
+  });
+}
+
+// Amounts of a transaction: in its own currency; a transfer's in its accounts' (the same); an exchange's
+// sent amount in the source account's currency and received amount in the target's.
+function roundTransaction<T extends Editable<Transaction>>(state: State, tx: T): T {
+  if (tx.type === 'transfer' || tx.type === 'exchange') {
+    const from = state.accounts.find((a) => a.id === tx.fromAccountId);
+    const to = state.accounts.find((a) => a.id === tx.toAccountId);
+    const fees = roundFees(state, tx.fees);
+    if (tx.type === 'transfer') return { ...tx, amount: from ? money(tx.amount, from.currency) : tx.amount, fees };
+    return {
+      ...tx,
+      sentAmount: from ? money(tx.sentAmount, from.currency) : tx.sentAmount,
+      receivedAmount: to ? money(tx.receivedAmount, to.currency) : tx.receivedAmount,
+      fees,
+    };
+  }
+  return { ...tx, amount: money(tx.amount, tx.currency) };
+}
+
+// A fund amount in `currency` (the fund's own when omitted).
+const fundMoney = (state: State, fundId: string, amount: number, currency?: CurrencyCode): number => {
+  const fund = state.funds.find((f) => f.id === fundId);
+  return fund ? money(amount, currency ?? fund.currency) : amount;
+};
 
 // --- Sync bookkeeping -------------------------------------------------------
 
@@ -166,31 +225,43 @@ function logDeletes(state: State, entity: SyncEntity, ids: string[], ctx: OpCont
 function accountInUse(state: State, accountId: string): boolean {
   return (
     state.transactions.some((tx) =>
-      tx.type === 'transfer'
+      tx.type === 'transfer' || tx.type === 'exchange'
         ? tx.fromAccountId === accountId || tx.toAccountId === accountId
         : tx.accountId === accountId
-    ) || state.recurringRules.some((r) => r.accountId === accountId)
+    ) ||
+    state.recurringRules.some((r) => r.accountId === accountId) ||
+    state.reservationMovements.some((m) => m.accountId === accountId)
   );
 }
 
 function validateAccount(account: NewAccount) {
   assertName(account.name, 'account');
+  assertCountry(account.country);
+  assertCurrency(account.currency);
   assertNumber(account.openingBalance, 'openingBalance');
 }
 
-export function addAccount(state: State, input: NewAccount, ctx: OpContext): Patch {
+export function addAccount(state: State, raw: NewAccount, ctx: OpContext): Patch {
+  const input = { ...raw, openingBalance: money(raw.openingBalance, raw.currency) };
   validateAccount(input);
   const account: Account = stamp({ ...input, id: ctx.newId(), createdAt: ctx.now().toISOString() }, ctx);
   return { accounts: [...state.accounts, account] };
 }
 
-export function updateAccount(state: State, account: Editable<Account>, ctx: OpContext): Patch {
+// Editing an account may lower its balance (the opening balance is how "set the current balance" works), so it goes
+// through the cover gate like any other balance-reducing operation. The currency is locked while the account has
+// transactions, rules or reservations, and it cannot be archived while money is reserved on it.
+export function updateAccount(state: State, raw: Editable<Account>, ctx: OpContext, options?: OpOptions): Patch {
+  const account = { ...raw, openingBalance: money(raw.openingBalance, raw.currency) };
   validateAccount(account);
   const existing = requireById(state.accounts, account.id, 'account');
   if (existing.currency !== account.currency && accountInUse(state, account.id)) {
     fail('ACCOUNT_CURRENCY_LOCKED', { id: account.id });
   }
-  return { accounts: replaceById(state.accounts, stamp(account, ctx), 'account') };
+  if (account.archived && !existing.archived && accountReserved(state, account.id) > 0) {
+    fail('ACCOUNT_HAS_RESERVATIONS', { id: account.id });
+  }
+  return settle(state, { accounts: replaceById(state.accounts, stamp(account, ctx), 'account') }, ctx, options);
 }
 
 export function deleteAccount(state: State, id: string, ctx: OpContext): Patch {
@@ -269,7 +340,6 @@ export function deleteCategory(state: State, id: string, ctx: OpContext): Patch 
 
 function validateIncomeExpense(state: State, tx: IncomeExpenseTransaction) {
   assertPositive(tx.amount, 'amount');
-  assertPositive(tx.rateToEGP, 'rateToEGP');
   assertDate(tx.date, 'date');
   const account = requireById(state.accounts, tx.accountId, 'account');
   if (tx.currency !== account.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
@@ -283,14 +353,41 @@ function validateIncomeExpense(state: State, tx: IncomeExpenseTransaction) {
   }
 }
 
+export { feeCategoryId };
+
+// Each fee is charged to the source or the target of the move, in that account's currency; its category (the
+// fees category by default) is an expense one.
+function validateFees(state: State, tx: TransferTransaction | ExchangeTransaction) {
+  for (const fee of tx.fees) {
+    assertPositive(fee.amount, 'fee');
+    if (fee.accountId !== tx.fromAccountId && fee.accountId !== tx.toAccountId) fail('FEE_ACCOUNT_INVALID');
+    const categoryId = fee.categoryId ?? feeCategoryId(state.categories);
+    const category = requireById(state.categories, categoryId ?? '', 'category');
+    if (category.kind !== 'expense') fail('CATEGORY_KIND_MISMATCH', { id: category.id });
+  }
+}
+
+function validateMove(state: State, tx: TransferTransaction | ExchangeTransaction) {
+  assertDate(tx.date, 'date');
+  const from = requireById(state.accounts, tx.fromAccountId, 'account');
+  const to = requireById(state.accounts, tx.toAccountId, 'account');
+  if (tx.fromAccountId === tx.toAccountId) fail('SAME_ACCOUNT_TRANSFER');
+  validateFees(state, tx);
+  return { from, to };
+}
+
 function validateTransfer(state: State, tx: TransferTransaction) {
   assertPositive(tx.amount, 'amount');
-  assertPositive(tx.toAmount, 'toAmount');
-  assertPositive(tx.rateToEGP, 'rateToEGP');
-  assertDate(tx.date, 'date');
-  requireById(state.accounts, tx.fromAccountId, 'account');
-  requireById(state.accounts, tx.toAccountId, 'account');
-  if (tx.fromAccountId === tx.toAccountId) fail('SAME_ACCOUNT_TRANSFER');
+  const { from, to } = validateMove(state, tx);
+  // A transfer moves the same money: a different currency is an exchange.
+  if (from.currency !== to.currency) fail('TRANSFER_CURRENCY_MISMATCH');
+}
+
+function validateExchange(state: State, tx: ExchangeTransaction) {
+  assertPositive(tx.sentAmount, 'sentAmount');
+  assertPositive(tx.receivedAmount, 'receivedAmount');
+  const { from, to } = validateMove(state, tx);
+  if (from.currency === to.currency) fail('EXCHANGE_SAME_CURRENCY');
 }
 
 // Settings with `selection` merged into the remembered form defaults.
@@ -298,19 +395,21 @@ function rememberSelection(state: State, selection: LastUsedSelection): Settings
   return { ...state.settings, lastUsed: { ...state.settings.lastUsed, ...selection } };
 }
 
-export function addTransaction(state: State, input: NewIncomeExpense, ctx: OpContext): Patch {
+function addTransactionCore(state: State, raw: NewIncomeExpense, ctx: OpContext): Patch {
+  const input = { ...raw, amount: money(raw.amount, raw.currency) };
+  const rates = snapshotForNow(state, ctx.now());
   const tx: IncomeExpenseTransaction = stamp(
     {
       ...input,
       id: ctx.newId(),
       createdAt: ctx.now().toISOString(),
-      rateToEGP: input.rateToEGP ?? rateToEGP(input.currency, state.settings.exchangeRates),
-      ratesSnapshot: snapshotRates(state.settings.exchangeRates),
+      rateSnapshotId: rates.id,
     },
     ctx
   );
   validateIncomeExpense(state, tx);
   return {
+    ...ratePatch(rates),
     transactions: [tx, ...state.transactions],
     settings: rememberSelection(state, {
       [tx.type]: { accountId: tx.accountId, categoryId: tx.categoryId },
@@ -318,25 +417,182 @@ export function addTransaction(state: State, input: NewIncomeExpense, ctx: OpCon
   };
 }
 
-export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): Patch {
-  const rates = state.settings.exchangeRates;
-  const from = requireById(state.accounts, input.fromAccountId, 'account');
-  const to = requireById(state.accounts, input.toAccountId, 'account');
+// --- The cover gate (INV-5) -------------------------------------------------
+//
+// Every operation that can lower an account's balance ends here. If the final state would leave an account with
+// more reserved than it holds, the operation is applied together with a COVER the user chose (reserved money
+// released in the same patch), or it throws NeedsCoverError and applies nothing. Going below zero on an account that
+// does not allow it needs an explicit confirmation too.
+
+function settle(state: State, patch: Patch, ctx: OpContext, options?: OpOptions, sourceTransactionId?: string): Patch {
+  const next: State = { ...state, ...patch };
+  const shortfalls = shortfallsBetween(state, next);
+  if (shortfalls.length === 0) return patch;
+
+  const unmet: Shortfall[] = [];
+  const moves: ReservationMovement[] = [];
+  const use = snapshotForNow(next, ctx.now());
+  for (const s of shortfalls) {
+    if (s.kind === 'negative') {
+      if (!options?.confirm?.negative) unmet.push(s);
+      continue;
+    }
+    const mine = (options?.cover ?? []).filter((c) => c.accountId === s.accountId);
+    const total = sumIn(mine.map((c) => c.amount), s.currency);
+    const fits = mine.every((c) => c.amount > 0 && c.amount <= reservation(next, c.fundId, s.accountId) + 0.005);
+    if (!fits || Math.abs(total - s.amount) > 0.005) {
+      unmet.push(s);
+      continue;
+    }
+    for (const c of mine) {
+      moves.push(newReservation(use.id, c.fundId, s.accountId, -c.amount, 'cover', undefined, ctx, sourceTransactionId ? { sourceTransactionId } : {}));
+    }
+  }
+  if (unmet.length > 0) throw new NeedsCoverError(unmet);
+  return {
+    ...patch,
+    ...ratePatch(use),
+    reservationMovements: [...next.reservationMovements, ...moves],
+  };
+}
+
+const isMove = (tx: Transaction): tx is TransferTransaction | ExchangeTransaction => tx.type === 'transfer' || tx.type === 'exchange';
+
+// Movements that belong to a transfer or exchange: its follow group (groupId = the transaction id, or id:…).
+const inGroupOf = (txId: string) => (m: ReservationMovement) => m.groupId === txId || !!m.groupId?.startsWith(`${txId}:`);
+
+// Reserved money that has to leave the source account WITH a transfer or exchange: the part of the amount above what
+// is available (after the fees charged to the source, which can never be paid from reserved money without a cover).
+// A transfer carries it automatically, split in proportion to each fund's reservation (C3, Q3: editable through
+// options.follow, the last fund takes the remainder; Q14: a notice, not a confirmation). An exchange converts it at
+// its own recorded rate and needs the user's confirmation first (D2 #2, C4). `state` is the state BEFORE the
+// transaction.
+function followMovements(
+  state: State,
+  tx: TransferTransaction | ExchangeTransaction,
+  ctx: OpContext,
+  options: OpOptions | undefined,
+  rateSnapshotId: string
+): ReservationMovement[] {
+  const from = state.accounts.find((a) => a.id === tx.fromAccountId);
+  const to = state.accounts.find((a) => a.id === tx.toAccountId);
+  if (!from || !to) return [];
+  const sent = tx.type === 'transfer' ? tx.amount : tx.sentAmount;
+  const feeOnSource = sumIn(tx.fees.filter((f) => f.accountId === from.id).map((f) => f.amount), from.currency);
+  // At most what is reserved there: anything beyond is a negative balance, which the gate decides.
+  const preview = followPreview(state, from.id, sent, feeOnSource);
+  if (!preview || preview.need <= 0.005) return [];
+  const need = preview.need;
+
+  const split = options?.follow ?? preview.split;
+  const total = sumIn(split.map((s) => s.amount), from.currency);
+  const ok = Math.abs(total - need) <= 0.005 && split.every((s) => s.amount > 0 && s.amount <= reservation(state, s.fundId, from.id) + 0.005);
+  if (!ok) fail('FOLLOW_INVALID', { id: tx.id });
+  if (tx.type === 'exchange' && !options?.confirm?.conversion) {
+    throw new NeedsCoverError([{ kind: 'conversion', accountId: from.id, currency: from.currency, amount: need, suggested: split }]);
+  }
+
+  const kind: ReservationKind = tx.type === 'transfer' ? 'follow_transfer' : 'follow_exchange';
+  // Each fund's amount at the exchange's own rate (received ÷ sent); the parts add up to the converted total.
+  const converted =
+    tx.type === 'transfer'
+      ? split.map((s) => s.amount)
+      : splitTo(
+          money((need * tx.receivedAmount) / tx.sentAmount, to.currency),
+          split.map((s) => s.amount),
+          decimalsFor(to.currency)
+        );
+  const groupId = state.reservationMovements.some(inGroupOf(tx.id)) ? `${tx.id}:${ctx.newId()}` : tx.id;
+  return split.flatMap((s, i) => [
+    newReservation(rateSnapshotId, s.fundId, from.id, -s.amount, kind, undefined, ctx, { groupId }),
+    newReservation(rateSnapshotId, s.fundId, to.id, converted[i], kind, undefined, ctx, { groupId }),
+  ]);
+}
+
+// followMovements, but when an exchange needs the user's confirmation to convert reserved money, the question also
+// carries everything ELSE the exchange would need once the conversion is accepted (a cover for fees, an overdraft):
+// ONE sheet, one decision. `patch` is the operation's patch without the follow movements; `before` the reservation
+// movements those follow.
+function followOrAsk(
+  state: State,
+  patch: Patch,
+  before: ReservationMovement[],
+  base: State,
+  tx: TransferTransaction | ExchangeTransaction,
+  ctx: OpContext,
+  options: OpOptions | undefined
+): ReservationMovement[] {
+  try {
+    return followMovements(base, tx, ctx, options, tx.rateSnapshotId);
+  } catch (error) {
+    if (!(error instanceof NeedsCoverError) || !error.shortfalls.some((s) => s.kind === 'conversion')) throw error;
+    const accepted = followMovements(base, tx, ctx, { ...options, confirm: { ...options?.confirm, conversion: true } }, tx.rateSnapshotId);
+    const next: State = { ...state, ...patch, reservationMovements: [...before, ...accepted] };
+    throw new NeedsCoverError([...error.shortfalls, ...shortfallsBetween(state, next)]);
+  }
+}
+
+// Gives back the reservations a transfer or exchange carried: for each fund, what is still reserved on the
+// destination (up to what travelled there) returns to the source, at the same rate. If a fund already released or
+// spent some of it, only what remains goes back and the rest is validated by the gate (it may need a cover).
+function reversalMovements(state: State, tx: TransferTransaction | ExchangeTransaction, ctx: OpContext, rateSnapshotId: string): ReservationMovement[] {
+  const group = state.reservationMovements.filter(inGroupOf(tx.id));
+  if (group.length === 0) return [];
+  const kind: ReservationKind = tx.type === 'transfer' ? 'follow_transfer' : 'follow_exchange';
+  const groupId = `${tx.id}:undo:${ctx.newId()}`;
+  const out: ReservationMovement[] = [];
+  for (const fundId of [...new Set(group.map((m) => m.fundId))]) {
+    const net = (accountId: string) => roundIn(sumIn(group.filter((m) => m.fundId === fundId && m.accountId === accountId).map((m) => m.amount), state.accounts.find((a) => a.id === accountId)?.currency ?? 'EGP'), state.accounts.find((a) => a.id === accountId)?.currency ?? 'EGP');
+    const atTo = net(tx.toAccountId);
+    const atFrom = net(tx.fromAccountId);
+    if (atTo <= 0.005) continue;
+    const cancel = Math.min(atTo, reservation(state, fundId, tx.toAccountId));
+    if (cancel <= 0.005) continue;
+    const to = state.accounts.find((a) => a.id === tx.toAccountId)!;
+    const from = state.accounts.find((a) => a.id === tx.fromAccountId)!;
+    // What goes back to the source is the same fraction of what left it.
+    const back = atTo > 0 ? money((cancel / atTo) * -atFrom, from.currency) : 0;
+    out.push(newReservation(rateSnapshotId, fundId, to.id, -money(cancel, to.currency), kind, undefined, ctx, { groupId }));
+    if (back > 0) out.push(newReservation(rateSnapshotId, fundId, from.id, back, kind, undefined, ctx, { groupId }));
+  }
+  return out;
+}
+
+export function addTransaction(state: State, raw: NewIncomeExpense, ctx: OpContext, options?: OpOptions): Patch {
+  const patch = addTransactionCore(state, raw, ctx);
+  return settle(state, patch, ctx, options, patch.transactions![0].id);
+}
+
+// Same-currency only (a transfer between currencies is addExchange). Fees are spending; the move itself is not.
+// Reserved money that has to leave the source account travels with it (see followMovements).
+export function addTransfer(state: State, raw: NewTransfer, ctx: OpContext, options?: OpOptions): Patch {
+  const patch = addTransferCore(state, raw, ctx);
+  const tx = patch.transactions![0] as TransferTransaction;
+  const follows = followMovements(state, tx, ctx, options, tx.rateSnapshotId);
+  return settle(state, { ...patch, reservationMovements: [...state.reservationMovements, ...follows] }, ctx, options, tx.id);
+}
+
+function addTransferCore(state: State, raw: NewTransfer, ctx: OpContext): Patch {
+  const use = snapshotForNow(state, ctx.now());
+  const from = state.accounts.find((a) => a.id === raw.fromAccountId);
+  const input = {
+    ...raw,
+    amount: from ? money(raw.amount, from.currency) : raw.amount,
+    fees: roundFees(state, raw.fees ?? []),
+  };
   const tx: TransferTransaction = stamp(
     {
       ...input,
       type: 'transfer' as const,
       id: ctx.newId(),
       createdAt: ctx.now().toISOString(),
-      toAmount:
-        input.toAmount ?? convertCurrency(input.amount, from.currency, to.currency, rates),
-      rateToEGP: input.rateToEGP ?? rateToEGP(from.currency, rates),
-      ratesSnapshot: snapshotRates(rates),
+      rateSnapshotId: use.id,
     },
     ctx
   );
   validateTransfer(state, tx);
   return {
+    ...ratePatch(use),
     transactions: [tx, ...state.transactions],
     settings: rememberSelection(state, {
       transfer: { fromAccountId: tx.fromAccountId, toAccountId: tx.toAccountId },
@@ -344,15 +600,55 @@ export function addTransfer(state: State, input: NewTransfer, ctx: OpContext): P
   };
 }
 
-// Currency that rateToEGP refers to: the transaction's own, or the source account's for transfers.
+// A currency exchange: money out of one account in its currency, the amount that actually arrived in
+// another, and optional fees. Validated as a whole and written as ONE record, so it is all or nothing. When the
+// amount sent goes beyond the source account's available money, the reserved part is converted at the exchange's
+// own rate: that needs options.confirm.conversion (otherwise NeedsCoverError with the proposed split).
+export function addExchange(state: State, raw: NewExchange, ctx: OpContext, options?: OpOptions): Patch {
+  const patch = addExchangeCore(state, raw, ctx);
+  const tx = patch.transactions![0] as ExchangeTransaction;
+  const follows = followOrAsk(state, patch, state.reservationMovements, state, tx, ctx, options);
+  return settle(state, { ...patch, reservationMovements: [...state.reservationMovements, ...follows] }, ctx, options, tx.id);
+}
+
+function addExchangeCore(state: State, raw: NewExchange, ctx: OpContext): Patch {
+  const use = snapshotForNow(state, ctx.now());
+  const from = state.accounts.find((a) => a.id === raw.fromAccountId);
+  const to = state.accounts.find((a) => a.id === raw.toAccountId);
+  const input = {
+    ...raw,
+    sentAmount: from ? money(raw.sentAmount, from.currency) : raw.sentAmount,
+    receivedAmount: to ? money(raw.receivedAmount, to.currency) : raw.receivedAmount,
+    fees: roundFees(state, raw.fees ?? []),
+  };
+  const tx: ExchangeTransaction = stamp(
+    {
+      ...input,
+      type: 'exchange' as const,
+      id: ctx.newId(),
+      createdAt: ctx.now().toISOString(),
+      rateSnapshotId: use.id,
+    },
+    ctx
+  );
+  validateExchange(state, tx);
+  return {
+    ...ratePatch(use),
+    transactions: [tx, ...state.transactions],
+    settings: rememberSelection(state, {
+      exchange: { fromAccountId: tx.fromAccountId, toAccountId: tx.toAccountId },
+    }),
+  };
+}
+
+// The currency a transaction's rates are about: its own, or the source account's for a move between accounts.
 function transactionCurrency(state: State, tx: Editable<Transaction>): CurrencyCode | undefined {
-  if (tx.type !== 'transfer') return tx.currency;
+  if (tx.type !== 'transfer' && tx.type !== 'exchange') return tx.currency;
   return state.accounts.find((a) => a.id === tx.fromAccountId)?.currency;
 }
 
 function validateAssetPurchase(state: State, tx: AssetPurchaseTransaction) {
   assertPositive(tx.amount, 'amount');
-  assertPositive(tx.rateToEGP, 'rateToEGP');
   assertDate(tx.date, 'date');
   const account = requireById(state.accounts, tx.accountId, 'account');
   if (tx.currency !== account.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
@@ -361,52 +657,105 @@ function validateAssetPurchase(state: State, tx: AssetPurchaseTransaction) {
 
 function validateTransaction(state: State, tx: Transaction) {
   if (tx.type === 'transfer') validateTransfer(state, tx);
+  else if (tx.type === 'exchange') validateExchange(state, tx);
   else if (tx.type === 'asset_purchase') validateAssetPurchase(state, tx);
   else validateIncomeExpense(state, tx);
 }
 
-// The holding's cost basis always mirrors its purchase: amount × the snapshotted rate.
-function syncPurchaseCost(holdings: Holding[], tx: AssetPurchaseTransaction, ctx: OpContext): Holding[] {
+// The holding's cost basis always mirrors its purchase: the amount it was paid in, and the purchase's own rates.
+function syncPurchaseCost(
+  holdings: Holding[],
+  snapshots: readonly RateSnapshot[],
+  tx: AssetPurchaseTransaction,
+  ctx: OpContext
+): Holding[] {
   return holdings.map((h) =>
-    h.id === tx.holdingId ? stamp({ ...h, purchaseCostEGP: tx.amount * tx.rateToEGP }, ctx) : h
+    h.id === tx.holdingId
+      ? stamp(
+          { ...h, purchaseCost: { amount: tx.amount, currency: tx.currency }, purchaseRateSnapshotId: tx.rateSnapshotId },
+          ctx
+        )
+      : h
   );
 }
 
 // Replaces a transaction. Income/expense/transfer may change into each other, but a gold
-// purchase stays a gold purchase (it owns a holding). createdAt and the snapshotted rates
-// (rateToEGP, ratesSnapshot) are kept from the original; they are re-snapshotted, together,
-// only when the currency changes, e.g. when the transaction moves to an account in another
-// currency.
-export function updateTransaction(state: State, tx: Editable<Transaction>, ctx: OpContext): Patch {
+// purchase stays a gold purchase (it owns a holding). createdAt and the rate snapshot
+// (rateSnapshotId) are kept from the original; the snapshot is re-taken only when the currency
+// changes, e.g. when the transaction moves to an account in another currency.
+export function updateTransaction(state: State, raw: Editable<Transaction>, ctx: OpContext, options?: OpOptions): Patch {
+  const existing = requireById(state.transactions, raw.id, 'transaction');
+  // Reverse what the old record carried (reservations of a transfer / exchange), then apply the new values with the
+  // same rules; the gate compares the final state with the original one. All or nothing.
+  const reversal = isMove(existing) ? reversalMovements(state, existing, ctx, existing.rateSnapshotId) : [];
+  const reversed: State = { ...state, reservationMovements: [...state.reservationMovements, ...reversal] };
+  const patch = updateTransactionCore(reversed, raw, ctx);
+  const updated = patch.transactions!.find((x) => x.id === raw.id)!;
+  const follows = isMove(updated)
+    ? followOrAsk(
+        state,
+        patch,
+        reversed.reservationMovements,
+        { ...reversed, ...patch, transactions: reversed.transactions.filter((x) => x.id !== raw.id) },
+        updated,
+        ctx,
+        options
+      )
+    : [];
+  return settle(
+    state,
+    { ...patch, reservationMovements: [...reversed.reservationMovements, ...follows] },
+    ctx,
+    options,
+    raw.id
+  );
+}
+
+function updateTransactionCore(state: State, raw: Editable<Transaction>, ctx: OpContext): Patch {
+  const tx = roundTransaction(state, raw);
   const existing = requireById(state.transactions, tx.id, 'transaction');
   if ((existing.type === 'asset_purchase') !== (tx.type === 'asset_purchase')) {
     fail('ASSET_PURCHASE_TYPE_LOCKED', { id: tx.id });
   }
   const currency = transactionCurrency(state, tx);
   const keepRates = !currency || currency === transactionCurrency(state, existing);
-  const ratesSnapshot = keepRates ? existing.ratesSnapshot : snapshotRates(state.settings.exchangeRates);
-  const { ratesSnapshot: _edited, ...edited } = tx;
+  const use = keepRates ? undefined : snapshotForNow(state, ctx.now());
+  const { rateSnapshotId: _edited, ...edited } = tx;
   const updated = stamp(
     {
       ...edited,
       createdAt: existing.createdAt,
-      rateToEGP: keepRates ? existing.rateToEGP : rateToEGP(currency, state.settings.exchangeRates),
-      ...(ratesSnapshot ? { ratesSnapshot } : {}),
+      rateSnapshotId: use ? use.id : existing.rateSnapshotId,
     },
     ctx
   ) as Transaction;
   validateTransaction(state, updated);
+  const snapshots = use?.rateSnapshots ?? state.rateSnapshots;
   return {
+    ...(use ? ratePatch(use) : {}),
     transactions: replaceById(state.transactions, updated, 'transaction'),
     ...(updated.type === 'asset_purchase'
-      ? { holdings: syncPurchaseCost(state.holdings, updated, ctx) }
+      ? { holdings: syncPurchaseCost(state.holdings, snapshots, updated, ctx) }
       : {}),
   };
 }
 
 // Deleting a gold purchase also deletes its holding (and unlinks it from funds), atomically:
 // otherwise the money would be counted twice, as cash and as gold.
-export function deleteTransaction(state: State, id: string, ctx: OpContext): Patch {
+export function deleteTransaction(state: State, id: string, ctx: OpContext, options?: OpOptions): Patch {
+  const tx = requireById(state.transactions, id, 'transaction');
+  const reversal = isMove(tx) ? reversalMovements(state, tx, ctx, tx.rateSnapshotId) : [];
+  const patch = deleteTransactionCore(state, id, ctx);
+  return settle(
+    state,
+    reversal.length > 0 ? { ...patch, reservationMovements: [...state.reservationMovements, ...reversal] } : patch,
+    ctx,
+    options,
+    id
+  );
+}
+
+function deleteTransactionCore(state: State, id: string, ctx: OpContext): Patch {
   const tx = requireById(state.transactions, id, 'transaction');
   const transactions = state.transactions.filter((t) => t.id !== id);
   if (tx.type !== 'asset_purchase') {
@@ -426,7 +775,8 @@ export interface GoldPurchase {
     name: string;
     weightGrams: number;
     karat: GoldKarat;
-    location?: Location;
+    // Defaults to the paying account's country (a new purchase) or the holding's own (an edit).
+    country?: CountryCode;
     // Defaults to `date`.
     purchaseDate?: string;
     note?: string;
@@ -436,7 +786,9 @@ export interface GoldPurchase {
 function goldHoldingFor(
   input: GoldPurchase,
   id: string,
-  purchaseCostEGP: number,
+  purchaseCost: Money,
+  purchaseRateSnapshotId: string,
+  defaultCountry: CountryCode,
   ctx: OpContext
 ): GoldHolding {
   const { holding } = input;
@@ -447,21 +799,29 @@ function goldHoldingFor(
     name: holding.name.trim(),
     weightGrams: holding.weightGrams,
     karat: holding.karat,
-    purchaseCostEGP,
+    purchaseCost,
+    purchaseRateSnapshotId,
     purchaseDate: holding.purchaseDate ?? input.date,
-    ...(holding.location ? { location: holding.location } : {}),
+    country: holding.country ?? defaultCountry,
     ...(holding.note?.trim() ? { note: holding.note.trim() } : {}),
   };
 }
 
 // Buys gold with cash in one atomic step: a gold holding whose cost is what was paid
-// (amount × rateToEGP) and an asset_purchase transaction that takes it out of the account.
+// (the amount in EGP at the current rates) and an asset_purchase transaction that takes it out of the account.
 // At cost, net worth is unchanged: cash goes down by exactly what the gold goes up.
-export function buyGold(state: State, input: GoldPurchase, ctx: OpContext): Patch {
-  const account = requireById(state.accounts, input.accountId, 'account');
+export function buyGold(state: State, purchase: GoldPurchase, ctx: OpContext, options?: OpOptions): Patch {
+  const patch = buyGoldCore(state, purchase, ctx);
+  return settle(state, patch, ctx, options, patch.transactions![0].id);
+}
+
+function buyGoldCore(state: State, purchase: GoldPurchase, ctx: OpContext): Patch {
+  const account = requireById(state.accounts, purchase.accountId, 'account');
+  const input = { ...purchase, amount: money(purchase.amount, account.currency) };
   assertPositive(input.amount, 'amount');
-  const rate = rateToEGP(account.currency, state.settings.exchangeRates);
-  const holding = goldHoldingFor(input, ctx.newId(), input.amount * rate, ctx);
+  const use = snapshotForNow(state, ctx.now());
+  // The cost is what was paid, in the currency it was paid in.
+  const holding = goldHoldingFor(input, ctx.newId(), { amount: input.amount, currency: account.currency }, use.id, account.country, ctx);
   validateHolding(holding);
 
   const tx: AssetPurchaseTransaction = {
@@ -474,27 +834,38 @@ export function buyGold(state: State, input: GoldPurchase, ctx: OpContext): Patc
     holdingId: holding.id,
     date: input.date,
     ...(input.note?.trim() ? { note: input.note.trim() } : {}),
-    rateToEGP: rate,
-    ratesSnapshot: snapshotRates(state.settings.exchangeRates),
+    rateSnapshotId: use.id,
     createdAt: ctx.now().toISOString(),
   };
   const holdings = [...state.holdings, holding];
   validateAssetPurchase({ ...state, holdings }, tx);
-  return { holdings, transactions: [tx, ...state.transactions] };
+  return { ...ratePatch(use), holdings, transactions: [tx, ...state.transactions] };
 }
 
 // Edits a gold purchase and its holding together. The rate snapshot is kept unless the
 // paying account's currency changes; the holding's cost follows the (new) amount.
-export function updateGoldPurchase(state: State, txId: string, input: GoldPurchase, ctx: OpContext): Patch {
+export function updateGoldPurchase(state: State, txId: string, purchase: GoldPurchase, ctx: OpContext, options?: OpOptions): Patch {
+  return settle(state, updateGoldPurchaseCore(state, txId, purchase, ctx), ctx, options, txId);
+}
+
+function updateGoldPurchaseCore(state: State, txId: string, purchase: GoldPurchase, ctx: OpContext): Patch {
   const existing = requireById(state.transactions, txId, 'transaction');
   if (existing.type !== 'asset_purchase') fail('ASSET_PURCHASE_TYPE_LOCKED', { id: txId });
   const previousHolding = requireById(state.holdings, existing.holdingId, 'holding');
-  const account = requireById(state.accounts, input.accountId, 'account');
+  const account = requireById(state.accounts, purchase.accountId, 'account');
+  const input = { ...purchase, amount: money(purchase.amount, account.currency) };
   assertPositive(input.amount, 'amount');
   const keepRates = account.currency === existing.currency;
-  const rate = keepRates ? existing.rateToEGP : rateToEGP(account.currency, state.settings.exchangeRates);
+  const use = keepRates ? undefined : snapshotForNow(state, ctx.now());
   const holding: GoldHolding = {
-    ...goldHoldingFor(input, previousHolding.id, input.amount * rate, ctx),
+    ...goldHoldingFor(
+      input,
+      previousHolding.id,
+      { amount: input.amount, currency: account.currency },
+      use ? use.id : existing.rateSnapshotId,
+      previousHolding.country,
+      ctx
+    ),
   };
   validateHolding(holding);
 
@@ -506,13 +877,12 @@ export function updateGoldPurchase(state: State, txId: string, input: GoldPurcha
     currency: account.currency,
     date: input.date,
     ...(input.note?.trim() ? { note: input.note.trim() } : {}),
-    rateToEGP: rate,
-    ...(keepRates ? {} : { ratesSnapshot: snapshotRates(state.settings.exchangeRates) }),
+    ...(use ? { rateSnapshotId: use.id } : {}),
     updatedAt: ctx.now().toISOString(),
   };
   const holdings = replaceById(state.holdings, holding, 'holding');
   validateAssetPurchase({ ...state, holdings }, tx);
-  return { holdings, transactions: replaceById(state.transactions, tx, 'transaction') };
+  return { ...(use ? ratePatch(use) : {}), holdings, transactions: replaceById(state.transactions, tx, 'transaction') };
 }
 
 // --- Funds & movements ------------------------------------------------------
@@ -533,6 +903,7 @@ function normalizeFundShape<T extends NewFund>(fund: T): T {
 // `fundId` is the fund being validated (undefined when adding), so it may keep its own links.
 function validateFund(state: State, fund: NewFund, fundId?: string) {
   assertName(fund.name, 'fund');
+  assertCurrency(fund.currency);
   assertPositive(fund.targetAmount, 'targetAmount');
   assertNumber(fund.priority, 'priority');
   if (fund.monthlyContribution !== undefined) {
@@ -558,8 +929,15 @@ function validateFund(state: State, fund: NewFund, fundId?: string) {
   if (new Set(linked).size !== linked.length) fail('HOLDING_ALREADY_LINKED');
 }
 
+// A fund's target and monthly contribution, in its currency.
+const roundFundAmounts = <T extends { currency: CurrencyCode; targetAmount: number; monthlyContribution?: number }>(fund: T): T => ({
+  ...fund,
+  targetAmount: money(fund.targetAmount, fund.currency),
+  ...(fund.monthlyContribution !== undefined ? { monthlyContribution: money(fund.monthlyContribution, fund.currency) } : {}),
+});
+
 export function addFund(state: State, input: NewFund, ctx: OpContext): Patch {
-  const normalized = normalizeFundShape(input);
+  const normalized = normalizeFundShape(roundFundAmounts(input));
   validateFund(state, normalized);
   const fund: Fund = stamp(
     {
@@ -574,18 +952,20 @@ export function addFund(state: State, input: NewFund, ctx: OpContext): Patch {
 }
 
 export function updateFund(state: State, fund: Editable<Fund>, ctx: OpContext): Patch {
-  const normalized = normalizeFundShape(stamp(fund, ctx) as Fund);
+  const normalized = normalizeFundShape(stamp(roundFundAmounts(fund), ctx) as Fund);
   validateFund(state, normalized, fund.id);
   return { funds: replaceById(state.funds, normalized, 'fund') };
 }
 
-// Deleting a fund releases its allocations back to unassigned money.
+// Deleting a fund releases its reservations (the money becomes available again).
 export function deleteFund(state: State, id: string, ctx: OpContext): Patch {
   requireById(state.funds, id, 'fund');
-  const movementIds = state.fundMovements.filter((m) => m.fundId === id).map((m) => m.id);
+  const reservationIds = state.reservationMovements.filter((m) => m.fundId === id).map((m) => m.id);
+  const unresolvedIds = state.unresolvedMovements.filter((m) => m.fundId === id).map((m) => m.id);
   return {
     funds: state.funds.filter((f) => f.id !== id),
-    fundMovements: state.fundMovements.filter((m) => m.fundId !== id),
+    reservationMovements: state.reservationMovements.filter((m) => m.fundId !== id),
+    unresolvedMovements: state.unresolvedMovements.filter((m) => m.fundId !== id),
     monthlyPlans: state.monthlyPlans.map((p) =>
       p.fundContributions.some((c) => c.fundId === id)
         ? stamp({ ...p, fundContributions: p.fundContributions.filter((c) => c.fundId !== id) }, ctx)
@@ -593,131 +973,269 @@ export function deleteFund(state: State, id: string, ctx: OpContext): Patch {
     ),
     tombstones: [
       ...logDeletes(state, 'fund', [id], ctx),
-      ...movementIds.map((movementId) => tombstone('fundMovement', movementId, ctx)),
+      ...reservationIds.map((movementId) => tombstone('reservationMovement', movementId, ctx)),
+      ...unresolvedIds.map((movementId) => tombstone('unresolvedMovement', movementId, ctx)),
     ],
   };
 }
 
-function newMovement(
-  state: State,
+function assertCurrency(currency: CurrencyCode | undefined) {
+  if (currency !== undefined && !isKnownCurrency(currency)) fail('UNKNOWN_CURRENCY');
+}
+
+// --- Reservations -----------------------------------------------------------
+//
+// A reservation is money of ONE account set aside for a fund, in that account's currency (INV-2). The
+// operations below pick the account by default rules (no prompt) and keep every account's reservations within
+// what it holds: reserving more than is available is refused (Q13: release or reallocate first).
+
+function newReservation(
+  rateSnapshotId: string,
   fundId: string,
+  accountId: string,
   amount: number,
+  kind: ReservationKind,
   note: string | undefined,
   ctx: OpContext,
-  currency?: CurrencyCode
-): FundMovement {
+  extra: { groupId?: string; sourceTransactionId?: string } = {}
+): ReservationMovement {
   return {
     updatedAt: ctx.now().toISOString(),
     id: ctx.newId(),
     fundId,
+    accountId,
     amount,
-    // Only when the money's currency was chosen; otherwise the movement is in the fund's currency
-    // and covered by whichever money is available (see unassignedByCurrency).
-    ...(currency ? { currency } : {}),
+    kind,
+    ...extra,
     date: toDateKey(ctx.now()),
-    ratesSnapshot: snapshotRates(state.settings.exchangeRates),
+    rateSnapshotId,
     ...(note ? { note } : {}),
   };
 }
 
-function assertCurrency(currency: CurrencyCode | undefined) {
-  if (currency !== undefined && !CURRENCY_CODES.includes(currency)) fail('CURRENCY_MISMATCH');
+type ReservationState = Pick<State, 'accounts' | 'transactions' | 'reservationMovements'>;
+
+// Reserves `amount` of `currency` for the fund by the default rules (planReserve: the sheet shows the same plan).
+function reserveFor(
+  state: ReservationState,
+  fundId: string,
+  amount: number,
+  currency: CurrencyCode,
+  note: string | undefined,
+  ctx: OpContext,
+  rateSnapshotId: string,
+  accountId?: string
+): ReservationMovement[] {
+  return planReserve(state, fundId, amount, currency, accountId).map((s) =>
+    newReservation(rateSnapshotId, fundId, s.accountId, s.amount, 'reserve', note, ctx)
+  );
 }
 
-// Whether the new movements leave more money short (in EGP, per currency) than before.
-function worsensShortfall(state: State, added: FundMovement[]): boolean {
-  const before = unassignedSummary(state).deficitEGP;
-  const after = unassignedSummary({ ...state, fundMovements: [...state.fundMovements, ...added] }).deficitEGP;
-  return after > before + 0.005;
+// Gives `amount` of `currency` back from the fund's reservations (planRelease).
+function releaseFrom(
+  state: ReservationState,
+  fundId: string,
+  amount: number,
+  currency: CurrencyCode,
+  note: string | undefined,
+  ctx: OpContext,
+  rateSnapshotId: string,
+  kind: ReservationKind = 'release',
+  accountId?: string
+): ReservationMovement[] {
+  return planRelease(state, fundId, amount, currency, accountId).map((s) =>
+    newReservation(rateSnapshotId, fundId, s.accountId, -s.amount, kind, note, ctx)
+  );
 }
 
-// Sets `amount` of `currency` aside for the fund (the fund's currency when omitted).
+// Sets `amount` of `currency` aside for the fund (the fund's currency when omitted), from the account with the
+// most available money, or from `accountId`. Refused when the accounts cannot cover it.
 export function allocateToFund(
   state: State,
   fundId: string,
   amount: number,
   note: string | undefined,
   ctx: OpContext,
-  currency?: CurrencyCode
+  currency?: CurrencyCode,
+  accountId?: string
 ): Patch {
-  requireById(state.funds, fundId, 'fund');
-  assertPositive(amount, 'amount');
+  const fund = requireById(state.funds, fundId, 'fund');
+  const value = fundMoney(state, fundId, amount, currency);
+  assertPositive(value, 'amount');
   assertCurrency(currency);
-  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, amount, note, ctx, currency)] };
+  const use = snapshotForNow(state, ctx.now());
+  const moves = reserveFor(state, fundId, value, currency ?? fund.currency, note, ctx, use.id, accountId);
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...moves] };
 }
 
-// Takes `amount` of `currency` out of the fund's cash in that currency (the fund's currency when
-// omitted, from its own-currency cash).
+// Takes `amount` of `currency` out of the fund's reservations (the fund's currency when omitted).
 export function withdrawFromFund(
   state: State,
   fundId: string,
   amount: number,
   note: string | undefined,
   ctx: OpContext,
-  currency?: CurrencyCode
+  currency?: CurrencyCode,
+  accountId?: string
 ): Patch {
   const fund = requireById(state.funds, fundId, 'fund');
-  assertPositive(amount, 'amount');
+  const value = fundMoney(state, fundId, amount, currency);
+  assertPositive(value, 'amount');
   assertCurrency(currency);
-  if (amount > fundAllocatedIn(state, fundId, currency ?? fund.currency)) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
-  return { fundMovements: [...state.fundMovements, newMovement(state, fundId, -amount, note, ctx, currency)] };
+  const use = snapshotForNow(state, ctx.now());
+  const moves = releaseFrom(state, fundId, value, currency ?? fund.currency, note, ctx, use.id, 'release', accountId);
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...moves] };
 }
 
-// Allocates to several funds at once. All or nothing: the money may not exceed what is
-// unassigned in its currency (an allocation without a currency is in its fund's currency and,
-// like data from before currencies, may use any currency's money).
+// Reserves for several funds at once. All or nothing: each reservation sees the ones before it, so the money
+// may not exceed what is available in its currency.
 export function allocateMany(
   state: State,
-  allocations: FundAmount[],
+  rawAllocations: FundAmount[],
   note: string | undefined,
   ctx: OpContext
 ): Patch {
+  const allocations = rawAllocations.map((a) => ({ ...a, amount: fundMoney(state, a.fundId, a.amount, a.currency) }));
   if (allocations.length === 0) fail('NOTHING_SELECTED');
   for (const { fundId, amount, currency } of allocations) {
     requireById(state.funds, fundId, 'fund');
     assertPositive(amount, 'amount');
     assertCurrency(currency);
   }
-  const added = allocations.map(({ fundId, amount, currency }) => newMovement(state, fundId, amount, note, ctx, currency));
-  if (worsensShortfall(state, added)) fail('INSUFFICIENT_UNASSIGNED');
-  return { fundMovements: [...state.fundMovements, ...added] };
+  const use = snapshotForNow(state, ctx.now());
+  let draft: ReservationState = state;
+  const added: ReservationMovement[] = [];
+  for (const { fundId, amount, currency, accountId } of allocations) {
+    const fund = requireById(state.funds, fundId, 'fund');
+    const moves = reserveFor(draft, fundId, amount, currency ?? fund.currency, note, ctx, use.id, accountId);
+    added.push(...moves);
+    draft = { ...draft, reservationMovements: [...draft.reservationMovements, ...moves] };
+  }
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...added] };
 }
 
-// Withdraws from several funds at once. All or nothing: no fund may go below zero cash in any
-// currency.
+// Releases from several funds at once. All or nothing: no fund may go below zero in any currency.
 export function withdrawMany(
   state: State,
-  withdrawals: FundAmount[],
+  rawWithdrawals: FundAmount[],
   note: string | undefined,
   ctx: OpContext
 ): Patch {
+  const withdrawals = rawWithdrawals.map((w) => ({ ...w, amount: fundMoney(state, w.fundId, w.amount, w.currency) }));
   if (withdrawals.length === 0) fail('NOTHING_SELECTED');
-  const perFundCurrency = new Map<string, { fundId: string; currency: CurrencyCode; total: number }>();
   for (const { fundId, amount, currency } of withdrawals) {
-    const fund = requireById(state.funds, fundId, 'fund');
+    requireById(state.funds, fundId, 'fund');
     assertPositive(amount, 'amount');
     assertCurrency(currency);
-    const cur = currency ?? fund.currency;
-    const key = `${fundId}|${cur}`;
-    const entry = perFundCurrency.get(key) ?? { fundId, currency: cur, total: 0 };
-    entry.total += amount;
-    perFundCurrency.set(key, entry);
   }
-  for (const { fundId, currency, total } of perFundCurrency.values()) {
-    if (total > fundAllocatedIn(state, fundId, currency) + 0.005) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
+  const use = snapshotForNow(state, ctx.now());
+  let draft: ReservationState = state;
+  const added: ReservationMovement[] = [];
+  for (const { fundId, amount, currency, accountId } of withdrawals) {
+    const fund = requireById(state.funds, fundId, 'fund');
+    const moves = releaseFrom(draft, fundId, amount, currency ?? fund.currency, note, ctx, use.id, 'release', accountId);
+    added.push(...moves);
+    draft = { ...draft, reservationMovements: [...draft.reservationMovements, ...moves] };
   }
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...added] };
+}
+
+// Moves reserved money from one fund to another on the SAME account(s): a pair of 'reallocate' movements per account
+// (sharing a groupId). No cash moves, so nothing can break INV-5, and it saves nothing new (it is not "saved this
+// month"). The source account is where the source fund holds most in that currency, split across accounts when it
+// has to (planRelease); `accountId` picks one instead.
+export interface Reallocation {
+  fromFundId: string;
+  toFundId: string;
+  // In `currency` (the source fund's currency when omitted).
+  amount: number;
+  currency?: CurrencyCode;
+  accountId?: string;
+  note?: string;
+}
+
+export function reallocate(state: State, input: Reallocation, ctx: OpContext): Patch {
+  const from = requireById(state.funds, input.fromFundId, 'fund');
+  requireById(state.funds, input.toFundId, 'fund');
+  if (input.fromFundId === input.toFundId) fail('DUPLICATE_ENTRY');
+  const currency = input.currency ?? from.currency;
+  assertCurrency(input.currency);
+  const amount = money(input.amount, currency);
+  assertPositive(amount, 'amount');
+  const use = snapshotForNow(state, ctx.now());
+  const groupId = ctx.newId();
+  const moves = planRelease(state, from.id, amount, currency, input.accountId).flatMap((s) => [
+    newReservation(use.id, input.fromFundId, s.accountId, -s.amount, 'reallocate', input.note, ctx, { groupId }),
+    newReservation(use.id, input.toFundId, s.accountId, s.amount, 'reallocate', input.note, ctx, { groupId }),
+  ]);
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...moves] };
+}
+
+// Q4: after a covered expense is deleted nothing is re-reserved by itself. The one-tap offer gives back what the cover
+// took (coversOf), as far as the accounts hold it free now; each part is a 'reserve' tagged with the deleted
+// transaction, so the offer does not come back.
+export function reReserveCovers(state: State, covers: CoverSelection[], sourceTransactionId: string, ctx: OpContext): Patch {
+  const use = snapshotForNow(state, ctx.now());
+  let draft: State = state;
+  const moves: ReservationMovement[] = [];
+  for (const c of covers) {
+    const account = state.accounts.find((a) => a.id === c.accountId);
+    if (!account || !state.funds.some((f) => f.id === c.fundId)) continue;
+    const take = Math.min(money(c.amount, account.currency), Math.max(0, accountAvailable(draft, account.id)));
+    if (take <= 0.005) continue;
+    const m = newReservation(use.id, c.fundId, account.id, take, 'reserve', undefined, ctx, { sourceTransactionId });
+    moves.push(m);
+    draft = { ...draft, reservationMovements: [...draft.reservationMovements, m] };
+  }
+  if (moves.length === 0) fail('RESERVE_EXCEEDS_AVAILABLE');
+  return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...moves] };
+}
+
+// Gives a group of migrated movements ("محجوز ومش محدد حسابه") an account: every unresolved movement of this fund in
+// this currency becomes a reservation (kind 'adjust', same id, date, note and rates) on `accountId`. INV-5 decides: the
+// account must hold it. The sheet that calls this IS the one confirmation (design §F7, Q7).
+export interface Resolution {
+  fundId: string;
+  currency: CurrencyCode;
+  accountId: string;
+}
+
+export function resolveUnresolved(state: State, input: Resolution, ctx: OpContext): Patch {
+  const group = state.unresolvedMovements.filter((m) => m.fundId === input.fundId && m.currency === input.currency);
+  if (group.length === 0) fail('NOT_FOUND', { entity: 'reservationMovement' });
+  const account = requireById(state.accounts, input.accountId, 'account');
+  if (account.currency !== input.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
+  const now = ctx.now().toISOString();
+  const moves: ReservationMovement[] = group.map((m) => ({
+    id: m.id,
+    fundId: m.fundId,
+    accountId: account.id,
+    amount: m.amount,
+    kind: 'adjust' as const,
+    date: m.date,
+    ...(m.note ? { note: m.note } : {}),
+    rateSnapshotId: m.rateSnapshotId,
+    updatedAt: now,
+  }));
+  const next: State = {
+    ...state,
+    reservationMovements: [...state.reservationMovements, ...moves],
+    unresolvedMovements: state.unresolvedMovements.filter((m) => !group.includes(m)),
+  };
+  if (invariantViolations(next).length > 0) fail('RESERVE_EXCEEDS_AVAILABLE', { id: input.fundId });
   return {
-    fundMovements: [
-      ...state.fundMovements,
-      ...withdrawals.map(({ fundId, amount, currency }) => newMovement(state, fundId, -amount, note, ctx, currency)),
-    ],
+    reservationMovements: next.reservationMovements,
+    unresolvedMovements: next.unresolvedMovements,
+    tombstones: logDeletes(state, 'unresolvedMovement', group.map((m) => m.id), ctx),
   };
 }
-// Edits a fund's details and sets its cash allocation in one atomic patch. The allocation is
-// changed by an adjustment movement for the difference (a decrease comes out of the fund's cash
-// currency by currency, so it can be several). Increasing it may not leave more money short;
-// decreasing is always allowed (it only frees money).
-// Omitted optional fields keep their current values, except `deadline`, which is cleared.
+
+export { coversOf };
+
+// Edits a fund's details and sets its cash allocation in one atomic patch. The allocation changes by reserving the
+// difference (an increase may not exceed what is available) or releasing it (the fund's own currency first, then
+// the others at today's rate: see withdrawalPlan). Omitted optional fields keep their current values, except
+// `deadline`, which is cleared.
 export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpContext): Patch {
   const fund = requireById(state.funds, fundId, 'fund');
   const { deadline: _previousDeadline, frequency, nextDueDate, ...rest } = fund;
@@ -725,7 +1243,7 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
     ...rest,
     updatedAt: ctx.now().toISOString(),
     name: edit.name.trim(),
-    targetAmount: edit.targetAmount,
+    targetAmount: money(edit.targetAmount, fund.currency),
     type: edit.type ?? fund.type,
     priority: edit.priority ?? fund.priority,
     linkedHoldingIds: edit.linkedHoldingIds ?? fund.linkedHoldingIds,
@@ -734,21 +1252,30 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
     ...((edit.nextDueDate ?? nextDueDate) ? { nextDueDate: edit.nextDueDate ?? nextDueDate } : {}),
   });
   validateFund(state, updated, fundId);
-  assertNonNegative(edit.cashAllocation, 'cashAllocation');
+  const cashAllocation = money(edit.cashAllocation, fund.currency);
+  assertNonNegative(cashAllocation, 'cashAllocation');
 
-  const change = edit.cashAllocation - fundAllocated(state, fundId);
-  let adjustments: FundMovement[] = [];
+  const use = snapshotForNow(state, ctx.now());
+  const change = money(cashAllocation - fundAllocated(state, fundId), fund.currency);
+  let moves: ReservationMovement[] = [];
   if (change >= 0.005) {
-    // In the fund's currency, covered by any currency's money (like data from before currencies).
-    adjustments = [newMovement(state, fundId, change, 'تعديل الرصيد', ctx)];
-    if (worsensShortfall(state, adjustments)) fail('INSUFFICIENT_UNASSIGNED', { id: fundId });
+    moves = reserveFor(state, fundId, change, fund.currency, 'تعديل الرصيد', ctx, use.id);
   } else if (change <= -0.005) {
     const plan = withdrawalPlan(state, fundId, -change, fund.currency);
-    adjustments = plan.withdrawals.map((w) => newMovement(state, fundId, -w.amount, 'تعديل الرصيد', ctx, w.currency));
-    if (plan.shortfall > 0.005) adjustments.push(newMovement(state, fundId, -plan.shortfall, 'تعديل الرصيد', ctx));
+    // What the fund's reservations cannot give (e.g. a migrated movement not yet assigned to an account).
+    if (plan.shortfall > 0.005) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
+    let draft: ReservationState = state;
+    for (const w of plan.withdrawals) {
+      const released = releaseFrom(draft, fundId, fundMoney(state, fundId, w.amount, w.currency), w.currency ?? fund.currency, 'تعديل الرصيد', ctx, use.id);
+      moves.push(...released);
+      draft = { ...draft, reservationMovements: [...draft.reservationMovements, ...released] };
+    }
   }
-  const fundMovements = adjustments.length > 0 ? [...state.fundMovements, ...adjustments] : state.fundMovements;
-  return { funds: replaceById(state.funds, updated, 'fund'), fundMovements };
+  return {
+    ...(moves.length > 0 ? ratePatch(use) : {}),
+    funds: replaceById(state.funds, updated, 'fund'),
+    reservationMovements: moves.length > 0 ? [...state.reservationMovements, ...moves] : state.reservationMovements,
+  };
 }
 
 export interface SinkingPayment {
@@ -761,10 +1288,10 @@ export interface SinkingPayment {
   note?: string;
 }
 
-// Records a sinking fund's bill as one atomic step: the expense transaction, a withdrawal of
-// the same value from the fund's cash (as much as it holds, the payment's currency first; any
-// excess comes out of unassigned money), and nextDueDate advanced by one cycle.
-export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpContext): Patch {
+// Records a sinking fund's bill as one atomic step: the expense transaction, a `spend` movement consuming the
+// fund's reservation on the paying account (as much as it holds there; the rest of the bill is paid from the
+// account's available money), and nextDueDate advanced by one cycle.
+export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpContext, options?: OpOptions): Patch {
   const fund = requireById(state.funds, payment.fundId, 'fund');
   if (fund.type !== 'sinking') fail('NOT_A_SINKING_FUND', { id: fund.id });
   if (!fund.frequency || !fund.nextDueDate) fail('SINKING_SCHEDULE_REQUIRED', { id: fund.id });
@@ -778,7 +1305,7 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
   };
 
   apply(
-    addTransaction(
+    addTransactionCore(
       draft,
       {
         type: 'expense',
@@ -792,11 +1319,17 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
       ctx
     )
   );
-  // Cash in the payment's own currency pays first (no conversion), then the fund's own currency
-  // and the others at today's rate.
-  const { withdrawals } = withdrawalPlan(draft, fund.id, payment.amount, account.currency);
-  for (const w of withdrawals) {
-    apply(withdrawFromFund(draft, fund.id, w.amount, `اتدفعت: ${fund.name}`, ctx, w.currency));
+  const paid = draft.transactions[0];
+  const use = snapshotForNow(draft, ctx.now());
+  const spent = Math.min(money(payment.amount, account.currency), reservation(draft, fund.id, account.id));
+  if (spent > 0) {
+    apply({
+      ...ratePatch(use),
+      reservationMovements: [
+        ...draft.reservationMovements,
+        newReservation(use.id, fund.id, account.id, -spent, 'spend', `اتدفعت: ${fund.name}`, ctx, { sourceTransactionId: paid.id }),
+      ],
+    });
   }
 
   const nextDue = addMonthsToDate(fund.nextDueDate, SINKING_CYCLE_MONTHS[fund.frequency]);
@@ -804,53 +1337,63 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
     funds: draft.funds.map((f) => (f.id === fund.id ? stamp({ ...f, nextDueDate: nextDue }, ctx) : f)),
   });
 
-  return {
-    transactions: draft.transactions,
-    fundMovements: draft.fundMovements,
-    funds: draft.funds,
-    settings: draft.settings,
-  };
-}
-
-export function updateFundMovement(state: State, movement: Editable<FundMovement>, ctx: OpContext): Patch {
-  requireById(state.funds, movement.fundId, 'fund');
-  assertNumber(movement.amount, 'amount');
-  if (movement.amount === 0) fail('NOT_POSITIVE', { field: 'amount' });
-  assertDate(movement.date, 'date');
-  return { fundMovements: replaceById(state.fundMovements, stamp(movement, ctx), 'fundMovement') };
-}
-
-export function deleteFundMovement(state: State, id: string, ctx: OpContext): Patch {
-  requireById(state.fundMovements, id, 'fundMovement');
-  return {
-    fundMovements: state.fundMovements.filter((m) => m.id !== id),
-    tombstones: logDeletes(state, 'fundMovement', [id], ctx),
-  };
+  // D12: the fund's own reservation on the paying account is spent first, then the account's available money; if
+  // that is still not enough the gate asks for a cover. A bill is never paid silently from other funds' money.
+  return settle(
+    state,
+    {
+      transactions: draft.transactions,
+      reservationMovements: draft.reservationMovements,
+      funds: draft.funds,
+      settings: draft.settings,
+      rateSnapshots: draft.rateSnapshots,
+    },
+    ctx,
+    options,
+    paid.id
+  );
 }
 
 // --- Holdings ---------------------------------------------------------------
 
 function validateHolding(holding: NewHolding) {
   assertName(holding.name, 'holding');
-  assertNonNegative(holding.purchaseCostEGP, 'purchaseCostEGP');
+  assertCountry(holding.country);
+  assertNonNegative(holding.purchaseCost.amount, 'purchaseCost');
+  assertCurrency(holding.purchaseCost.currency);
   if (holding.purchaseDate !== undefined) assertDate(holding.purchaseDate, 'purchaseDate');
   if (holding.type === 'gold') {
     assertPositive(holding.weightGrams, 'weightGrams');
     if (![18, 21, 24].includes(holding.karat)) fail('INVALID_KARAT');
   } else {
     assertPositive(holding.quantity, 'quantity');
+    assertCurrency(holding.currency);
   }
 }
 
-export function addHolding(state: State, input: NewHolding, ctx: OpContext): Patch {
+// A holding's cost is in the currency it was paid in; a currency holding's quantity is in that currency.
+const roundHolding = <T extends NewHolding | Editable<Holding>>(holding: T): T => ({
+  ...holding,
+  purchaseCost: { ...holding.purchaseCost, amount: money(holding.purchaseCost.amount, holding.purchaseCost.currency) },
+  ...(holding.type === 'currency' ? { quantity: money(holding.quantity, holding.currency) } : {}),
+});
+
+export function addHolding(state: State, raw: NewHolding, ctx: OpContext): Patch {
+  const input = roundHolding(raw);
   validateHolding(input);
-  const holding = stamp({ ...input, id: ctx.newId() }, ctx) as Holding;
-  return { holdings: [...state.holdings, holding] };
+  const use = snapshotForNow(state, ctx.now());
+  const holding = stamp({ ...input, id: ctx.newId(), purchaseRateSnapshotId: use.id }, ctx) as Holding;
+  return { ...ratePatch(use), holdings: [...state.holdings, holding] };
 }
 
-export function updateHolding(state: State, holding: Editable<Holding>, ctx: OpContext): Patch {
+export function updateHolding(state: State, raw: Editable<Holding>, ctx: OpContext): Patch {
+  const holding = roundHolding(raw);
   validateHolding(holding);
-  return { holdings: replaceById(state.holdings, stamp(holding, ctx) as Holding, 'holding') };
+  const existing = requireById(state.holdings, holding.id, 'holding');
+  // The purchase rates are kept unless the cost moved to another currency.
+  const use = existing.purchaseCost.currency === holding.purchaseCost.currency ? undefined : snapshotForNow(state, ctx.now());
+  const updated = stamp({ ...holding, purchaseRateSnapshotId: use ? use.id : existing.purchaseRateSnapshotId }, ctx) as Holding;
+  return { ...(use ? ratePatch(use) : {}), holdings: replaceById(state.holdings, updated, 'holding') };
 }
 
 // Removes a holding (logging a tombstone) and unlinks it from any fund.
@@ -884,17 +1427,27 @@ export function deleteHolding(state: State, id: string, ctx: OpContext): Patch {
 
 function validateLiability(liability: NewLiability) {
   assertName(liability.name, 'liability');
+  assertCountry(liability.country);
+  assertCurrency(liability.currency);
   assertPositive(liability.principal, 'principal');
   if (liability.monthlyPayment !== undefined) assertPositive(liability.monthlyPayment, 'monthlyPayment');
   assertDate(liability.startDate, 'startDate');
 }
 
-export function addLiability(state: State, input: NewLiability, ctx: OpContext): Patch {
+const roundLiability = <T extends NewLiability | Editable<Liability>>(l: T): T => ({
+  ...l,
+  principal: money(l.principal, l.currency),
+  ...(l.monthlyPayment !== undefined ? { monthlyPayment: money(l.monthlyPayment, l.currency) } : {}),
+});
+
+export function addLiability(state: State, raw: NewLiability, ctx: OpContext): Patch {
+  const input = roundLiability(raw);
   validateLiability(input);
   return { liabilities: [...state.liabilities, stamp({ ...input, id: ctx.newId() }, ctx)] };
 }
 
-export function updateLiability(state: State, liability: Editable<Liability>, ctx: OpContext): Patch {
+export function updateLiability(state: State, raw: Editable<Liability>, ctx: OpContext): Patch {
+  const liability = roundLiability(raw);
   validateLiability(liability);
   const existing = requireById(state.liabilities, liability.id, 'liability');
   const hasPayments = state.transactions.some((tx) => isIncomeExpense(tx) && tx.liabilityId === liability.id);
@@ -935,10 +1488,18 @@ function validateRecurringRule(state: State, rule: NewRecurringRule) {
   if (rule.mode !== 'auto' && rule.mode !== 'confirm') fail('INVALID_MODE');
   const account = requireById(state.accounts, rule.accountId, 'account');
   if (rule.currency !== account.currency) fail('CURRENCY_MISMATCH', { entity: 'account' });
-  if (rule.kind === 'transfer') {
+  if (rule.kind === 'transfer' || rule.kind === 'exchange') {
     const to = requireById(state.accounts, rule.toAccountId ?? '', 'account');
     if (to.id === account.id) fail('SAME_ACCOUNT_TRANSFER');
-    if (to.currency !== account.currency) assertPositive(rule.toAmount ?? NaN, 'toAmount');
+    if (rule.kind === 'transfer') {
+      if (to.currency !== account.currency) fail('TRANSFER_CURRENCY_MISMATCH');
+    } else {
+      if (to.currency === account.currency) fail('EXCHANGE_SAME_CURRENCY');
+      // What arrives each time is part of the rule; an unknown executed rate is never guessed, so it is
+      // always confirmed by the user.
+      assertPositive(rule.toAmount ?? NaN, 'receivedAmount');
+      if (rule.mode !== 'confirm') fail('INVALID_MODE');
+    }
   } else {
     const category = requireById(state.categories, rule.categoryId ?? '', 'category');
     if (category.kind !== rule.kind) fail('CATEGORY_KIND_MISMATCH', { id: category.id });
@@ -949,9 +1510,11 @@ function validateRecurringRule(state: State, rule: NewRecurringRule) {
 function normalizeRuleShape<T extends NewRecurringRule>(rule: T): T {
   const { categoryId, toAccountId, toAmount, ...rest } = rule;
   return (
-    rule.kind === 'transfer'
+    rule.kind === 'exchange'
       ? { ...rest, toAccountId, ...(toAmount !== undefined ? { toAmount } : {}) }
-      : { ...rest, categoryId }
+      : rule.kind === 'transfer'
+        ? { ...rest, toAccountId }
+        : { ...rest, categoryId }
   ) as T;
 }
 
@@ -963,13 +1526,23 @@ function withNextDate(state: State, rule: RecurringRule, ctx: OpContext): Recurr
 
 // Creates a rule. `linkTransactionId` ("خليها متكررة") links that existing transaction as the
 // occurrence on its date — when the date is an occurrence of the rule — so it isn't due again.
+// A rule's amount is in its currency; an exchange's toAmount in the target account's.
+function roundRule<T extends NewRecurringRule | Editable<RecurringRule>>(state: State, rule: T): T {
+  const to = rule.toAccountId ? state.accounts.find((a) => a.id === rule.toAccountId) : undefined;
+  return {
+    ...rule,
+    amount: money(rule.amount, rule.currency),
+    ...(rule.toAmount !== undefined ? { toAmount: to ? money(rule.toAmount, to.currency) : rule.toAmount } : {}),
+  };
+}
+
 export function addRecurringRule(
   state: State,
-  input: NewRecurringRule,
+  raw: NewRecurringRule,
   ctx: OpContext,
   linkTransactionId?: string
 ): Patch {
-  const normalized = normalizeRuleShape(input);
+  const normalized = normalizeRuleShape(roundRule(state, raw));
   validateRecurringRule(state, normalized);
   const now = ctx.now().toISOString();
   const rule: RecurringRule = stamp(
@@ -996,7 +1569,7 @@ export function addRecurringRule(
 
 export function updateRecurringRule(state: State, rule: Editable<RecurringRule>, ctx: OpContext): Patch {
   const existing = requireById(state.recurringRules, rule.id, 'recurringRule');
-  const normalized = normalizeRuleShape(rule);
+  const normalized = normalizeRuleShape(roundRule(state, rule));
   validateRecurringRule(state, normalized);
   const updated = stamp({ ...normalized, createdAt: existing.createdAt }, ctx) as RecurringRule;
   return { recurringRules: replaceById(state.recurringRules, withNextDate(state, updated, ctx), 'recurringRule') };
@@ -1044,38 +1617,55 @@ function occurrenceTransaction(
   rule: RecurringRule,
   occurrenceDate: string,
   overrides: OccurrenceOverrides,
-  ctx: OpContext
+  ctx: OpContext,
+  rateSnapshotId: string
 ): Transaction {
-  const rates = state.settings.exchangeRates;
   const account = requireById(state.accounts, overrides.accountId ?? rule.accountId, 'account');
-  const amount = overrides.amount ?? rule.amount;
+  const amount = money(overrides.amount ?? rule.amount, account.currency);
   const note = overrides.note?.trim() || rule.note || rule.name;
   const base = {
     id: ctx.newId(),
-    amount,
     date: overrides.date ?? occurrenceDate,
     note,
-    rateToEGP: rateToEGP(account.currency, rates),
-    ratesSnapshot: snapshotRates(rates),
+    rateSnapshotId,
     createdAt: ctx.now().toISOString(),
     recurringRuleId: rule.id,
     occurrenceDate,
   };
   if (rule.kind === 'transfer') {
     const to = requireById(state.accounts, rule.toAccountId ?? '', 'account');
-    const converted = convertCurrency(amount, account.currency, to.currency, rates);
-    const toAmount =
-      overrides.toAmount ??
-      (to.currency === account.currency ? amount : overrides.amount === undefined ? (rule.toAmount ?? converted) : converted);
     const tx: TransferTransaction = stamp(
-      { ...base, type: 'transfer' as const, fromAccountId: account.id, toAccountId: to.id, toAmount },
+      { ...base, type: 'transfer' as const, amount, fromAccountId: account.id, toAccountId: to.id, fees: [] },
       ctx
     );
     validateTransfer(state, tx);
     return tx;
   }
+  if (rule.kind === 'exchange') {
+    const to = requireById(state.accounts, rule.toAccountId ?? '', 'account');
+    // What arrives is the rule's received amount, never today's rate. A different amount needs its own
+    // received amount (the user confirms it).
+    const receivedAmount = money(
+      overrides.toAmount ?? (overrides.amount === undefined ? (rule.toAmount ?? NaN) : NaN),
+      to.currency
+    );
+    const tx: ExchangeTransaction = stamp(
+      {
+        ...base,
+        type: 'exchange' as const,
+        sentAmount: amount,
+        receivedAmount,
+        fromAccountId: account.id,
+        toAccountId: to.id,
+        fees: [],
+      },
+      ctx
+    );
+    validateExchange(state, tx);
+    return tx;
+  }
   const tx: IncomeExpenseTransaction = stamp(
-    { ...base, type: rule.kind, currency: account.currency, accountId: account.id, categoryId: rule.categoryId ?? '' },
+    { ...base, type: rule.kind, amount, currency: account.currency, accountId: account.id, categoryId: rule.categoryId ?? '' },
     ctx
   );
   validateIncomeExpense(state, tx);
@@ -1087,24 +1677,58 @@ function occurrenceTransaction(
 // changes nothing. A rule that can't be recorded (e.g. its account was deleted) is left
 // pending instead of blocking the others; everything else is applied in one patch.
 export function processDue(state: State, ctx: OpContext): Patch {
+  return processDueCore(state, ctx).patch;
+}
+
+// The auto occurrences processDue could NOT record because they would eat into reserved money (or an account that
+// does not allow it going below zero): they stay due, flagged "محتاج تغطية", and the user confirms them with a cover.
+export interface BlockedOccurrence {
+  ruleId: string;
+  date: string;
+  shortfalls: Shortfall[];
+}
+
+export function blockedDue(state: State, ctx: OpContext): BlockedOccurrence[] {
+  return processDueCore(state, ctx).blocked;
+}
+
+function processDueCore(state: State, ctx: OpContext): { patch: Patch; blocked: BlockedOccurrence[] } {
   const due = dueOccurrences(state, todayOf(ctx), 'auto');
-  if (due.length === 0) return {};
+  if (due.length === 0) return { patch: {}, blocked: [] };
+  const use = snapshotForNow(state, ctx.now());
+  // Each occurrence is checked against what the earlier ones already did (INV-5): there is no user to ask.
+  let draft: State = state;
   const created: Transaction[] = [];
   const touched = new Set<string>();
+  const blocked: BlockedOccurrence[] = [];
   for (const { rule, date } of due) {
     try {
-      created.push(occurrenceTransaction(state, rule, date, {}, ctx));
+      const tx = occurrenceTransaction(draft, rule, date, {}, ctx, use.id);
+      const follows = isMove(tx) && tx.type === 'transfer' ? followMovements(draft, tx, ctx, undefined, use.id) : [];
+      const next: State = { ...draft, transactions: [tx, ...draft.transactions], reservationMovements: [...draft.reservationMovements, ...follows] };
+      const shortfalls = shortfallsBetween(draft, next);
+      if (shortfalls.length > 0) {
+        blocked.push({ ruleId: rule.id, date, shortfalls });
+        continue;
+      }
+      draft = next;
+      created.push(tx);
       touched.add(rule.id);
     } catch (error) {
-      if (!(error instanceof FinanceValidationError)) throw error;
+      if (!(error instanceof FinanceValidationError) && !(error instanceof NeedsCoverError)) throw error;
     }
   }
-  if (created.length === 0) return {};
-  const transactions = [...created.reverse(), ...state.transactions];
+  if (created.length === 0) return { patch: {}, blocked };
+  const transactions = [...created].reverse().concat(state.transactions);
   const after = { ...state, transactions };
   return {
-    transactions,
-    recurringRules: state.recurringRules.map((r) => (touched.has(r.id) ? stamp(withNextDate(after, r, ctx), ctx) : r)),
+    blocked,
+    patch: {
+      ...ratePatch(use),
+      transactions,
+      ...(draft.reservationMovements !== state.reservationMovements ? { reservationMovements: draft.reservationMovements } : {}),
+      recurringRules: state.recurringRules.map((r) => (touched.has(r.id) ? stamp(withNextDate(after, r, ctx), ctx) : r)),
+    },
   };
 }
 
@@ -1124,12 +1748,15 @@ export function confirmOccurrence(
   ruleId: string,
   occurrenceDate: string,
   overrides: OccurrenceOverrides,
-  ctx: OpContext
+  ctx: OpContext,
+  options?: OpOptions
 ): Patch {
   const rule = requireDue(state, ruleId, occurrenceDate);
-  const tx = occurrenceTransaction(state, rule, occurrenceDate, overrides, ctx);
+  const use = snapshotForNow(state, ctx.now());
+  const tx = occurrenceTransaction(state, rule, occurrenceDate, overrides, ctx, use.id);
   const transactions = [tx, ...state.transactions];
-  return {
+  const base: Patch = {
+    ...ratePatch(use),
     transactions,
     recurringRules: replaceById(
       state.recurringRules,
@@ -1137,6 +1764,17 @@ export function confirmOccurrence(
       'recurringRule'
     ),
   };
+  const follows = isMove(tx) ? followOrAsk(state, base, state.reservationMovements, state, tx, ctx, options) : [];
+  return settle(
+    state,
+    {
+      ...base,
+      reservationMovements: [...state.reservationMovements, ...follows],
+    },
+    ctx,
+    options,
+    tx.id
+  );
 }
 
 // "تخطّي": marks one occurrence as skipped.
@@ -1150,11 +1788,10 @@ export function skipOccurrence(state: State, ruleId: string, occurrenceDate: str
 
 export type PlanInput = Omit<MonthlyPlan, 'id' | 'createdAt' | 'updatedAt'>;
 
-const CURRENCY_CODES: CurrencyCode[] = ['EGP', 'SAR', 'USD'];
 
 function validatePlan(state: State, plan: PlanInput) {
   if (!isMonthKey(plan.month)) fail('INVALID_MONTH');
-  if (!CURRENCY_CODES.includes(plan.currency)) fail('CURRENCY_MISMATCH', { entity: 'monthlyPlan' });
+  assertCurrency(plan.currency);
   assertNonNegative(plan.expectedIncome, 'expectedIncome');
   const seenCategories = new Set<string>();
   for (const line of plan.lines) {
@@ -1176,7 +1813,16 @@ function validatePlan(state: State, plan: PlanInput) {
 
 // Creates or replaces the plan for `input.month` (one plan per month; its id derives from
 // the month). Replacing keeps the original id and createdAt.
-export function savePlan(state: State, input: PlanInput, ctx: OpContext): Patch {
+// A plan's income, limits and contributions, in the plan's currency.
+const roundPlan = (plan: PlanInput): PlanInput => ({
+  ...plan,
+  expectedIncome: money(plan.expectedIncome, plan.currency),
+  lines: plan.lines.map((l) => ({ ...l, limit: money(l.limit, plan.currency) })),
+  fundContributions: plan.fundContributions.map((c) => ({ ...c, amount: money(c.amount, plan.currency) })),
+});
+
+export function savePlan(state: State, raw: PlanInput, ctx: OpContext): Patch {
+  const input = roundPlan(raw);
   validatePlan(state, input);
   const existing = state.monthlyPlans.find((p) => p.month === input.month);
   const plan: MonthlyPlan = stamp(
@@ -1251,8 +1897,7 @@ export function deletePlan(state: State, month: string, ctx: OpContext): Patch {
 // Fills in missing past months and upserts the current month's snapshot. {} when nothing
 // changed, so calling it after every change never loops.
 export function recordNetWorthSnapshots(state: State, ctx: OpContext): Patch {
-  const netWorthSnapshots = syncedSnapshots(state, ctx.now());
-  return netWorthSnapshots ? { netWorthSnapshots } : {};
+  return syncSnapshots(state, ctx.now()) ?? {};
 }
 
 // "مش دلوقتي": hides a Next Best Action for 24 hours. Urgent ones (due items, spent fund money)
@@ -1287,10 +1932,21 @@ export const reviewIdFor = (month: string) => `review-${month}`;
 
 // --- Settings ---------------------------------------------------------------
 
-export function updateRates(state: State, rates: ExchangeRates): Patch {
+// The two rates the Settings screen edits: how many EGP one SAR / one USD is worth.
+export interface EgpRatesInput {
+  SAR_EGP: number;
+  USD_EGP: number;
+}
+
+export function updateRates(state: State, rates: EgpRatesInput & { lastUpdated: string }): Patch {
   assertPositive(rates.SAR_EGP, 'exchangeRate');
   assertPositive(rates.USD_EGP, 'exchangeRate');
-  return { settings: { ...state.settings, exchangeRates: rates } };
+  return {
+    settings: {
+      ...state.settings,
+      rates: { ...withEgpRates(state.settings.rates, rates), updatedAt: rates.lastUpdated, source: 'manual' },
+    },
+  };
 }
 
 export interface SettingsUpdate {
@@ -1308,9 +1964,12 @@ export function updateSettings(state: State, update: SettingsUpdate, ctx: OpCont
   if (update.exchangeRates) {
     assertPositive(update.exchangeRates.SAR_EGP, 'exchangeRate');
     assertPositive(update.exchangeRates.USD_EGP, 'exchangeRate');
-    const { SAR_EGP, USD_EGP } = settings.exchangeRates;
-    if (update.exchangeRates.SAR_EGP !== SAR_EGP || update.exchangeRates.USD_EGP !== USD_EGP) {
-      settings.exchangeRates = { ...update.exchangeRates, lastUpdated: now };
+    const same = (a: number, b: number) => Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(b));
+    const unchanged =
+      same(update.exchangeRates.SAR_EGP, rateToEGP('SAR', settings.rates)) &&
+      same(update.exchangeRates.USD_EGP, rateToEGP('USD', settings.rates));
+    if (!unchanged) {
+      settings.rates = { ...withEgpRates(settings.rates, update.exchangeRates), updatedAt: now, source: 'manual' };
     }
   }
   const p24 = update.goldPrice24kEGP ?? settings.goldPrice24kEGP;
@@ -1323,6 +1982,25 @@ export function updateSettings(state: State, update: SettingsUpdate, ctx: OpCont
   if (update.trackingStartDate !== undefined) {
     assertDate(update.trackingStartDate, 'date');
     settings.trackingStartDate = update.trackingStartDate;
+  }
+  return { settings };
+}
+
+export interface CurrencyPreferences {
+  reportingCurrency?: CurrencyCode;
+  planCurrency?: CurrencyCode;
+}
+
+// The currency totals are shown in, and the one a new monthly plan starts in. Either must be one the app
+// offers (enabled); neither changes a stored amount.
+export function setCurrencyPreferences(state: State, prefs: CurrencyPreferences, _ctx: OpContext): Patch {
+  const settings = { ...state.settings };
+  for (const key of ['reportingCurrency', 'planCurrency'] as const) {
+    const code = prefs[key];
+    if (code === undefined) continue;
+    assertCurrency(code);
+    if (!settings.enabledCurrencies.includes(code)) fail('UNKNOWN_CURRENCY');
+    settings[key] = code;
   }
   return { settings };
 }
@@ -1348,7 +2026,7 @@ export function setPricePreferences(state: State, prefs: PricePreferences, ctx: 
   if (priceSourceOf(settings) === 'auto' && premiumChanged && settings.lastGoldUsdPerOunce) {
     Object.assign(
       settings,
-      goldPricesEGP(settings.lastGoldUsdPerOunce, settings.exchangeRates.USD_EGP, settings.localPremiumPct),
+      goldPricesEGP(settings.lastGoldUsdPerOunce, settings.rates.perUsd.EGP, settings.localPremiumPct),
       { goldPriceUpdatedAt: ctx.now().toISOString() }
     );
   }
@@ -1364,7 +2042,7 @@ export function ensurePriceSource(state: State, freshInstall: boolean): Patch {
 }
 
 // Applies a live price fetch. Manual mode is never overwritten ({}). Auto mode: fetched rates
-// replace exchangeRates, a fetched world gold price (with usable rates) replaces the gold
+// replace the rate table, a fetched world gold price (with usable rates) replaces the gold
 // prices, each with a fresh "updated" date; whatever failed keeps its last saved value and the
 // error is recorded. Only settings change, so recorded amounts keep their own rate snapshots.
 export function applyLivePrices(state: State, result: PriceFetchResult, ctx: OpContext): Patch {
@@ -1372,11 +2050,16 @@ export function applyLivePrices(state: State, result: PriceFetchResult, ctx: OpC
   const now = ctx.now().toISOString();
   const { lastPriceFetchError: _previousError, ...settings } = state.settings;
   if (result.fx) {
-    settings.exchangeRates = { SAR_EGP: result.fx.SAR_EGP, USD_EGP: result.fx.USD_EGP, lastUpdated: now };
+    settings.rates = {
+      base: 'USD',
+      perUsd: { ...settings.rates.perUsd, ...result.fx.perUsd },
+      updatedAt: now,
+      source: result.fxSource ?? settings.rates.source,
+    };
     settings.lastPriceFetchAt = now;
     if (result.fxSource) settings.fxSource = result.fxSource;
     if (result.xauUsd !== null) {
-      Object.assign(settings, goldPricesEGP(result.xauUsd, result.fx.USD_EGP, settings.localPremiumPct ?? 0), {
+      Object.assign(settings, goldPricesEGP(result.xauUsd, result.fx.perUsd.EGP, settings.localPremiumPct ?? 0), {
         goldPriceUpdatedAt: now,
         lastGoldUsdPerOunce: result.xauUsd,
       });
@@ -1403,12 +2086,13 @@ function pricePreferences(state: State): Partial<Settings> {
   return Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined));
 }
 
-const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones'>; entity: SyncEntity }[] = [
+const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones' | 'rateSnapshots'>; entity: SyncEntity }[] = [
   { key: 'accounts', entity: 'account' },
   { key: 'categories', entity: 'category' },
   { key: 'transactions', entity: 'transaction' },
   { key: 'funds', entity: 'fund' },
-  { key: 'fundMovements', entity: 'fundMovement' },
+  { key: 'reservationMovements', entity: 'reservationMovement' },
+  { key: 'unresolvedMovements', entity: 'unresolvedMovement' },
   { key: 'holdings', entity: 'holding' },
   { key: 'liabilities', entity: 'liability' },
   { key: 'recurringRules', entity: 'recurringRule' },
@@ -1434,7 +2118,8 @@ function replaceAllData(state: State, next: State, settings: Settings, ctx: OpCo
   };
   [...state.tombstones, ...next.tombstones].forEach(record);
 
-  const patch: Patch = { settings };
+  // Rate snapshots are immutable and content-addressed (no tombstones); the records now in the state point at the incoming ones.
+  const patch: Patch = { settings, rateSnapshots: next.rateSnapshots };
   for (const { key, entity } of COLLECTIONS) {
     const incoming = next[key] as object[];
     const incomingIds = new Set(incoming.map(syncKey));
@@ -1458,7 +2143,7 @@ export function replaceWithSeed(state: State, seed: State, ctx: OpContext): Patc
     seed,
     {
       ...seedSettings,
-      exchangeRates: state.settings.exchangeRates,
+      rates: state.settings.rates,
       goldPrice24kEGP: state.settings.goldPrice24kEGP,
       goldPrice21kEGP: state.settings.goldPrice21kEGP,
       goldPriceUpdatedAt: state.settings.goldPriceUpdatedAt,

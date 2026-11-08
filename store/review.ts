@@ -1,12 +1,25 @@
 import { monthOf, shiftMonth } from '@/utils/dates';
+import { addIn, sumIn } from '@/utils/money';
 import { isReviewed } from './nextActions';
 import { planFor, planProgress, previousPlanMonth, type LineProgress } from './planning';
-import { fundProgress, fundsByPriority, monthSummary, movementAmountIn, unassignedSummary } from './selectors';
+import {
+  countsAsSaving,
+  fundMovementRows,
+  fundProgress,
+  fundsByPriority,
+  incomeExpenseRows,
+  monthSummary,
+  movementAmountIn,
+  reportingCurrency,
+  transactionAmountIn,
+  unassignedSummary,
+} from './selectors';
 import { monthNetWorthChange, type NetWorthChange } from './snapshots';
 import type { CurrencyCode, ExpenseBucket, FinanceState, Fund, IncomeExpenseTransaction } from './types';
 
-// Numbers for the monthly review (app/review.tsx). Pure functions only. Cash flow is in EGP at
-// each transaction's snapshot rate (like monthSummary); plan figures are in the plan currency.
+// Numbers for the monthly review (app/review.tsx). Pure functions only. Cash flow is in the reporting
+// currency at each transaction's snapshot rate (like monthSummary); plan figures are in the plan currency;
+// the unassigned money (a funds figure) stays in EGP for now.
 
 type State = FinanceState;
 
@@ -17,13 +30,13 @@ const sum = (values: number[]) => values.reduce((total, v) => total + v, 0);
 
 export interface ReviewCategory {
   categoryId: string;
-  amountEGP: number;
+  amount: number;
 }
 
 export interface ReviewOneTime {
   id: string;
   categoryId: string;
-  amountEGP: number;
+  amount: number;
   date: string;
   note?: string;
 }
@@ -49,9 +62,11 @@ export interface ReviewFund {
 
 export interface MonthReview {
   month: string;
-  incomeEGP: number;
-  expenseEGP: number;
-  netEGP: number;
+  // The currency of the cash-flow amounts below.
+  currency: CurrencyCode;
+  income: number;
+  expense: number;
+  net: number;
   // net ÷ income; null without income.
   savingsRate: number | null;
   netWorthChange: NetWorthChange | null;
@@ -59,7 +74,7 @@ export interface MonthReview {
   // Regular spending (one-time expenses excluded), biggest first.
   topCategories: ReviewCategory[];
   oneTime: ReviewOneTime[];
-  oneTimeTotalEGP: number;
+  oneTimeTotal: number;
   fundCurrency: CurrencyCode;
   funds: ReviewFund[];
   // Active funds that have reached their target.
@@ -75,9 +90,10 @@ export interface MonthReview {
   reviewed: boolean;
 }
 
+// The month's expenses, fees of transfers and exchanges included (they are spending).
 function monthExpenses(state: State, month: string): IncomeExpenseTransaction[] {
-  return state.transactions.filter(
-    (tx): tx is IncomeExpenseTransaction =>
+  return incomeExpenseRows(state).filter(
+    (tx) =>
       tx.type === 'expense' && monthOf(tx.date) === month && tx.date >= state.settings.trackingStartDate
   );
 }
@@ -104,24 +120,29 @@ function reviewPlan(state: State, month: string): ReviewPlan | null {
   };
 }
 
-export function monthReview(state: State, month: string, now: Date = new Date()): MonthReview {
-  const summary = monthSummary(state, month);
+export function monthReview(
+  state: State,
+  month: string,
+  now: Date = new Date(),
+  currency: CurrencyCode = reportingCurrency(state)
+): MonthReview {
+  const summary = monthSummary(state, month, { to: currency });
 
   const regular = new Map<string, number>();
   const oneTime: ReviewOneTime[] = [];
   for (const tx of monthExpenses(state, month)) {
-    const amountEGP = tx.amount * tx.rateToEGP;
+    const amount = transactionAmountIn(state, tx, currency);
     if (tx.oneTime) {
-      oneTime.push({ id: tx.id, categoryId: tx.categoryId, amountEGP, date: tx.date, ...(tx.note ? { note: tx.note } : {}) });
+      oneTime.push({ id: tx.id, categoryId: tx.categoryId, amount, date: tx.date, ...(tx.note ? { note: tx.note } : {}) });
     } else {
-      regular.set(tx.categoryId, (regular.get(tx.categoryId) ?? 0) + amountEGP);
+      regular.set(tx.categoryId, addIn(regular.get(tx.categoryId) ?? 0, amount, currency));
     }
   }
   const topCategories = [...regular.entries()]
-    .map(([categoryId, amountEGP]) => ({ categoryId, amountEGP }))
-    .sort((a, b) => b.amountEGP - a.amountEGP)
+    .map(([categoryId, amount]) => ({ categoryId, amount }))
+    .sort((a, b) => b.amount - a.amount)
     .slice(0, TOP_CATEGORIES);
-  oneTime.sort((a, b) => b.amountEGP - a.amountEGP);
+  oneTime.sort((a, b) => b.amount - a.amount);
 
   // Funds: every fund with a planned contribution or a movement this month, in priority order.
   const plan = planFor(state, month);
@@ -129,13 +150,14 @@ export function monthReview(state: State, month: string, now: Date = new Date())
   const planned = new Map(plan?.fundContributions.map((c) => [c.fundId, c.amount]) ?? []);
   // Each movement at its own rates, so a past month reads the same whatever today's rates are.
   const allocatedIn = (fund: Fund) =>
-    sum(
-      state.fundMovements
-        .filter((m) => m.fundId === fund.id && monthOf(m.date) === month)
-        .map((m) => movementAmountIn(state, m, fundCurrency))
+    sumIn(
+      fundMovementRows(state)
+        .filter((m) => m.fundId === fund.id && monthOf(m.date) === month && countsAsSaving(m.kind))
+        .map((m) => movementAmountIn(state, m, fundCurrency)),
+      fundCurrency
     );
   const funds: ReviewFund[] = state.funds
-    .filter((f) => planned.has(f.id) || state.fundMovements.some((m) => m.fundId === f.id && monthOf(m.date) === month))
+    .filter((f) => planned.has(f.id) || fundMovementRows(state).some((m) => m.fundId === f.id && monthOf(m.date) === month && countsAsSaving(m.kind)))
     .sort((a, b) => a.priority - b.priority)
     .map((f) => ({ fundId: f.id, allocated: allocatedIn(f), planned: planned.get(f.id) ?? null }));
 
@@ -143,15 +165,16 @@ export function monthReview(state: State, month: string, now: Date = new Date())
   const unassigned = unassignedSummary(state);
   return {
     month,
-    incomeEGP: summary.incomeEGP,
-    expenseEGP: summary.expenseEGP,
-    netEGP: summary.netCashFlow,
+    currency,
+    income: summary.income,
+    expense: summary.expense,
+    net: summary.netCashFlow,
     savingsRate: summary.savingsRate,
-    netWorthChange: monthNetWorthChange(state, month, now),
+    netWorthChange: monthNetWorthChange(state, month, now, currency),
     plan: reviewPlan(state, month),
     topCategories,
     oneTime,
-    oneTimeTotalEGP: sum(oneTime.map((t) => t.amountEGP)),
+    oneTimeTotal: sumIn(oneTime.map((t) => t.amount), currency),
     fundCurrency,
     funds,
     completedFunds: fundsByPriority(state).filter((f) => fundProgress(state, f.id) >= 1),

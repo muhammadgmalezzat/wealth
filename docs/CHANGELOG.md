@@ -6,7 +6,74 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased (2026-11-07) — 1.2.0 · data v7 · JS only (`eas update`) · Fail-closed hydration
+## Unreleased (2026-11-08) — branch `currency-v8` · data v8 · Phases B–D: currency engine, ledger, account-backed funds
+
+> Not released. `main` stays on data v7 until this branch is merged. One v7 → v8 migration (eight sub-steps), run on the
+> first launch of a build that contains it; a copy of your data is kept first (`@wealth_finance_state_backup_v7`).
+
+**ملخص بالمصري (B + C + D)**
+
+*العملات والأسعار (B)*
+- تقدر تختار **عملة العرض** (جنيه / ريال / دولار) من الإعدادات: صافي الثروة والأصول وملخص الشهر والمراجعة بتظهر بيها، ومفيش مبلغ متخزّن بيتغيّر. و**عملة الخطة الشهرية** اللي أي خطة جديدة بتبدأ بيها.
+- كل معاملة وكل حركة بتفتكر سعر الصرف بتاع لحظتها، فتغيير السعر مبيغيّرش الماضي. وتكلفة الذهب بتتسجّل بالعملة اللي دفعت بيها.
+- المبالغ بتتقرّب لكسور العملة (قرشين) عند الحفظ والجمع، فالصفوف دايماً بتجمع الإجمالي بالظبط. أي رقم قديم اتحرّك بأقل من نص قرش للصف.
+
+*التحويلات والرسوم (C)*
+- **تحويل** عادي بين حسابين بنفس العملة، و**تحويل عملة** بين عملتين: بتكتب **المبلغ المستلم** اللي وصلك فعلاً (التطبيق مش بيحسبه)، وبيظهر **سعر الصرف الفعلي**، وسعر السوق كاقتراح بزرار، وتنبيه لو السعر بعيد أكتر من ٥٪.
+- **رسوم** اختيارية على التحويل: بتتخصم من الحساب اللي تختاره وبتتحسب **مصروف** في بند «رسوم» (في ملخص الشهر والتحليلات والخطة والمراجعة). تعديل التحويل أو مسحه بيرجّع الطرفين والرسوم مع بعض.
+- تحويل العملة المتكرر دايماً **بتأكيد**.
+
+*الصناديق (D)*
+- فلوس الصندوق بقت **محجوزة من حساب بعينه** وبعملته (١٠٠٠ ريال محجوزة بتفضل ١٠٠٠ ريال مهما اتغيّر السعر). التطبيق بيختار الحساب لوحده وبيكتبلك مين، وتقدر تغيّره قبل الحفظ. مينفعش تحجز أكتر من **المتاح**.
+- أي مصروف أو سحب أو تحويل أو شراء ذهب أو حذف دخل أو تعديل رصيد هيلمس فلوس محجوزة **بيفتح شاشة «محتاج تغطية»** بدل ما يعدّي أو يطلّع خطأ: بتختار الصناديق اللي هترجّع الفلوس، وتأكّد، فيتسجّل كله مع بعض. إلغاء ميغيّرش حاجة. والحساب مش هيبقى بالسالب من غير تأكيدك.
+- التحويل بياخد معاه الفلوس المحجوزة اللي زيادة عن المتاح (بنفس النسبة وتقدر تعدّلها)، وتحويل العملة بيحوّلها بنفس سعره بعد تأكيدك. المعاملات التلقائية اللي هتلمس فلوس محجوزة مبتتسجّلش لوحدها: بتفضل مستحقة وعليها «محتاج تغطية».
+- **نقل لصندوق** بين صندوقين، و**رجّع للصناديق** بعد ما تمسح مصروف كان مغطّى بفلوسهم، و**حدّد الحساب** لأي فلوس قديمة ماعرفش أحطها على حساب لوحدي.
+- *بياناتك الحقيقية:* مفيش عندك حركات صناديق ولا تحويلات ولا متكررة، فمفيش حاجة اتحرّكت غير فروق التقريب وإضافة بند «رسوم».
+
+**For users**
+- **عملة العرض** (الإعدادات): الإجماليات (صافي الثروة، الأصول، ملخص الشهر، المراجعة، المعاملات) بتظهر بالعملة اللي تختارها (جنيه / ريال / دولار). بتغيّر العرض بس: مفيش مبلغ متخزّن بيتغيّر، وبالجنيه كل الأرقام زي ما هي.
+- **عملة الخطة الشهرية** (الإعدادات): العملة اللي بتبدأ بيها أي خطة جديدة (كانت ريال ثابتة).
+- **التحليلات**: زرار العملة بيعرض كل العملات اللي عندك، وبيبدأ بعملة العرض (اختيارك هناك مش بيتحفظ).
+- **تكلفة الذهب والأصول** بتتسجّل بالعملة اللي دفعت بيها (شراء بـ 4,000 ريال يفضل 4,000 ريال)، وبتتعرض بالجنيه بسعر يوم الشراء؛ مفيش فرق في اللي كنت مسجّله بالجنيه.
+- المبالغ بتتقرّب لكسور العملة (قرشين) عند الحفظ والجمع، فالصفوف دايماً بتجمع الإجمالي بالظبط. أي رقم قديم اتحرّك بأقل من نص قرش لكل صف.
+
+**Phase D — account-backed funds (same branch, data v8 step 8)**
+
+*Technical*
+- `fundMovements` → `reservationMovements` (`{ fundId, accountId, amount (account currency), kind, groupId?, sourceTransactionId? }`) + `unresolvedMovements` (migration quarantine); tombstone entities `reservationMovement` / `unresolvedMovement`; `Account.allowNegative?`. `updateFundMovement` / `deleteFundMovement` removed.
+- Migration sub-step 8 `reservations` (idempotent, fail-closed: INV-5 + every fund total per currency equal to v7's). `LATEST_V8_STEP = 8`.
+- Read models: `reservation`, `accountReserved`, `accountAvailable`, `fundMovementRows`, `unresolvedByCurrency`; unassigned per currency = Σ available − Σ unresolved (counted once; INV-8: reserved + unresolved + unassigned = cash); v7's implicit FX removed.
+- `store/cover.ts` + `store/invariants.ts`: INV-5; `OpOptions` / `NeedsCoverError` / `settle` gate on every balance-reducing operation; `followPreview`, follow / reversal of transfers and exchanges (own recorded rate), `planReserve` / `planRelease` (shared by operations and sheets), `coversOf`; operations `reallocate`, `reReserveCovers`, `resolveUnresolved`; `processDue` guard + `blockedDue`; account currency lock / archive / delete with reservations.
+- `utils/runActionCore.ts` + `coverRequests.ts` + `NeedsCoverGate`: a `NeedsCoverError` is never an error message. UI: `CoverRequestSheet`, `ResolveSheet`, account choosers in `MoveMoneySheet` / `AssignSheet` / `PaySinkingSheet`, transfer notice and Q4 offer in `TransactionSheet`, "محتاج تغطية" on the Due screen, Next Best Actions `needsCover` / `resolve` (the old `cover` action and `CoverSheet` / `planCover` removed).
+- Tests 390 → 441, incl. the fuzz over every write path (strict accounts, overdraft never agreed, local seed). Browser check on a copy of the real backup: reserve with the chosen account, a covered expense, a transfer whose reservations follow, an exchange conversion, the resolver and the re-reserve offer.
+
+**Phase C — transfers, exchanges and fees (same branch, data v8 step 7)**
+
+*For users*
+- **تحويل** بين حسابين بنفس العملة بيفضل تحويل عادي. بين عملتين بقى **تحويل عملة**: بتكتب **المبلغ المستلم** اللي وصلك فعلاً (التطبيق مش بيحسبه لوحده)، وبيظهر **سعر الصرف الفعلي**، وسعر السوق كاقتراح بزرار، وتنبيه خفيف لو السعر بعيد أكتر من ٥٪.
+- **رسوم** اختيارية على التحويل أو تحويل العملة، من الحساب المرسل أو المستلم. الرسوم **مصروف** في بند جديد «رسوم»: في ملخص الشهر والتحليلات والمراجعة والخطة (تقدر تعمل لها بند)، وبتظهر في إدخال التحويل هتفضل كام في بند «رسوم».
+- تعديل تحويل العملة أو حذفه بيرجّع الطرفين والرسوم مع بعض، وفتح «رسوم» من التحليلات بيفتح التحويل نفسه.
+- تحويل العملة المتكرر **بتأكيد** دايماً، بمبلغ مستلم تكتبه.
+- بيانات v7 القديمة: كل التحويلات بين عملتين بقت تحويل عملة بنفس المبالغ المسجلة، وكل الأرصدة زي ما هي. (تحويل قديم بنفس العملة ومبلغين مختلفين اتحوّل لتحويل + رسوم أو «تسوية»؛ مفيش في بياناتك.)
+
+*Technical*
+- `Transaction` = `income | expense | transfer | exchange | asset_purchase`; `transfer` (same currency) has `amount` + `fees[]`, `exchange` has `sentAmount` / `receivedAmount` + `fees[]` (no stored rate, no `toAmount`); `Fee { accountId, amount, categoryId? }`; `RecurringKind` gains `exchange`. Errors `TRANSFER_CURRENCY_MISMATCH`, `EXCHANGE_SAME_CURRENCY`, `FEE_ACCOUNT_INVALID`; ops `addExchange` (+ `addTransfer` same-currency only), validation and per-leg rounding in `operations.ts`; `accountNetFlow` includes sent / received / fees.
+- Fees are read as virtual expense rows (`feeExpenses`, `incomeExpenseRows`) in `selectors`, `planning`, `review`, `analytics` (drill-down maps them to the parent record); `feeSpendImpact`; `feeCategoryId`; default category "رسوم" (`cat-essentials-fees`).
+- Migration sub-step 7 `ledger` (idempotent; see TECHNICAL §8). `LATEST_V8_STEP = 7`.
+- UI: `ExchangeFields`, `FeeFields`, `exchangeUi.ts` (implied rate, 5% warning), `TransactionSheet` / `RuleSheet` / `ConfirmOccurrenceSheet` / `TransactionRow`; the "تحويل" filter covers exchanges.
+- Tests 362 → 390. Browser check on a real backup copy (network blocked): same-currency transfer with a fee, SAR → EGP exchange with a fee, edit, delete — balances, Analytics fees and the رسوم plan line agreed each time; the Analytics drill-down opened the parent record. Dry run on the real backup: unchanged (no transfers), only the رسوم category added.
+
+**Technical (Phase B)**
+- Data v8. `CURRENT_VERSION = 8`; v7 → v8 is `applyV8Steps` (`store/migrateV8.ts`): six ordered, idempotent sub-steps (countries, rates, currencies, rounding, holdings, preferences) recorded in `settings.v8Step`; v0 → v7 frozen in `migrateToV7`. A payload stored at version 8 by an earlier build is completed on hydration (`normalize` hook of `createPersistOptions`), after a copy to `@wealth_finance_state_backup_v8_before_step_{N}`.
+- Currency engine: USD-based `RateTable`, `convert` A → USD → B, content-hashed immutable `RateSnapshot`s in `state.rateSnapshots`; transactions, fund movements and net worth snapshots carry `rateSnapshotId` (replacing `rateToEGP` / `ratesSnapshot`); holdings carry `purchaseCost: Money` + `purchaseRateSnapshotId`; `projectAmount` for past amounts (dangling id throws).
+- Currencies and countries are data (`constants/currencyRegistry.ts`, `constants/countries.ts`, `settings.enabledCurrencies`); `location` → ISO `country`; liabilities have a country.
+- Rounding at every write (`money()`) and aggregation boundary (`roundIn / sumIn / addIn`, integer minor units) — INV-7.
+- Selectors take a target currency (default `settings.reportingCurrency`) and drop the `EGP` suffix: `netWorth, liquidTotal, holdingsTotal, liabilitiesTotal, totalAssets, accountValue, holdingValue, holdingCost, holdingPnl, netWorthBreakdown / ByCountry / Figures / AsOf, goldTotals, transactionNet, monthSummary (income, expense), monthFlows (income, expense, savedToFunds, invested), groupTransactionsByDay (net)`; `monthReview`, `netWorthChange`, `moneyMap`, `runway`, `netWorthSeries` follow. Stored net worth snapshots stay in EGP and are projected through their own snapshot. Funds / unassigned stay EGP until Phase D. New op `setCurrencyPreferences`; `DEFAULT_PLAN_CURRENCY` removed.
+- Frozen v7 code kept as a test oracle (`store/legacy/*`, `tests/legacy/*`). Tests: 285 → 362. Dry run on a real backup through the frozen oracle and the live code: native balances, unassigned per currency and holdings cost identical; every other difference is rounding, within half a minor unit per contributing row.
+
+---
+
+## Earlier in Unreleased (2026-11-07) — 1.2.0 · data v7 · JS only (`eas update`) · Fail-closed hydration
 
 > No native module, no native config, no data-model or migration change; `app.json` `version` not bumped. Safe to
 > ship with the 1.2.0 build or later as an `eas update`.

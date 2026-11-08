@@ -10,7 +10,7 @@ import { NextActionsCard } from '@/components/dashboard/NextActionsCard';
 import { RecurringCard } from '@/components/dashboard/RecurringCard';
 import { SafeToSpendCard } from '@/components/dashboard/SafeToSpendCard';
 import { AssignSheet } from '@/components/funds/AssignSheet';
-import { CoverSheet } from '@/components/funds/CoverSheet';
+import { ResolveSheet } from '@/components/funds/ResolveSheet';
 import { FundCard } from '@/components/funds/FundCard';
 import { FundSheet } from '@/components/funds/FundSheet';
 import { UnassignedPanel } from '@/components/funds/UnassignedPanel';
@@ -26,6 +26,7 @@ import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { colors, opacity, space } from '@/constants/theme';
 import { nextActions, pendingReviewMonth, REVIEW_PROMPT_DAYS, type NextAction } from '@/store/nextActions';
+import { blockedDue } from '@/store/operations';
 import { planFor } from '@/store/planning';
 import { recentTransactions } from '@/store/selectors';
 import { useFinanceStore } from '@/store/useFinanceStore';
@@ -42,7 +43,7 @@ type TxSheetTarget = 'add' | { id: string } | null;
 export default function HomeScreen() {
   const state = useFinanceStore();
   const [txSheet, setTxSheet] = useState<TxSheetTarget>(null);
-  const [fundSheet, setFundSheet] = useState<'assign' | 'cover' | 'emergency' | null>(null);
+  const [fundSheet, setFundSheet] = useState<'assign' | 'resolve' | 'emergency' | null>(null);
 
   if (!state.hasHydrated) return <LoadingView />;
 
@@ -50,7 +51,8 @@ export default function HomeScreen() {
   // Early in the month the review gets its own card, so the action list doesn't repeat it.
   const reviewMonth = now.getDate() <= REVIEW_PROMPT_DAYS ? pendingReviewMonth(state, now) : null;
   const hasPlan = !!planFor(state, toMonthKey(now));
-  const actions = nextActions(state, now).filter(
+  const blocked = blockedDue(state, { newId: () => 'preview', now: () => now }).length;
+  const actions = nextActions(state, now, blocked).filter(
     (a) =>
       !(reviewMonth && a.id === `review-${reviewMonth}`) &&
       // Without a plan the safe-to-spend card already asks for one.
@@ -61,11 +63,11 @@ export default function HomeScreen() {
   const recentTx = recentTransactions(state, 5);
   const editingTx = txSheet && txSheet !== 'add' ? state.transactions.find((t) => t.id === txSheet.id) : undefined;
   // The top action already says what the unassigned panel would say.
-  const hideUnassigned = top?.id === 'cover' || top?.id === 'assign';
+  const hideUnassigned = top?.id === 'assign';
 
   const run = ({ cta }: NextAction) => {
     const { route, params = {} } = cta;
-    if (route === 'cover' || route === 'assign') setFundSheet(route);
+    if (route === 'resolve' || route === 'assign') setFundSheet(route);
     else if (route === 'new-emergency') setFundSheet('emergency');
     else if (route === '/fund/[id]') router.push({ pathname: '/fund/[id]', params: { id: params.id ?? '', ...params } });
     else if (route === '/review') router.push({ pathname: '/review', params });
@@ -148,7 +150,7 @@ export default function HomeScreen() {
       {txSheet === 'add' && <TransactionSheet onClose={() => setTxSheet(null)} />}
       {editingTx && <TransactionSheet key={editingTx.id} transaction={editingTx} onClose={() => setTxSheet(null)} />}
       {fundSheet === 'assign' && <AssignSheet onClose={() => setFundSheet(null)} />}
-      {fundSheet === 'cover' && <CoverSheet onClose={() => setFundSheet(null)} />}
+      {fundSheet === 'resolve' && <ResolveSheet onClose={() => setFundSheet(null)} />}
       {fundSheet === 'emergency' && <FundSheet initialType="emergency" onClose={() => setFundSheet(null)} />}
     </Screen>
   );

@@ -6,7 +6,18 @@ export const CATEGORY_IDS = {
   freelance: 'cat-income-freelance',
   otherIncome: 'cat-income-other',
   groceries: 'cat-essentials-groceries',
+  // Fees of transfers and exchanges are spending in this category.
+  fees: 'cat-essentials-fees',
+  // Income that settles a difference the v7 → v8 migration found in an old transfer (never a default category).
+  adjustment: 'cat-income-adjustment',
 } as const;
+
+// The category of a fee that names none: the default "رسوم", or an expense category the user made with that name.
+export function feeCategoryId(categories: Pick<Category, 'id' | 'name' | 'kind'>[]): string | undefined {
+  return (
+    categories.find((c) => c.id === CATEGORY_IDS.fees) ?? categories.find((c) => c.kind === 'expense' && c.name.trim() === 'رسوم')
+  )?.id;
+}
 
 // Bills that recur at a set amount whatever you do (rent, internet, utilities): suggested
 // as 'fixed' plan lines, which don't count as safe to spend.
@@ -50,6 +61,7 @@ export const DEFAULT_CATEGORIES: Category[] = [
   expense('cat-essentials-health', 'صحة', 'essentials'),
   expense('cat-essentials-household', 'مستلزمات البيت', 'essentials'),
   expense('cat-essentials-home-setup', 'تجهيز البيت', 'essentials'),
+  expense(CATEGORY_IDS.fees, 'رسوم', 'essentials'),
 
   expense('cat-lifestyle-dining', 'مطاعم وقهوة', 'lifestyle'),
   expense('cat-lifestyle-clothing', 'ملابس', 'lifestyle'),

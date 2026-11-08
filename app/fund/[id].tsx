@@ -21,9 +21,9 @@ import { ProgressBar } from '@/components/ui/ProgressBar';
 import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { StatusChip } from '@/components/ui/StatusChip';
-import { CURRENCIES } from '@/constants/currencies';
 import { colors, opacity, space } from '@/constants/theme';
 import {
+  currencyList,
   fundAllocated,
   fundCashByCurrency,
   fundCurrent,
@@ -32,7 +32,8 @@ import {
   fundProgress,
   fundRequiredMonthly,
   fundStatus,
-  holdingValueEGP,
+  fundMovementRows,
+  holdingValue,
   linkableHoldings,
   movementValueInFund,
 } from '@/store/selectors';
@@ -85,7 +86,7 @@ export default function FundDetailScreen() {
   const requiredMonthly = fundRequiredMonthly(state, fund.id, now);
   const step = fundNextStep(state, fund, now);
   const sinking = fund.type === 'sinking';
-  const movements = state.fundMovements
+  const movements = fundMovementRows(state)
     .map((m, index) => ({ m, index }))
     .filter(({ m }) => m.fundId === fund.id)
     // Newest first; movements recorded later on the same day come first.
@@ -95,7 +96,7 @@ export default function FundDetailScreen() {
   const canLinkGold = linkableHoldings(state, fund.id).some((h) => h.type === 'gold' && !fund.linkedHoldingIds.includes(h.id));
 
   const cash = fundCashByCurrency(state, fund.id);
-  const heldCurrencies = CURRENCIES.filter((c) => Math.abs(cash[c]) > 0.005);
+  const heldCurrencies = currencyList(state).filter((c) => Math.abs(cash[c]) > 0.005);
   const cashBreakdown = heldCurrencies.length > 1 ? heldCurrencies.map((c) => formatMoney(cash[c], c)).join(' + ') : null;
 
   const facts: { label: string; value: string }[] = [
@@ -231,7 +232,7 @@ export default function FundDetailScreen() {
                   iconTone="gold"
                   trailing={
                     <AppText variant="moneyRow" color="goldText" align="left" style={styles.tabular}>
-                      {formatMoney(holdingValueEGP(state, h), 'EGP')}
+                      {formatMoney(holdingValue(state, h, 'EGP'), 'EGP')}
                     </AppText>
                   }
                 />
@@ -263,8 +264,8 @@ export default function FundDetailScreen() {
                   trailing={
                     <Money
                       amount={m.amount}
-                      currency={m.currency ?? fund.currency}
-                      converted={m.currency && m.currency !== fund.currency ? { amount: movementValueInFund(state, m), currency: fund.currency } : undefined}
+                      currency={m.currency}
+                      converted={m.currency !== fund.currency ? { amount: movementValueInFund(state, m), currency: fund.currency } : undefined}
                       showSign
                       align="left"
                       tone={kind === 'allocation' ? 'positive' : kind === 'payment' ? 'muted' : 'default'}

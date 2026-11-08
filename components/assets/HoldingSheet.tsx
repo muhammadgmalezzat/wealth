@@ -7,13 +7,14 @@ import { formatMoney } from '@/components/ui/formatMoney';
 import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { space } from '@/constants/theme';
-import { holdingPnlEGP, holdingValueEGP } from '@/store/selectors';
+import { holdingPnl, holdingValue } from '@/store/selectors';
 import type { FinanceState, Holding } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { confirmAction } from '@/utils/dialogs';
 import { runAction } from '@/utils/runAction';
 
-import { holdingTitle, LOCATION_LABELS, signedDifference } from './assetsUi';
+import { countryName } from '@/constants/countries';
+import { holdingTitle, signedDifference } from './assetsUi';
 
 interface HoldingSheetProps {
   holding: Holding;
@@ -66,20 +67,21 @@ export function HoldingSheet({ holding, fundName, onClose }: HoldingSheetProps) 
 }
 
 function details(state: FinanceState, holding: Holding) {
-  const value = holdingValueEGP(state, holding);
+  const currency = state.settings.reportingCurrency;
+  const value = holdingValue(state, holding, currency);
   const rows: { label: string; value: string; muted?: boolean }[] = [
-    { label: 'القيمة الحالية', value: formatMoney(value, 'EGP') },
+    { label: 'القيمة الحالية', value: formatMoney(value, currency) },
     ...(holding.type === 'gold'
       ? [
           { label: 'الوزن', value: `${holding.weightGrams} جم` },
           { label: 'العيار', value: `عيار ${holding.karat}` },
         ]
       : [{ label: 'الكمية', value: formatMoney(holding.quantity, holding.currency) }]),
-    { label: 'المكان', value: LOCATION_LABELS[holding.location ?? 'EG'] },
+    { label: 'المكان', value: countryName(holding.country) },
   ];
-  if (holding.purchaseCostEGP > 0) {
-    rows.push({ label: 'تكلفة الشراء', value: formatMoney(holding.purchaseCostEGP, 'EGP') });
-    rows.push({ label: 'فرق القيمة', value: signedDifference(holdingPnlEGP(state, holding)), muted: true });
+  if (holding.purchaseCost.amount > 0) {
+    rows.push({ label: 'تكلفة الشراء', value: formatMoney(holding.purchaseCost.amount, holding.purchaseCost.currency) });
+    rows.push({ label: 'فرق القيمة', value: signedDifference(holdingPnl(state, holding, currency), currency), muted: true });
   }
   return rows;
 }

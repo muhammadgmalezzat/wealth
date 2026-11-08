@@ -1,9 +1,10 @@
-import { DEFAULT_RATES } from '@/constants/currencies';
-import { DEFAULT_TRACKING_START_DATE, GOLD_PRICE_21K, GOLD_PRICE_24K } from '@/constants/market';
-import { fromEGP, rateToEGP, toEGP } from '@/utils/currency';
+import { DEFAULT_RATES, DEFAULT_TRACKING_START_DATE, GOLD_PRICE_21K, GOLD_PRICE_24K } from './legacy/constants.v7';
+import { fromEGP, rateToEGP, toEGP } from './legacy/currency.v7';
 import { CATEGORY_IDS, DEFAULT_CATEGORIES } from './defaultCategories';
-import { holdingValueEGP, liquidTotalEGP } from './selectors';
-import { missingPastSnapshots } from './snapshots';
+import { holdingValueEGP, liquidTotalEGP } from './legacy/selectors.v7';
+import { missingPastSnapshots } from './legacy/snapshots.v7';
+import { applyV8Steps, migrateV7toV8 } from './migrateV8';
+import type { FinanceState as FinanceStateV8 } from './types';
 import type {
   Account,
   Category,
@@ -22,7 +23,7 @@ import type {
   Settings,
   Tombstone,
   Transaction,
-} from './types';
+} from './legacy/types.v7';
 
 // Pure, deterministic migrations (no RN imports) so they run in Node tests.
 //   v0: pre-Zustand bare JSON — same shape as v1.
@@ -37,7 +38,16 @@ import type {
 //   v7: + netWorthSnapshots (past months since trackingStartDate backfilled as estimates),
 //       actionDismissals, monthlyReviews
 
-export const CURRENT_VERSION = 7;
+//   v8: currencies and funds redesign (docs/architecture/CURRENCY_AND_FUNDS_DESIGN.md); the v7 → v8
+//       step lives in migrateV8.ts. Everything up to v7 is frozen (store/legacy).
+
+export const CURRENT_VERSION = 8;
+
+// What the full chain produces: the current (v8) state.
+export interface MigrationResult {
+  state: FinanceStateV8;
+  clampedBy: number;
+}
 
 interface LegacyTransactionV1 {
   id: string;
@@ -168,7 +178,8 @@ interface V2Result {
   clampedBy: number;
 }
 
-export interface MigrationResult {
+// What the frozen chain produces: a data-v7 state.
+export interface V7MigrationResult {
   state: FinanceState;
   // EGP of v1 goal savings that could not be backed by cash (opening allocations are capped
   // so unassigned money never starts negative). 0 when nothing was clamped.
@@ -438,12 +449,12 @@ export function migrateV6toV7(persisted: unknown, ctx: MigrationContext): Financ
   return { ...state, netWorthSnapshots };
 }
 
-// Entry point used by zustand persist and backup restore: upgrades any older payload step by step.
-export function migratePersistedState(
+// The frozen part of the chain: any payload up to version 7 (what the v7 app understood).
+export function migrateToV7(
   persisted: unknown,
   version: number,
   ctx: MigrationContext
-): MigrationResult {
+): V7MigrationResult {
   let state = persisted;
   let clampedBy = 0;
   if (version < 1) state = migrateV0toV1(state);
@@ -454,4 +465,17 @@ export function migratePersistedState(
   if (version < 6) state = migrateV5toV6(state, ctx);
   if (version < 7) state = migrateV6toV7(state, ctx);
   return { state: state as FinanceState, clampedBy };
+}
+
+// Entry point used by zustand persist and backup restore: upgrades any older payload step by step.
+export function migratePersistedState(
+  persisted: unknown,
+  version: number,
+  ctx: MigrationContext
+): MigrationResult {
+  // Data already at v8 may come from an earlier build with fewer v8 sub-steps: applyV8Steps completes it
+  // (and leaves a current one alone). Newer than v8 never gets here: the hydration guard refuses it.
+  if (version >= 8) return { state: applyV8Steps(persisted, ctx), clampedBy: 0 };
+  const { state, clampedBy } = migrateToV7(persisted, version, ctx);
+  return { state: migrateV7toV8(state, ctx), clampedBy };
 }

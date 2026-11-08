@@ -27,12 +27,16 @@ import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { Segment } from '@/components/ui/Segment';
 import { StatusChip } from '@/components/ui/StatusChip';
+import { currencyNameAr } from '@/constants/currencies';
 import { colors, opacity, space } from '@/constants/theme';
 import { openBackup, parseBackup, type BackupFile, type OpenedBackup } from '@/store/backup';
 import { daysSinceBackup, needsBackupReminder } from '@/store/nextActions';
 import type { PriceSource } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { appInfo } from '@/utils/appInfo';
+import { rateToEGP } from '@/utils/currency';
+import { roundTo } from '@/utils/money';
+import type { RateTable } from '@/utils/rates';
 import { appLockAvailability, authenticate, type LockAvailability } from '@/utils/appLock';
 import { pickBackupFile } from '@/utils/backupFiles';
 import { confirmAction, showMessage } from '@/utils/dialogs';
@@ -45,14 +49,17 @@ import { FX_ATTRIBUTION_URL, priceSourceOf } from '@/utils/prices/fetchPrices';
 
 import { runAction } from '@/utils/runAction';
 
+// A rate as the Settings fields show it: how many EGP one unit is worth, without float noise.
+const rateText = (rates: RateTable, currency: string) => String(roundTo(rateToEGP(currency, rates), 6));
+
 export default function SettingsScreen() {
   const state = useFinanceStore();
   const { settings } = state;
   // Home's backup action links here with ?export=1.
   const params = useLocalSearchParams<{ export?: string }>();
 
-  const [sarText, setSarText] = useState(String(settings.exchangeRates.SAR_EGP));
-  const [usdText, setUsdText] = useState(String(settings.exchangeRates.USD_EGP));
+  const [sarText, setSarText] = useState(rateText(settings.rates, 'SAR'));
+  const [usdText, setUsdText] = useState(rateText(settings.rates, 'USD'));
   const [gold24Text, setGold24Text] = useState(String(settings.goldPrice24kEGP));
   const [gold21Text, setGold21Text] = useState(String(settings.goldPrice21kEGP));
   const [premiumText, setPremiumText] = useState(String(settings.localPremiumPct ?? 0));
@@ -102,8 +109,8 @@ export default function SettingsScreen() {
     } else {
       // Manual starts from the prices currently in use.
       const current = useFinanceStore.getState().settings;
-      setSarText(String(current.exchangeRates.SAR_EGP));
-      setUsdText(String(current.exchangeRates.USD_EGP));
+      setSarText(rateText(current.rates, 'SAR'));
+      setUsdText(rateText(current.rates, 'USD'));
       setGold24Text(String(current.goldPrice24kEGP));
       setGold21Text(String(current.goldPrice21kEGP));
     }
@@ -193,8 +200,8 @@ export default function SettingsScreen() {
         {auto ? (
           <View style={styles.market}>
             <ListGroup>
-              <ListRow title="ريال سعودي ← جنيه" trailing={<Money amount={settings.exchangeRates.SAR_EGP} currency="EGP" />} />
-              <ListRow title="دولار ← جنيه" trailing={<Money amount={settings.exchangeRates.USD_EGP} currency="EGP" />} />
+              <ListRow title="ريال سعودي ← جنيه" trailing={<Money amount={rateToEGP('SAR', settings.rates)} currency="EGP" />} />
+              <ListRow title="دولار ← جنيه" trailing={<Money amount={rateToEGP('USD', settings.rates)} currency="EGP" />} />
               <ListRow
                 title="جرام ذهب عيار 24"
                 trailing={<Money amount={settings.goldPrice24kEGP} currency="EGP" />}
@@ -243,7 +250,7 @@ export default function SettingsScreen() {
             <FormField label="ريال سعودي ← جنيه">
               <FormInput value={sarText} onChangeText={setSarText} keyboardType="decimal-pad" />
             </FormField>
-            <FormField label="دولار ← جنيه" helper={`آخر تحديث: ${formatDateAr(settings.exchangeRates.lastUpdated)}`}>
+            <FormField label="دولار ← جنيه" helper={`آخر تحديث: ${formatDateAr(settings.rates.updatedAt)}`}>
               <FormInput value={usdText} onChangeText={setUsdText} keyboardType="decimal-pad" />
             </FormField>
             <FormField label="سعر جرام الذهب عيار 24 (جنيه)">
@@ -270,6 +277,20 @@ export default function SettingsScreen() {
       <View>
         <SectionHeader title="التخطيط" />
         <Card>
+          <FormField label="عملة العرض" helper="العملة اللي بتظهر بيها الإجماليات (صافي الثروة، الأصول، ملخص الشهر، المراجعة). بتغيّر العرض بس، مفيش أي مبلغ متخزّن بيتغيّر.">
+            <Segment
+              options={settings.enabledCurrencies.map((code) => ({ label: currencyNameAr(code), value: code }))}
+              value={settings.reportingCurrency}
+              onChange={(code) => runAction('تعذّر الحفظ', () => state.setCurrencyPreferences({ reportingCurrency: code }))}
+            />
+          </FormField>
+          <FormField label="عملة الخطة الشهرية" helper="العملة اللي بتبدأ بيها أي خطة جديدة. كل خطة بتحتفظ بعملتها.">
+            <Segment
+              options={settings.enabledCurrencies.map((code) => ({ label: currencyNameAr(code), value: code }))}
+              value={settings.planCurrency}
+              onChange={(code) => runAction('تعذّر الحفظ', () => state.setCurrencyPreferences({ planCurrency: code }))}
+            />
+          </FormField>
           <FormField label="بداية التتبع" helper="المعاملات قبل التاريخ ده مش بتدخل في ملخص الشهر.">
             <FutureDateField value={trackingStart} onChange={setTrackingStart} />
           </FormField>

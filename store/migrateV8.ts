@@ -1,0 +1,476 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- the steps read states of several intermediate shapes; each checks what it needs. */
+import { isKnownCurrency } from '@/constants/currencyRegistry';
+import { roundMoney } from '@/utils/money';
+import { makeSnapshot, snapshotId, tableFromEgpRates, type RateQuality, type RateSnapshot, type RateTable } from '@/utils/rates';
+
+import { CATEGORY_IDS } from './defaultCategories';
+import { assertInvariants } from './invariants';
+import { accountBalance } from './selectors';
+import type { MigrationContext } from './migrations';
+import type { FinanceState } from './types';
+
+// v7 → v8 (docs/architecture/CURRENCY_AND_FUNDS_DESIGN.md §F), as ORDERED, IDEMPOTENT sub-steps.
+//
+// Data v8 was built over several commits, and a device can hold a v8 payload from any of them. So the
+// migration is not "v7 → v8 once": `settings.v8Step` records how many sub-steps a state has had, every
+// sub-step also checks the shape it needs (it does nothing to data already in the new shape), and
+// `applyV8Steps` runs the remaining ones on ANY of: a v7 state, a v8 state from an older step, or a
+// current one. So migrating twice is migrating once, and a payload stored at version 8 by an earlier build
+// is completed on hydration (see createPersistOptions `normalize`).
+//
+// Nothing here may change a native amount beyond rounding it to its currency's decimals (step 4).
+
+type Draft = Record<string, any>;
+
+// v7 read a missing holding location as Egypt, and subtracted every liability from Egypt's net worth.
+// The migration makes both explicit so every v7 number stays the same. (`EG` / `SA` already are ISO
+// 3166-1 codes.)
+const V7_DEFAULT_COUNTRY = 'EG';
+
+// --- 1. locations become ISO country codes -------------------------------------------------------------
+
+function breakdownV8(b: Draft): Draft {
+  return { EG: { ...b.EG, liabilitiesEGP: b.liabilitiesEGP }, SA: { ...b.SA, liabilitiesEGP: 0 } };
+}
+
+function stepCountries(s: Draft): Draft {
+  return {
+    ...s,
+    accounts: s.accounts.map(({ location, ...a }: Draft) => ('country' in a ? a : { ...a, country: location })),
+    holdings: s.holdings.map(({ location, ...h }: Draft) => ('country' in h ? h : { ...h, country: location ?? V7_DEFAULT_COUNTRY })),
+    liabilities: s.liabilities.map((l: Draft) => ('country' in l ? l : { ...l, country: V7_DEFAULT_COUNTRY })),
+    // The v7 breakdown had Egypt and Saudi side by side and ONE liabilities total (Egypt's).
+    netWorthSnapshots: s.netWorthSnapshots.map((n: Draft) =>
+      n.breakdown && typeof n.breakdown.liabilitiesEGP === 'number' ? { ...n, breakdown: breakdownV8(n.breakdown) } : n
+    ),
+  };
+}
+
+// --- 2. rates become a USD table; records point at immutable snapshots ---------------------------------
+
+// Collects the snapshots the records need, deduplicated by content (same table → same id).
+class SnapshotBook {
+  private readonly byId: Map<string, RateSnapshot>;
+
+  constructor(existing: RateSnapshot[]) {
+    this.byId = new Map(existing.map((snap) => [snap.id, snap]));
+  }
+
+  // The id for `table`; `takenAt` is the earliest time any record using it was made.
+  add(table: RateTable, quality: RateQuality, takenAt: string): string {
+    const id = snapshotId(table, quality);
+    const existing = this.byId.get(id);
+    if (!existing) this.byId.set(id, makeSnapshot(table, { takenAt, source: 'migrated', quality }));
+    else if (takenAt < existing.takenAt) this.byId.set(id, { ...existing, takenAt });
+    return id;
+  }
+
+  list(): RateSnapshot[] {
+    return [...this.byId.values()].sort((a, b) => (a.takenAt < b.takenAt ? -1 : a.takenAt > b.takenAt ? 1 : a.id < b.id ? -1 : 1));
+  }
+}
+
+// v7 rates are "EGP per unit"; this is that map for a snapshot.
+const egpPer = (rates: Draft): Record<string, number> => ({
+  SAR: rates.SAR_EGP,
+  USD: rates.USD_EGP,
+});
+
+// A record's own table. v7 converted a past amount as: source leg at the record's own `rateToEGP`, target
+// leg at the rates of its snapshot (today's rates when it had none). Taking the snapshot's EGP rates,
+// replacing the record's currency by its own `rateToEGP`, and re-basing on USD reproduces every pairwise
+// rate exactly. A record with no snapshot is marked 'estimated': it is frozen at the rates of the migration
+// (v7 let it drift with today's rates).
+function recordTable(
+  snapshot: Draft | undefined,
+  current: Draft,
+  own?: { currency: string; rateToEGP: number }
+): { table: RateTable; quality: RateQuality } {
+  const table = tableFromEgpRates(
+    egpPer(snapshot ?? current),
+    own && own.currency !== 'EGP' ? { currency: own.currency, egpPerUnit: own.rateToEGP } : undefined
+  );
+  return { table, quality: snapshot ? 'recorded' : 'estimated' };
+}
+
+function stepRates(s: Draft): Draft {
+  const { exchangeRates, ...settingsRest } = s.settings;
+  // Already a table: nothing to convert (every record then has its rateSnapshotId).
+  if (!exchangeRates) return s;
+
+  const book = new SnapshotBook(s.rateSnapshots ?? []);
+  const currencyOf = new Map<string, string>(s.accounts.map((a: Draft) => [a.id, a.currency]));
+
+  const transactions = s.transactions.map((tx: Draft) => {
+    if ('rateSnapshotId' in tx) return tx;
+    const { rateToEGP, ratesSnapshot, ...rest } = tx;
+    // The currency rateToEGP is about: the transaction's own, or the source account's for transfers.
+    const currency = tx.type === 'transfer' || tx.type === 'exchange' ? (currencyOf.get(tx.fromAccountId) ?? 'EGP') : tx.currency;
+    const { table, quality } = recordTable(ratesSnapshot, exchangeRates, { currency, rateToEGP });
+    return { ...rest, rateSnapshotId: book.add(table, quality, tx.createdAt) };
+  });
+  const fundMovements = s.fundMovements.map((m: Draft) => {
+    if ('rateSnapshotId' in m) return m;
+    const { ratesSnapshot, ...rest } = m;
+    const { table, quality } = recordTable(ratesSnapshot, exchangeRates);
+    return { ...rest, rateSnapshotId: book.add(table, quality, m.updatedAt) };
+  });
+  const netWorthSnapshots = s.netWorthSnapshots.map((n: Draft) => {
+    if ('rateSnapshotId' in n) return n;
+    const { ratesSnapshot, ...rest } = n;
+    const { table, quality } = recordTable(ratesSnapshot, exchangeRates);
+    return { ...rest, rateSnapshotId: book.add(table, quality, n.takenAt) };
+  });
+
+  return {
+    ...s,
+    rateSnapshots: book.list(),
+    transactions,
+    fundMovements,
+    netWorthSnapshots,
+    settings: {
+      ...settingsRest,
+      rates: {
+        ...tableFromEgpRates(egpPer(exchangeRates)),
+        updatedAt: exchangeRates.lastUpdated,
+        source: settingsRest.priceSource === 'auto' && settingsRest.fxSource ? settingsRest.fxSource : 'manual',
+      },
+    },
+  };
+}
+
+// --- 3. the currencies the app offers ------------------------------------------------------------------
+
+function stepCurrencies(s: Draft): Draft {
+  if (Array.isArray(s.settings.enabledCurrencies)) return s;
+  // v7 offered exactly these three; the user changes the list in Settings (later).
+  return { ...s, settings: { ...s.settings, enabledCurrencies: ['EGP', 'SAR', 'USD'] } };
+}
+
+// --- 4. stored amounts rounded to their currency's decimals (INV-7) ------------------------------------
+
+// A currency the registry doesn't know is left alone.
+const money = (amount: number, currency: string): number =>
+  typeof amount === 'number' && isKnownCurrency(currency) ? roundMoney(amount, currency) : amount;
+
+function stepRounding(s: Draft): Draft {
+  const currencyOf = new Map<string, string>(s.accounts.map((a: Draft) => [a.id, a.currency]));
+  const fundCurrency = new Map<string, string>(s.funds.map((f: Draft) => [f.id, f.currency]));
+  const egp = (x: number) => money(x, 'EGP');
+  return {
+    ...s,
+    accounts: s.accounts.map((a: Draft) => ({ ...a, openingBalance: money(a.openingBalance, a.currency) })),
+    // v7 shape (a transfer with toAmount) or the ledger shape of step 7 (transfer / exchange with fees).
+    transactions: s.transactions.map((tx: Draft) => {
+      const fees = (tx.fees ?? []).map((f: Draft) => ({ ...f, amount: money(f.amount, currencyOf.get(f.accountId) ?? '') }));
+      if (tx.type === 'exchange') {
+        return {
+          ...tx,
+          sentAmount: money(tx.sentAmount, currencyOf.get(tx.fromAccountId) ?? ''),
+          receivedAmount: money(tx.receivedAmount, currencyOf.get(tx.toAccountId) ?? ''),
+          fees,
+        };
+      }
+      if (tx.type === 'transfer') {
+        return {
+          ...tx,
+          amount: money(tx.amount, currencyOf.get(tx.fromAccountId) ?? ''),
+          ...('toAmount' in tx ? { toAmount: money(tx.toAmount, currencyOf.get(tx.toAccountId) ?? '') } : { fees }),
+        };
+      }
+      return { ...tx, amount: money(tx.amount, tx.currency) };
+    }),
+    // v7 movements (step 8 turns them into reservations) or the reservations of step 8 and later.
+    ...(s.fundMovements
+      ? { fundMovements: s.fundMovements.map((m: Draft) => ({ ...m, amount: money(m.amount, m.currency ?? fundCurrency.get(m.fundId) ?? '') })) }
+      : {}),
+    ...(s.reservationMovements
+      ? { reservationMovements: s.reservationMovements.map((m: Draft) => ({ ...m, amount: money(m.amount, currencyOf.get(m.accountId) ?? '') })) }
+      : {}),
+    ...(s.unresolvedMovements
+      ? { unresolvedMovements: s.unresolvedMovements.map((m: Draft) => ({ ...m, amount: money(m.amount, m.currency) })) }
+      : {}),
+    funds: s.funds.map((f: Draft) => ({
+      ...f,
+      targetAmount: money(f.targetAmount, f.currency),
+      ...(f.monthlyContribution !== undefined ? { monthlyContribution: money(f.monthlyContribution, f.currency) } : {}),
+    })),
+    holdings: s.holdings.map((h: Draft) => ({
+      ...h,
+      // Step 5 replaces purchaseCostEGP; a state that already had it has the native cost instead.
+      ...('purchaseCostEGP' in h ? { purchaseCostEGP: egp(h.purchaseCostEGP) } : {}),
+      ...(h.purchaseCost ? { purchaseCost: { ...h.purchaseCost, amount: money(h.purchaseCost.amount, h.purchaseCost.currency) } } : {}),
+      ...(h.type === 'currency' ? { quantity: money(h.quantity, h.currency) } : {}),
+    })),
+    liabilities: s.liabilities.map((l: Draft) => ({
+      ...l,
+      principal: money(l.principal, l.currency),
+      ...(l.monthlyPayment !== undefined ? { monthlyPayment: money(l.monthlyPayment, l.currency) } : {}),
+    })),
+    recurringRules: s.recurringRules.map((r: Draft) => ({
+      ...r,
+      amount: money(r.amount, r.currency),
+      ...(r.toAmount !== undefined ? { toAmount: money(r.toAmount, currencyOf.get(r.toAccountId) ?? '') } : {}),
+    })),
+    monthlyPlans: s.monthlyPlans.map((p: Draft) => ({
+      ...p,
+      expectedIncome: money(p.expectedIncome, p.currency),
+      lines: p.lines.map((l: Draft) => ({ ...l, limit: money(l.limit, p.currency) })),
+      fundContributions: p.fundContributions.map((c: Draft) => ({ ...c, amount: money(c.amount, p.currency) })),
+    })),
+    netWorthSnapshots: s.netWorthSnapshots.map((n: Draft) => ({
+      ...n,
+      netWorthEGP: egp(n.netWorthEGP),
+      liquidEGP: egp(n.liquidEGP),
+      holdingsEGP: egp(n.holdingsEGP),
+      ...(n.breakdown
+        ? {
+            breakdown: Object.fromEntries(
+              Object.entries(n.breakdown as Record<string, Draft>).map(([country, part]) => [
+                country,
+                Object.fromEntries(Object.entries(part).map(([key, value]) => [key, egp(value as number)])),
+              ])
+            ),
+          }
+        : {}),
+    })),
+  };
+}
+
+// --- 5. a holding's cost is native, with the rates of its purchase ------------------------------------------
+
+// v7 stored the cost in EGP, so that IS its native currency: the amount is unchanged and nothing it feeds
+// moves. The rates are today's stored table, marked 'estimated' (v7 never kept the purchase's own rates).
+function stepHoldings(s: Draft): Draft {
+  if (!s.holdings.some((h: Draft) => 'purchaseCostEGP' in h)) return s;
+  const book = new SnapshotBook(s.rateSnapshots ?? []);
+  const table: RateTable = { base: 'USD', perUsd: s.settings.rates.perUsd };
+  const holdings = s.holdings.map(({ purchaseCostEGP, ...h }: Draft) =>
+    purchaseCostEGP === undefined
+      ? h
+      : {
+          ...h,
+          purchaseCost: { amount: purchaseCostEGP, currency: 'EGP' },
+          purchaseRateSnapshotId: book.add(table, 'estimated', h.updatedAt ?? s.settings.rates.updatedAt),
+        }
+  );
+  return { ...s, holdings, rateSnapshots: book.list() };
+}
+
+// --- 6. display preferences ----------------------------------------------------------------------------
+
+// v7 showed everything in EGP and started every plan in SAR; those become the defaults, so nothing moves.
+function stepPreferences(s: Draft): Draft {
+  const { reportingCurrency, planCurrency } = s.settings;
+  if (reportingCurrency !== undefined && planCurrency !== undefined) return s;
+  return {
+    ...s,
+    settings: { ...s.settings, reportingCurrency: reportingCurrency ?? 'EGP', planCurrency: planCurrency ?? 'SAR' },
+  };
+}
+
+// --- 7. the ledger: transfers and exchanges, fees ------------------------------------------------------
+
+// v7 had one `transfer` with `amount` out and `toAmount` in, whatever the currencies. Now a transfer moves
+// the same currency (arrives = amount) and an `exchange` has sent and received amounts. Nothing is invented:
+// an exchange's received amount IS the stored toAmount, so every account balance stays what it was.
+// A v7 transfer between two accounts of the SAME currency whose two amounts differ (never offered by the v7 UI)
+// is not an exchange. It becomes a plain transfer plus what explains the difference, so balances stay identical:
+//  - sent > received: a transfer of the received amount and a fee of the difference on the source account
+//    (spending, category رسوم);
+//  - received > sent: a transfer of the sent amount and an income "تسوية" of the difference on the target.
+const ADJUSTMENT_NAME = 'تسوية';
+const DEFAULTS_UPDATED_AT = '2026-01-01T00:00:00.000Z';
+
+function stepLedger(s: Draft): Draft {
+  const currencyOf = new Map<string, string>(s.accounts.map((a: Draft) => [a.id, a.currency]));
+  const adjustmentCategory = s.categories.find(
+    (c: Draft) => c.id === CATEGORY_IDS.adjustment || (c.kind === 'income' && String(c.name).trim() === ADJUSTMENT_NAME)
+  );
+  const adjustmentId: string = adjustmentCategory?.id ?? CATEGORY_IDS.adjustment;
+  let needsAdjustmentCategory = false;
+  const transactions = s.transactions.flatMap((tx: Draft): Draft[] => {
+    if (tx.type !== 'transfer' || !('toAmount' in tx)) return [tx];
+    const { toAmount, amount, ...rest } = tx;
+    const from = currencyOf.get(tx.fromAccountId);
+    if (from !== currencyOf.get(tx.toAccountId)) {
+      return [{ ...rest, type: 'exchange', sentAmount: amount, receivedAmount: toAmount, fees: [] }];
+    }
+    if (toAmount === amount) return [{ ...rest, amount, fees: [] }];
+    if (amount > toAmount) {
+      return [{ ...rest, amount: toAmount, fees: [{ accountId: tx.fromAccountId, amount: money(amount - toAmount, from ?? '') }] }];
+    }
+    needsAdjustmentCategory = !adjustmentCategory;
+    return [
+      { ...rest, amount, fees: [] },
+      {
+        id: `${tx.id}-adjustment`,
+        type: 'income',
+        amount: money(toAmount - amount, from ?? ''),
+        currency: from,
+        accountId: tx.toAccountId,
+        categoryId: adjustmentId,
+        date: tx.date,
+        note: 'تسوية تحويل قديم',
+        rateSnapshotId: tx.rateSnapshotId,
+        createdAt: tx.createdAt,
+        updatedAt: tx.updatedAt,
+      },
+    ];
+  });
+  // A recurring transfer between two currencies is an exchange rule: its toAmount is what arrives, and it is
+  // confirmed every time (an unknown executed rate is never recorded by itself).
+  const recurringRules = s.recurringRules.map((r: Draft) => {
+    if (r.kind !== 'transfer') return r;
+    if (currencyOf.get(r.accountId) !== currencyOf.get(r.toAccountId) && r.toAmount !== undefined) {
+      return { ...r, kind: 'exchange', mode: 'confirm' };
+    }
+    const { toAmount: _arrives, ...same } = r;
+    return same;
+  });
+  // The category fees are spending in. A category of the same name the user made already serves.
+  const hasFees = s.categories.some(
+    (c: Draft) => c.id === CATEGORY_IDS.fees || (c.kind === 'expense' && String(c.name).trim() === 'رسوم')
+  );
+  const categories = [
+    ...s.categories,
+    ...(hasFees
+      ? []
+      : [{ updatedAt: DEFAULTS_UPDATED_AT, id: CATEGORY_IDS.fees, name: 'رسوم', kind: 'expense', bucket: 'essentials', isDefault: true }]),
+    ...(needsAdjustmentCategory
+      ? [{ updatedAt: DEFAULTS_UPDATED_AT, id: CATEGORY_IDS.adjustment, name: ADJUSTMENT_NAME, kind: 'income', bucket: 'income', isDefault: false }]
+      : []),
+  ];
+  return { ...s, transactions, recurringRules, categories };
+}
+
+// --- 8. fund movements become reservations on accounts ------------------------------------------------
+
+// v7 funds held cash BY CURRENCY, not on an account. Each fund's movements are grouped by currency (a movement
+// without one is in its fund's currency) and netted. A group is assigned to an account ONLY when that is
+// unambiguous: exactly one active account of that currency can hold the net amount (balance − what earlier
+// groups already reserved there, funds in priority order). Otherwise every movement of the group goes to
+// `unresolvedMovements` (reason: ambiguous, insufficient, negative, no_account): it still counts toward the
+// fund's total, never against an account's available money, and the user resolves it. Nothing is guessed and no
+// FX is invented. Every assigned movement keeps its id, date, note and rates, as kind 'adjust'.
+function stepReservations(s: Draft): Draft {
+  if (!s.fundMovements) {
+    return { ...s, reservationMovements: s.reservationMovements ?? [], unresolvedMovements: s.unresolvedMovements ?? [] };
+  }
+  const { fundMovements, ...rest } = s;
+  const funds: Draft[] = [...s.funds].sort((a, b) => a.priority - b.priority || (a.id < b.id ? -1 : 1));
+  const reserved = new Map<string, number>();
+  const reservations: Draft[] = [...(s.reservationMovements ?? [])];
+  const unresolved: Draft[] = [...(s.unresolvedMovements ?? [])];
+  const accounts: Draft[] = [...s.accounts].sort((a, b) => (a.id < b.id ? -1 : 1));
+
+  for (const fund of funds) {
+    const groups = new Map<string, Draft[]>();
+    for (const m of fundMovements.filter((x: Draft) => x.fundId === fund.id)) {
+      const currency: string = m.currency ?? fund.currency;
+      groups.set(currency, [...(groups.get(currency) ?? []), m]);
+    }
+    for (const [currency, list] of groups) {
+      const net = money(list.reduce((sum, m) => sum + m.amount, 0), currency);
+      const active = accounts.filter((a) => a.currency === currency && !a.archived);
+      const quarantine = (reason: string) => {
+        for (const m of list) {
+          unresolved.push({
+            id: m.id,
+            fundId: m.fundId,
+            amount: m.amount,
+            currency,
+            date: m.date,
+            ...(m.note ? { note: m.note } : {}),
+            rateSnapshotId: m.rateSnapshotId,
+            reason,
+            updatedAt: m.updatedAt,
+          });
+        }
+      };
+      const assign = (accountId: string) => {
+        for (const m of list) {
+          reservations.push({
+            id: m.id,
+            fundId: m.fundId,
+            accountId,
+            amount: m.amount,
+            kind: 'adjust',
+            date: m.date,
+            ...(m.note ? { note: m.note } : {}),
+            rateSnapshotId: m.rateSnapshotId,
+            updatedAt: m.updatedAt,
+          });
+        }
+        reserved.set(accountId, money((reserved.get(accountId) ?? 0) + net, currency));
+      };
+      if (Math.abs(net) < 0.005) {
+        // Nets to nothing: it holds no money, so any account of that currency carries the history.
+        if (active[0]) assign(active[0].id);
+        continue;
+      }
+      if (net < 0) quarantine('negative');
+      else if (active.length === 0) quarantine('no_account');
+      else {
+        const fits = active.filter((a) => Math.max(0, accountBalance(s as never, a.id)) - (reserved.get(a.id) ?? 0) >= net - 0.005);
+        if (fits.length === 1) assign(fits[0].id);
+        else quarantine(fits.length === 0 ? 'insufficient' : 'ambiguous');
+      }
+    }
+  }
+  const next: Draft = {
+    ...rest,
+    reservationMovements: reservations,
+    unresolvedMovements: unresolved,
+    tombstones: s.tombstones.map((x: Draft) => (x.entity === 'fundMovement' ? { ...x, entity: 'reservationMovement' } : x)),
+  };
+  // Fail closed (design F9): what was assigned must fit, and no fund may hold more or less than it did.
+  assertInvariants(next as never);
+  const total = (movements: Draft[], currencyOf: (m: Draft) => string) =>
+    movements.reduce((map: Map<string, number>, m) => {
+      const key = `${m.fundId}|${currencyOf(m)}`;
+      return map.set(key, money((map.get(key) ?? 0) + m.amount, currencyOf(m)));
+    }, new Map<string, number>());
+  const fundCurrency = new Map<string, string>(funds.map((f) => [f.id, f.currency]));
+  const accountCurrency = new Map<string, string>(accounts.map((a) => [a.id, a.currency]));
+  const before = total(fundMovements, (m) => m.currency ?? fundCurrency.get(m.fundId) ?? '');
+  const after = total([...reservations, ...unresolved], (m) => (m.accountId ? (accountCurrency.get(m.accountId) ?? '') : m.currency));
+  for (const [key, amount] of before) {
+    if (Math.abs((after.get(key) ?? 0) - amount) > 0.005) throw new Error(`Fund total changed by the migration: ${key} ${amount} → ${after.get(key) ?? 0}`);
+  }
+  return next;
+}
+
+// --- the runner -----------------------------------------------------------------------------------------
+
+// In order; a step's position + 1 is its number in `settings.v8Step`. Only ever append.
+export const V8_STEPS: { name: string; run: (state: Draft) => Draft }[] = [
+  { name: 'countries', run: stepCountries },
+  { name: 'rates', run: stepRates },
+  { name: 'currencies', run: stepCurrencies },
+  { name: 'rounding', run: stepRounding },
+  { name: 'holdings', run: stepHoldings },
+  { name: 'preferences', run: stepPreferences },
+  { name: 'ledger', run: stepLedger },
+  { name: 'reservations', run: stepReservations },
+];
+
+export const LATEST_V8_STEP = V8_STEPS.length;
+
+// Runs the steps a state hasn't had yet (the first `upTo` of them at most; tests use that to build the
+// intermediate shapes older builds stored). Accepts a v7 state or a v8 state from any earlier step; a
+// state already at `upTo` comes back unchanged. Throws if a step cannot run (the store then refuses the
+// data and leaves it untouched: store/hydration.ts).
+export function applyV8Steps(input: unknown, _ctx: MigrationContext, upTo: number = LATEST_V8_STEP): FinanceState {
+  const start: Draft = input as Draft;
+  const done = typeof start.settings?.v8Step === 'number' ? start.settings.v8Step : 0;
+  if (done >= upTo) return start as FinanceState;
+  let state = start;
+  for (let i = done; i < upTo; i++) state = V8_STEPS[i].run(state);
+  return { ...state, settings: { ...state.settings, v8Step: upTo } } as FinanceState;
+}
+
+// v7 → v8 in one go.
+export function migrateV7toV8(v7: unknown, ctx: MigrationContext): FinanceState {
+  return applyV8Steps(v7, ctx);
+}

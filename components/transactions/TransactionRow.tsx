@@ -9,6 +9,7 @@ import { formatDateAr } from '@/components/ui/formatDateAr';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { space } from '@/constants/theme';
 import type { CurrencyCode, FinanceState, Transaction } from '@/store/types';
+import { projectAmount } from '@/utils/currency';
 
 import { transferTitle } from './transactionUi';
 
@@ -16,7 +17,7 @@ type IconName = ComponentProps<typeof MaterialIcons>['name'];
 
 interface TransactionRowProps {
   tx: Transaction;
-  state: Pick<FinanceState, 'accounts' | 'categories' | 'holdings'>;
+  state: Pick<FinanceState, 'accounts' | 'categories' | 'holdings' | 'rateSnapshots'>;
   onPress: () => void;
   showDate?: boolean;
   /** @deprecated separators come from ListGroup; still accepted. */
@@ -26,7 +27,11 @@ interface TransactionRowProps {
 interface Description {
   title: string;
   account: string;
+  // What the row shows, in `currency` (a transfer's amount; an exchange's sent amount).
+  amount: number;
   currency: CurrencyCode;
+  // What it is also worth: an exchange shows what arrived; anything else its EGP value at its own rates.
+  converted?: { amount: number; currency: CurrencyCode };
   icon: IconName;
   iconTone: IconTone;
   archivedCategory: boolean;
@@ -34,23 +39,35 @@ interface Description {
 
 function describe(state: TransactionRowProps['state'], tx: Transaction): Description {
   const accountName = (id: string) => state.accounts.find((a) => a.id === id)?.name ?? '—';
-  if (tx.type === 'transfer') {
+  if (tx.type === 'transfer' || tx.type === 'exchange') {
     const from = state.accounts.find((a) => a.id === tx.fromAccountId);
-    return {
+    const to = state.accounts.find((a) => a.id === tx.toAccountId);
+    const currency = from?.currency ?? 'EGP';
+    const base = {
       title: transferTitle(from?.name ?? '—', accountName(tx.toAccountId)),
-      account: 'تحويل بين حساباتك',
       // Shown in the source account's currency.
-      currency: from?.currency ?? 'EGP',
-      icon: 'swap-horiz',
-      iconTone: 'neutral',
+      currency,
+      icon: 'swap-horiz' as const,
+      iconTone: 'neutral' as const,
       archivedCategory: false,
     };
+    if (tx.type === 'exchange') {
+      return {
+        ...base,
+        account: 'تحويل عملة',
+        amount: tx.sentAmount,
+        // What actually arrived: the implied rate is received ÷ sent.
+        ...(to ? { converted: { amount: tx.receivedAmount, currency: to.currency } } : {}),
+      };
+    }
+    return { ...base, account: 'تحويل بين حساباتك', amount: tx.amount };
   }
   if (tx.type === 'asset_purchase') {
     const holding = state.holdings.find((h) => h.id === tx.holdingId);
     return {
       title: holding?.name ?? 'شراء ذهب',
       account: accountName(tx.accountId),
+      amount: tx.amount,
       currency: tx.currency,
       icon: 'diamond',
       iconTone: 'gold',
@@ -61,6 +78,7 @@ function describe(state: TransactionRowProps['state'], tx: Transaction): Descrip
   return {
     title: category?.name ?? '—',
     account: accountName(tx.accountId),
+    amount: tx.amount,
     currency: tx.currency,
     icon: tx.type === 'income' ? 'south-west' : 'north-east',
     iconTone: tx.type === 'income' ? 'ok' : 'neutral',
@@ -80,6 +98,10 @@ export function TransactionRow({ tx, state, onPress, showDate = false }: Transac
     tx.type === 'expense' && tx.oneTime ? 'لمرة واحدة' : null,
     tx.recurringRuleId ? 'متكرر' : null,
     d.archivedCategory ? 'مؤرشف' : null,
+    // A fee is charged to one of the two accounts, in that account's currency.
+    ...((tx.type === 'transfer' || tx.type === 'exchange' ? tx.fees : []).map((fee) =>
+      `رسوم ${formatMoney(fee.amount, state.accounts.find((a) => a.id === fee.accountId)?.currency ?? d.currency)}`
+    )),
   ].filter((c): c is string => c !== null);
   const income = tx.type === 'income';
 
@@ -102,17 +124,22 @@ export function TransactionRow({ tx, state, onPress, showDate = false }: Transac
       }
       trailing={
         <Money
-          amount={tx.amount}
+          amount={d.amount}
           currency={d.currency}
           size="row"
           align="left"
           tone={income ? 'positive' : 'default'}
           showSign={income}
-          converted={d.currency !== 'EGP' ? { amount: tx.amount * tx.rateToEGP, currency: 'EGP' } : undefined}
+          converted={
+            d.converted ??
+            (d.currency !== 'EGP'
+              ? { amount: projectAmount(state.rateSnapshots, tx.rateSnapshotId, d.amount, d.currency, 'EGP'), currency: 'EGP' }
+              : undefined)
+          }
         />
       }
       onPress={onPress}
-      accessibilityLabel={`${d.title}، ${formatMoney(tx.amount, d.currency, income)}، ${formatDateAr(tx.date)}`}
+      accessibilityLabel={`${d.title}، ${formatMoney(d.amount, d.currency, income)}، ${formatDateAr(tx.date)}`}
     />
   );
 }

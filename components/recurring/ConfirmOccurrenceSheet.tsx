@@ -32,17 +32,26 @@ export function ConfirmOccurrenceSheet({ rule, occurrenceDate, onClose }: Confir
 
   const account = accounts.find((a) => a.id === accountId);
   const toAccount = state.accounts.find((a) => a.id === rule.toAccountId);
-  const crossCurrency = rule.kind === 'transfer' && !!account && !!toAccount && account.currency !== toAccount.currency;
+  const crossCurrency = rule.kind === 'exchange' && !!toAccount;
 
   const handleSave = () => {
-    const saved = runAction('تعذّر التسجيل', () =>
-      state.confirmOccurrence(rule.id, occurrenceDate, {
-        amount: parseAmount(amountText) ?? NaN,
-        date,
-        accountId,
-        ...(crossCurrency && toAmountText.trim() ? { toAmount: parseAmount(toAmountText) ?? NaN } : {}),
-        ...(note.trim() ? { note: note.trim() } : {}),
-      })
+    const saved = runAction(
+      'تعذّر التسجيل',
+      (options) =>
+        state.confirmOccurrence(
+          rule.id,
+          occurrenceDate,
+          {
+            amount: parseAmount(amountText) ?? NaN,
+            date,
+            accountId,
+            // What arrived is always entered, never worked out from a rate.
+            ...(crossCurrency ? { toAmount: parseAmount(toAmountText) ?? NaN } : {}),
+            ...(note.trim() ? { note: note.trim() } : {}),
+          },
+          options
+        ),
+      onClose
     );
     if (saved) onClose();
   };
@@ -55,19 +64,23 @@ export function ConfirmOccurrenceSheet({ rule, occurrenceDate, onClose }: Confir
 
       <AmountInput
         value={amountText}
-        onChangeText={setAmountText}
+        onChangeText={(text) => {
+          setAmountText(text);
+          // A different amount sent needs its own received amount, typed in.
+          if (crossCurrency && parseAmount(text) !== rule.amount) setToAmountText('');
+        }}
         currency={account?.currency ?? rule.currency}
         hint={rule.variableAmount ? { tone: 'neutral', icon: 'edit', text: 'المبلغ بيتغير: اكتب المبلغ الفعلي' } : undefined}
       />
 
       {crossCurrency && toAccount && (
         <FormField label={`المبلغ المستلم (${currencySymbol(toAccount.currency)})`}>
-          <FormInput value={toAmountText} onChangeText={setToAmountText} keyboardType="decimal-pad" placeholder="بالسعر الحالي" />
+          <FormInput value={toAmountText} onChangeText={setToAmountText} keyboardType="decimal-pad" placeholder="اكتب اللي وصلك" />
         </FormField>
       )}
 
       <AccountPicker
-        label={rule.kind === 'transfer' ? 'من' : rule.kind === 'income' ? 'في' : 'من'}
+        label={rule.kind === 'income' ? 'في' : 'من'}
         accounts={accounts.filter((a) => a.id !== rule.toAccountId)}
         selectedId={accountId}
         onSelect={setAccountId}
