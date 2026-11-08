@@ -2,9 +2,8 @@
 
 > Written from the code as of persisted-state **version 8** (`store/migrations.ts → CURRENT_VERSION`), on branch
 > `currency-v8` (Phase B of `docs/architecture/CURRENCY_AND_FUNDS_DESIGN.md`: currency engine and precision). `main`
-> is still data v7 until Phase D ships. Phase C (transfers vs exchanges, fees, recurring exchanges) is built too.
-> Account-backed fund reservations (Phase D) are **not built**: the Funds and unassigned-money sections still
-> describe the v7 rules, which v8 keeps (in EGP).
+> is still data v7 until Phase D is released (see "Release" in docs/CHANGELOG.md). Phases B (currency engine), C
+> (transfers, exchanges, fees) and D (account-backed fund reservations, the cover gate) are built on this branch.
 > Examples use the fake data in `store/seed.example.ts`. **Never copy figures from
 > `store/seed.local.ts` (the owner's real data) into docs, tests or issues.**
 
@@ -128,8 +127,9 @@ components/
                             NetWorthCard (+ change vs last month), NextActionsCard,
                             homeInsights.ts (pure Home logic)
   funds/                    fundsUi.ts (pure: fundsSummary, fundNextStep, movementKind), FundCard, FundSheet (create/edit), AssignSheet (وزّعها),
-                            CoverSheet (غطّيها), MoveMoneySheet (إضافة/سحب),
-                            PaySinkingSheet (اتدفعت), UnassignedPanel, labels.ts
+                            MoveMoneySheet (إضافة/سحب/نقل لصندوق), PaySinkingSheet (اتدفعت), UnassignedPanel,
+                            CoverRequestSheet (محتاج تغطية: the cover / conversion / overdraft question), ResolveSheet (حدّد الحساب), labels.ts
+  NeedsCoverGate.tsx        Mounted once in app/_layout.tsx: the place runAction hands a NeedsCoverError to
   plan/PlanEditorSheet      Edit a month's plan (live summary, lines by bucket with kind/limit/remove)
   plan/PlanLineRow          One plan line on the Plan screen (states via planUi.lineState)
   plan/planUi.ts            Pure: lineState, lineSentence, unplannedStatus, contributionDone,
@@ -164,7 +164,9 @@ store/                      ALL business logic lives here (pure, no React)
   analytics.ts              Analytics tab numbers (periods, Sankey, trend, breakdown, net worth series, money map, runway, funds, insights, drill-down)
   errors.ts                 FinanceValidationError + typed codes
   migrations.ts             v0 → v7 chain (frozen, via migrateToV7) + migratePersistedState; CURRENT_VERSION = 8
-  migrateV8.ts              v7 → v8 as ordered idempotent sub-steps (V8_STEPS, applyV8Steps, settings.v8Step; step 7 = the ledger)
+  migrateV8.ts              v7 → v8 as ordered idempotent sub-steps (V8_STEPS, applyV8Steps, settings.v8Step; 7 = the ledger, 8 = reservations)
+  cover.ts                  Cover gate types and rules: OpOptions, NeedsCoverError, shortfalls, followPreview, planReserve / planRelease, coversOf
+  invariants.ts             INV-5 as code: invariantViolations / assertInvariants
   rateSnapshots.ts          snapshotForNow / ratePatch: the rate snapshot a write uses
   legacy/                   FROZEN v7 code (types, currency, selectors, planning, recurring, snapshots, analytics): the test oracle only
   hydration.ts              Fail-closed hydration: persist options, write guard, refusal of unreadable / newer data
@@ -194,7 +196,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencyRegistry.ts, countries.ts, currencies.ts (names, v7-shaped DEFAULT_RATES for the seeds), market.ts
-tests/logic.test.ts         390 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         441 tests over store/*, utils/* and the pure UI helpers
 tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
@@ -300,10 +302,10 @@ hex colors and no raw font sizes, weights, radii or shadows — only the tokens 
 - Amber (`warning`) = needs attention but nothing is wrong yet (fund "محتاج انتباه", plan line
   near its limit, overdue backup, missed due item, over-budget hint while typing).
 - Red (`danger`) only where money is actually short or input is invalid. The complete list:
-  a shortfall in any currency of unassigned money (UnassignedPanel, Home cover InsightCard, CoverSheet deficit), an
+  a shortfall in any currency of unassigned money (only old, over-reserved data: UnassignedPanel), an
   AssignSheet / FundSheet allocation that would leave money short, a plan line over its
   limit (PlanLineRow / LineSheet "عدى الخطة", ProgressBar `over`), validation errors (FormField,
-  AccountPicker, CategoryPicker, TransactionSheet), and the `destructive` Button (delete/cover).
+  AccountPicker, CategoryPicker, TransactionSheet), and the `destructive` Button (delete).
 - State is never conveyed by color alone: every colored state has a label (StatusChip, text) or
   an icon.
 
@@ -506,7 +508,7 @@ Content padding `space.lg`, section gap `space.xxl`. Order (`app/(tabs)/index.ts
    CTA and — when `dismissible` — "بعدين" (`dismissAction`, 24 h). The rest sit behind a toggle
    "كمان {حاجة واحدة / حاجتين / N حاجات / N حاجة}" as ListRows (tap = run the CTA). CTA routes:
    `/due`, `/plan`, `/review` (+month), `/settings` (+export=1), `/fund/[id]` (+allocate=1 opens
-   the allocate sheet), or sheets Home owns: `cover` (CoverSheet), `assign` (AssignSheet),
+   the allocate sheet), or sheets Home owns: `resolve` (ResolveSheet), `assign` (AssignSheet),
    `new-emergency` (FundSheet initialType emergency).
 5. **MonthlySnapshot** — "هذا الشهر" from `monthFlows` (EGP): دخل / مصروف, then اتحوّش للصناديق
    (net fund movements of the month, each at its own rates) / استثمار (asset purchases at snapshot
@@ -521,9 +523,9 @@ Content padding `space.lg`, section gap `space.xxl`. Order (`app/(tabs)/index.ts
 8. **UnassignedPanel** — "فلوس بدون وظيفة": one row per currency that has money or a shortfall
    (name + `Money` in that currency, negative in danger) and, when there is more than one row or
    the only one isn't EGP, "الإجمالي بالجنيه" at today's rate; surplus → "وزّع أموالك"
-   (AssignSheet); any shortfall → dangerSurface card, "استخدمت جزء من فلوس الصناديق." and
-   "غطّي الفرق" (CoverSheet); nothing at all: nothing shown. Hidden when the top action is
-   `cover`/`assign`.
+   (AssignSheet); migrated reservations without an account → their own line "محجوز ومش محدد حسابه" and a "حدّد الحساب"
+   button (ResolveSheet); a shortfall can only be old over-reserved data (dangerSurface card, "المحجوز للصناديق أكتر من
+   الرصيد. راجع الصناديق."); nothing at all: nothing shown. Hidden when the top action is `assign`.
 9. **NetWorthCard** — "صافي الثروة" (Money lg); under it the change since last month's snapshot
    (`netWorthChange`: Money with sign, green ≥ 0 / danger < 0, "{±x.x%} عن {month}"; no % when it
    started at 0; hidden without a snapshot); مصر / السعودية lines (`netWorthByLocation`), سيولة /
@@ -541,7 +543,8 @@ priority order); `nextActions` drops snoozed ones. Each action:
 | # | id | Condition | Severity | Title | CTA |
 |---|---|---|---|---|---|
 | 1 | `due` | `dueOccurrences(today, 'confirm')` not empty | urgent | عندك {dueCountPhrase} | راجعهم → /due |
-| 2 | `cover` | some currency is short (`unassignedSummary().deficits`, beyond 0.005) | urgent | صرفت {X} من فلوس مخصصة — X in that currency when only one is short, else the EGP total | غطّي الفرق → CoverSheet |
+| 2 | `needsCover` | `blockedAuto > 0`: automatic recurring items `processDue` did not record because they would eat into reserved money (`ops.blockedDue`, passed in as a count) | urgent | {N} معاملات تلقائية محتاجة تغطية | راجعها → /due |
+| 2 | `resolve` | `unresolvedMovements` not empty | urgent | فلوس محجوزة ومش محدد حسابها | حدّد الحساب → ResolveSheet |
 | 3 | `overspent` | this month's plan has `overspentLines` | warning | عدّيت ميزانية: {names} | افتح الخطة → /plan |
 | 4 | `review-YYYY-MM` | `pendingReviewMonth`: last month had transactions (≥ trackingStartDate) and no `monthlyReviews` entry | opportunity | راجع شهر {month} | ابدأ المراجعة → /review?month= |
 | 5 | `plan-YYYY-MM` | no plan this month | warning | اعمل خطة الشهر | اعمل الخطة → /plan |
@@ -554,7 +557,7 @@ priority order); `nextActions` drops snoozed ones. Each action:
 
 Snooze: `dismissAction(actionId)` stores `{ id = actionId, actionId, until = now + 24 h }`
 (`SNOOZE_MS`), replacing an earlier snooze of the same action and dropping expired ones (with
-tombstones). `NON_DISMISSIBLE_ACTION_IDS = ['due', 'cover']`: the operation refuses them
+tombstones). `NON_DISMISSIBLE_ACTION_IDS = ['due', 'needsCover', 'resolve']`: the operation refuses them
 (`ACTION_NOT_DISMISSIBLE`) and `isSnoozed` ignores any record for them. Ids that embed a month or
 fund make a snooze apply to that situation only. `fundMonthShortfall` (selectors) = this month's
 required amount at month start − allocated this month, floored at 0 — the gap `fundStatus`
@@ -787,22 +790,23 @@ keeps its currency; there is no currency choice today), emergency suggestions as
 "استخدم المقترح (٣ / ٦ شهور): X", deadline (FutureDateField, "بدون موعد"), sinking frequency +
 next due date (+ suggested monthly), priority, linked gold chips, edit: cash allocation + "فلوس
 متاحة للتخطيط بعد الحفظ" preview (a "منهم: …" line when the fund holds cash in several currencies),
-احذف الصندوق. MoveMoneySheet — إضافة / سحب Segment (starts on the side that opened it), a currency
-Segment (جنيه / ريال / دولار; adding: all three, default the fund's currency; withdrawing: the
-currencies the fund holds cash in), AmountInput in that currency with "المتاح للتخطيط" / "في الصندوق
-نقداً" (in that currency) hint and, for another currency than the fund's, "بسعر النهارده ≈ X في
-الصندوق", note (there is no date field); saves `allocateMany([{ fundId, amount, currency }])` /
-`withdrawFromFund(…, currency)`. PaySinkingSheet — AmountInput, AccountPicker, CategoryPicker, date, note, one
-line about the withdrawal and the next due date. AssignSheet — a currency Segment when more than
-one currency has money left (default: the biggest by EGP value; switching clears the amounts),
-live "هتوزّع X من Y" + what stays available (all in that currency), "وزّع المقترح" (fills
-`suggestAllocationIn`), fund ListRows (suggestion converted to that currency) with an amount input
-on the end side. CoverSheet — a currency Segment when more than one currency is short, the
-shortfall card in that currency, "غطّي الفرق من الصناديق دي:", selectable fund rows (only funds
-with cash in that currency, showing it) with the `planCover` withdrawal, result line (amber when
-something is still uncovered). Fund detail: a "بالعملات" fact (each currency's cash) when the fund
-holds more than one currency, and every movement shows in its own currency with the fund-currency
-value under it.
+احذف الصندوق. MoveMoneySheet — إضافة / سحب / نقل لصندوق Segment (starts on the side that opened it), a currency
+Segment (adding: all currencies, default the fund's currency; withdrawing / moving: the currencies the fund holds), AmountInput
+in that currency with the available / held hint, for moving the target-fund chips (the money stays on the same account),
+and an **account chooser**: "تلقائي" + the accounts of that currency, with the default rules' plan shown under it
+("600 من بنك، 400 من كاش (اختيار تلقائي)": `planReserve` / `planRelease`, the very functions the operations use). Saves
+`allocateMany([{ fundId, amount, currency, accountId? }])` / `withdrawFromFund(…, currency, accountId?)` / `reallocate`.
+PaySinkingSheet — AmountInput, AccountPicker (defaults to the account holding the fund's largest reservation,
+`defaultSinkingAccountId`), CategoryPicker, date, note, a line saying how much is spent from the fund's reservation on that
+account and how much from its available money (and that a cover is asked for if it is not enough). AssignSheet — a currency
+Segment when more than one currency has money left, live "هتوزّع X من Y", "وزّع المقترح", fund rows with an amount input,
+and one account chooser for all of them with the per-fund plan listed. CoverRequestSheet — what `runAction` opens
+instead of an error message for a `NeedsCoverError`: one card per shortfall (a cover: the account, the shortfall, the funds
+holding reservations on it as chips, lowest priority pre-selected, the exact amounts taken; a conversion of reserved money
+by an exchange; an overdraft), "تأكيد" runs the same action again with the decision. ResolveSheet — migrated reservations
+without an account: per fund and currency, the reason and the accounts of that currency (disabled when one cannot hold it);
+saving is the one confirmation. Fund detail: a "بالعملات" fact when the fund holds more than one currency, and every
+movement in its own currency with the fund-currency value under it.
 
 **Recurring** — see the route table. `ruleState`: paused (inactive) · ended (no `nextDate`) · active.
 
@@ -948,7 +952,9 @@ Every synced entity has `updatedAt` (set only by operations).
   - (a transaction's `amount` is on `income | expense | transfer | asset_purchase`; an exchange has sent / received instead)
   - `asset_purchase`: `accountId`, `currency`, `holdingId` — cash turned into a holding
 - **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), updatedAt }`
-- **FundMovement** `{ id, fundId, amount (+allocate / −withdraw, in `currency`), currency? (the money's currency; missing = the fund's currency, covered by any currency's money — see Funds below), date, note?, rateSnapshotId, updatedAt }`
+- **ReservationMovement** `{ id, fundId, accountId, amount (signed, in the ACCOUNT's currency), kind: reserve|release|reallocate|follow_transfer|follow_exchange|spend|cover|adjust, groupId?, sourceTransactionId?, date, note?, rateSnapshotId, updatedAt }` — money of one account set aside for one fund; `reservation(fund, account)` = Σ amount, never stored. `reallocate` / `follow_*` come in pairs sharing a `groupId` (a follow group's id is the transaction id, or `<id>:…`); `cover` and `spend` carry the `sourceTransactionId` that caused them.
+- **UnresolvedMovement** `{ id, fundId, amount, currency, date, note?, rateSnapshotId, reason: ambiguous|insufficient|negative|no_account, updatedAt }` — migration-only quarantine: counts toward its fund's total, never against an account's available money, until the user resolves it (an account is chosen: it becomes an `adjust` reservation).
+- **Account** also has `allowNegative?` (a genuine overdraft account: its balance may go below zero without asking; it holds no reservations).
 - **Holding** (union): `gold { weightGrams, karat: 18|21|24 }` or `currency { currency, quantity }`; common `id, name, purchaseCost: Money` (what it cost, in the currency it was paid in; never changes with rates), `purchaseRateSnapshotId` (the rates of the purchase, to show the cost in another currency as it was then), `purchaseDate?, country, note?, updatedAt`
 - **Liability** `{ id, name, principal, currency, country, monthlyPayment?, startDate, notes?, updatedAt }` (no interest)
 - **RecurringRule** `{ id, name, kind: income|expense|transfer|exchange, amount (the amount sent), currency (= account currency), accountId, categoryId? (income/expense), toAccountId? (transfer / exchange), toAmount? (exchange: the amount received each time, required), frequency: weekly|monthly|yearly, interval ≥ 1, dayOfMonth? 1–31 (clamped to month end), startDate, endDate?, nextDate ('' when nothing is left), mode: auto|confirm, variableAmount, active, skippedDates[], note?, createdAt, updatedAt }`
@@ -959,7 +965,7 @@ Every synced entity has `updatedAt` (set only by operations).
 - **ActionDismissal** (v7) `{ id = actionId, actionId, until (ISO), updatedAt }` — a snoozed Next Best Action.
 - **MonthlyReview** (v7) `{ id = review-YYYY-MM, month, completedAt, updatedAt }` — a finished review.
 - **Tombstone** `{ entity: SyncEntity, id, deletedAt }` — deletion log for a future sync. `SyncEntity` also covers `netWorthSnapshot`, `actionDismissal`, `monthlyReview` (v7).
-- **FinanceState** `{ accounts, categories, transactions, funds, fundMovements, holdings, liabilities, recurringRules, monthlyPlans, netWorthSnapshots, actionDismissals, monthlyReviews, rateSnapshots, settings, tombstones }`
+- **FinanceState** `{ accounts, categories, transactions, funds, reservationMovements, unresolvedMovements, holdings, liabilities, recurringRules, monthlyPlans, netWorthSnapshots, actionDismissals, monthlyReviews, rateSnapshots, settings, tombstones }`
 
 ```mermaid
 erDiagram
@@ -1045,7 +1051,7 @@ greater than the stored one. Used by `persist.migrate` **and** by backup restore
 | v5 → v6 | Legacy rules `{ type, nextDate, … }` → `RecurringRule`: `kind = type`, `interval: 1`, `dayOfMonth` = day of `nextDate` (not for weekly), `startDate = nextDate`, `mode: 'confirm'` (nothing is recorded without the user), `variableAmount: false`, `skippedDates: []`, `createdAt = updatedAt ?? now`. Rules that already have `kind` pass through unchanged. |
 | v6 → v7 | `netWorthSnapshots ??= []`, `actionDismissals ??= []`, `monthlyReviews ??= []`; then every past month from `trackingStartDate`'s month (at most 36) up to the month before `now` that has no snapshot gets an `estimated` one from `netWorthAsOf(month end)` at the current rates/prices, `takenAt = now`. The current month is left to the SnapshotRunner. Existing snapshots are never changed. |
 
-| v7 → v8 | `applyV8Steps`: seven ordered, idempotent sub-steps (below). v0 → v7 are frozen in `migrateToV7` and run first for older data. |
+| v7 → v8 | `applyV8Steps`: eight ordered, idempotent sub-steps (below). v0 → v7 are frozen in `migrateToV7` and run first for older data. |
 
 Idempotence rules: v2→v3 … v6→v7 only fill missing values and keep existing ones, so
 running them twice yields the same result (tested). Before migrating, the raw payload is
@@ -1065,6 +1071,7 @@ version-8 state from any earlier step, or a current one; migrating twice equals 
 | 4 | rounding | every stored amount rounded to its currency's decimals (INV-7) |
 | 5 | holdings | `purchaseCostEGP` → `purchaseCost { amount, currency: 'EGP' }` (unchanged) + `purchaseRateSnapshotId` (an `estimated` snapshot of the stored rates) |
 | 6 | preferences | `reportingCurrency: 'EGP'`, `planCurrency: 'SAR'` (what v7 did) |
+| 8 | reservations | v7 funds held cash BY CURRENCY. Each fund's `fundMovements` (priority order) are grouped by currency (`currency ?? fund.currency`) and netted. A group is assigned to an account ONLY when exactly one active account of that currency can hold the net amount (balance − what earlier groups already reserved there); then every movement becomes a `ReservationMovement` (kind `adjust`, same id / date / note / rates). Otherwise every movement of the group goes to `unresolvedMovements` with a reason (ambiguous: two or more accounts could hold it; insufficient: none can; negative: the net is below zero; no_account: no active account in that currency). A group netting to zero is kept as history on the first account of the currency. No FX is invented. Fail closed: `assertInvariants` on the result and every fund total (per currency) equal to v7's, else the migration throws and nothing is written. Tombstones `fundMovement` → `reservationMovement`. |
 | 7 | ledger | a v7 `transfer` (`amount` out, `toAmount` in): **different currencies → `exchange`** (`sentAmount = amount`, `receivedAmount = toAmount`, no invented amount, every balance unchanged); same currency and equal amounts → plain `transfer` (`fees: []`); same currency with **unequal amounts** (never offered by the v7 UI): sent > received → a transfer of the *received* amount plus a fee of the difference on the source account (category رسوم), received > sent → a transfer of the *sent* amount plus an income "تسوية" of the difference on the target (`<id>-adjustment`; the category is created only then, or a same-named one of the user's is reused) — balances identical, the difference now shows as spending / income. A recurring cross-currency transfer becomes an `exchange` rule forced to `confirm`; a same-currency rule drops `toAmount`. The default category "رسوم" (`cat-essentials-fees`, essentials) is added unless one of that name exists. |
 
 Acceptance (tests): applying the first k steps for every k and then hydrating equals the full migration; the full
@@ -1114,7 +1121,7 @@ Key validation rules:
   contributions reference existing funds, no duplicates.
 
 Atomic operations: `buyGold`, `updateGoldPurchase`, `deleteTransaction` (purchase → holding too),
-`editFund` (details + one adjustment movement), `allocateMany`, `withdrawMany`, `paySinkingFund`,
+`editFund` (details + the reservation changes), `allocateMany`, `withdrawMany`, `reallocate`, `reReserveCovers`, `resolveUnresolved`, `paySinkingFund`,
 `copyPlan`, `addCategoryWithPlanLine` (new expense category + a line in the month's saved plan via
 `savePlan`; `PLAN_NOT_FOUND` without a plan), `replaceWithSeed`, `restoreFromBackup`, `processDue`, `confirmOccurrence`,
 `addRecurringRule` (with link), `deleteRecurringRule` (rule + unlinking).
@@ -1143,7 +1150,7 @@ entity/field labels interpolated (e.g. `NOT_POSITIVE` + field `weightGrams` → 
 INVALID_KARAT, INVALID_FREQUENCY, INVALID_MODE, CURRENCY_MISMATCH, CATEGORY_KIND_MISMATCH,
 CATEGORY_BUCKET_MISMATCH, LIABILITY_PAYMENT_NOT_EXPENSE, SAME_ACCOUNT_TRANSFER, TRANSFER_CURRENCY_MISMATCH, EXCHANGE_SAME_CURRENCY, FEE_ACCOUNT_INVALID, ACCOUNT_IN_USE,
 ACCOUNT_CURRENCY_LOCKED, CATEGORY_IN_USE, LIABILITY_IN_USE, LIABILITY_CURRENCY_LOCKED,
-WITHDRAW_EXCEEDS_FUND, HOLDING_ALREADY_LINKED, INSUFFICIENT_UNASSIGNED, NOTHING_SELECTED,
+WITHDRAW_EXCEEDS_FUND, RESERVE_EXCEEDS_AVAILABLE, NO_ACCOUNT_IN_CURRENCY, ACCOUNT_HAS_RESERVATIONS, FOLLOW_INVALID, HOLDING_ALREADY_LINKED, NOTHING_SELECTED,
 SINKING_SCHEDULE_REQUIRED, NOT_A_SINKING_FUND, HOLDING_HAS_PURCHASE, ASSET_PURCHASE_TYPE_LOCKED,
 DUPLICATE_ENTRY, PLAN_EXISTS, OCCURRENCE_NOT_DUE, CATEGORY_NAME_TAKEN, CATEGORY_KIND_LOCKED,
 DEFAULT_CATEGORY_DELETE, PLAN_NOT_FOUND`. Backup errors (`store/backup.ts → BackupError`):
@@ -1205,7 +1212,7 @@ All of these take an optional `to` (default the reporting currency) and round ea
 - `liquidByCurrency`: Σ balances per currency (no conversion); `goldTotals(to?)`: grams total, by karat, `totalCost`
 
 ### Funds
-- `fundCashByCurrency` = Σ the fund's movements per currency, each **in its own currency** (a movement's currency is `m.currency ?? fund.currency`); `fundAllocatedIn(cur)` = one of them. `fundAllocated` (fund currency) = Σ over currencies of `convertCurrency(cash[c], c, fund.currency)` at **today's** rate, which for a fund that only holds its own currency is just the sum of its movements
+- **Reservations** (design B5 / C / D). `fundMovementRows(state)` = the reservations (valued in their account's currency) plus the unresolved movements (own currency). `fundCashByCurrency` = Σ per currency, each **in its own currency**; `fundAllocatedIn(cur)` = one of them. `fundAllocated` (fund currency) = Σ over currencies of `convertCurrency(cash[c], c, fund.currency)` at **today's** rate — 1,000 SAR reserved for an EGP fund stays 1,000 SAR whatever the rates do; only its EGP value moves. `reservation(fund, account)`, `accountReserved`, `accountAvailable = balance − reserved`, `fundReservationsByAccount`. A movement counts as "saved this month" unless it is a `reallocate` or `follow_*` (moving, not saving).
 - `fundLinkedValue` (fund currency) = Σ per linked holding: a currency holding → `convertCurrency(quantity, holding.currency, fund.currency)` (its quantity when it is the fund's own currency), gold → `fromEGP(holdingValue(h, 'EGP'))`
 - `fundCurrent = fundAllocated + fundLinkedValue`; `fundProgress = max(0, current / target)` (1 if target ≤ 0)
 - `fundDueDate` = `nextDueDate` (sinking) or `deadline`
@@ -1214,14 +1221,23 @@ All of these take an optional `to` (default the reporting currency) and round ea
 - `sinkingMonthlySuggestion = target / monthsUntil(nextDueDate)` (ignores savings so far)
 - `fundStatus`: required = `max(0, target − (current − allocatedThisMonth)) / monthsUntil`; `no_deadline` without due date; `ahead` if required ≤ 0 or allocatedThisMonth > 1.1 × required; `on_track` if ≥ required; below required → `pending` while `daysLeftInMonth(month, now) > 7` (today counts: in a 31-day month day 24 leaves 8, day 25 leaves 7) or when the fund's `createdAt` is in the current month, otherwise `behind` (`BEHIND_DAYS_LEFT = 7`)
 - `fundSuggestedMonthly = min(requiredMonthly ?? monthlyContribution ?? 0, target − current)`
-- **Unassigned money is per currency** (`unassignedByCurrency`, linked gold is not cash): start from `liquidByCurrency` (account balances summed in their own currency, never via EGP) and subtract each movement that has a `currency` from that currency. Movements **without** a `currency` (all data from before currencies, and the fund edit sheet's adjustments) have no source currency: per fund currency they are summed, covered by that currency's money first, then by what is left in the other currencies at today's rate (EGP → SAR → USD), and any rest is a shortfall in their own currency. This keeps every figure of old data exactly what it was (the totals are linear), without inventing a shortfall when EGP funds were paid from SAR money.
-- `unassignedSummary`: `byCurrency`, `surpluses` / `deficits` (native, only beyond 0.005), and display totals in EGP at today's rate (`totalEGP`, `surplusEGP`, `deficitEGP`; still EGP, not the reporting currency, until Phase D). `unassignedEGP` = `totalEGP`. `unassignedEGPWithFundCash(cash)` = preview after setting a fund's cash allocation (total).
-- `allocateMany`: each allocation is in `currency` (omitted = the fund's currency, any currency's money); it fails with `INSUFFICIENT_UNASSIGNED` when the new movements would raise the EGP total of per-currency shortfalls (`worsensShortfall`). So SAR money can't be allocated beyond the SAR that exists, however much EGP there is.
-- `withdrawFromFund` / `withdrawMany`: per currency, never beyond the fund's cash **in that currency** (`WITHDRAW_EXCEEDS_FUND`); omitted currency = the fund's currency.
-- `withdrawalPlan(fund, amount, currency)`: how to take an amount out of a fund's cash — same currency first, then the fund's own, then the others at today's rate; used by `paySinkingFund` and by `editFund` decreases.
+- **Unassigned money is per currency** (`unassignedByCurrency`, linked gold is not cash) = Σ over the accounts of that currency of `available` − the unresolved migrated movements in that currency (counted once: the fund has them). Never converted: a SAR reservation never takes EGP money (v7's implicit FX is gone). `unresolvedByCurrency` is the "محجوز ومش محدد حسابه" line, so **reserved by accounts + unresolved + unassigned = the cash, per currency** (INV-8; tested on every fixture and in the fuzz).
+- `unassignedSummary`: `byCurrency`, `surpluses` / `deficits` (native, only beyond 0.005 — a deficit can only be old over-reserved data), `unresolved`, and display totals in EGP at today's rate (`totalEGP`, `surplusEGP`, `deficitEGP`; EGP, not the reporting currency). `unassignedEGP` = `totalEGP`.
+- **Which account** (the default rules, shown by the sheets and shared with the operations): `planReserve(fund, amount, currency, accountId?)` — the active account of that currency with the most available money first (ties: oldest, then id), split across accounts when one cannot hold it, **never beyond what is available** (`RESERVE_EXCEEDS_AVAILABLE`, Q13), `NO_ACCOUNT_IN_CURRENCY` without one; `planRelease` — over-reserved accounts first, then the largest reservation, `WITHDRAW_EXCEEDS_FUND` beyond what the fund holds (unresolved money cannot be released); `defaultSinkingAccountId` — the account holding the fund's largest reservation.
+- `allocateToFund / allocateMany` reserve by `planReserve` (one `reserve` movement per account; `allocateMany` is all-or-nothing, each entry sees the ones before it), `withdrawFromFund / withdrawMany` release by `planRelease`, `editFund` reserves or releases the difference (a decrease through `withdrawalPlan`: the fund's own currency first, then the others at today's rate), `reallocate` moves reserved money between two funds on the same account(s) (a `reallocate` pair per account: nothing leaves the account, so INV-5 cannot break), `deleteFund` frees its money.
 - `suggestAllocation(amountEGP)` (legacy, fund currencies): funds by priority, each gets `min(fundSuggestedMonthly in EGP, left)`, rounded to 0.01. `suggestAllocationIn(currency, amount)`: the same for money in one currency, each fund's suggestion converted at today's rate, entries carry `currency`.
-- `planCover(fundIds, only?)`: per short currency, deficit = `max(0, −unassigned[c])`; chosen funds lowest priority first; take `min(cash in c, deficit)`, rounded **up** to 0.01, as a withdrawal in c (the `currency` is left out when it is the fund's own); `remainingEGP` = what is still short; `defaultCoverFundId(currency?)` = lowest-priority fund with cash (in that currency)
-- `paySinkingFund` (operations): expense in account currency → `withdrawalPlan` (the payment currency's cash first, so no conversion; then the fund's own currency and the others at today's rate; whatever the cash can't cover stays unassigned) → `nextDueDate += cycle months` (`SINKING_CYCLE_MONTHS`: 12/6/3, `addMonthsToDate` clamps to month end)
+- `paySinkingFund` (operations): the expense, then a `spend` movement for the part the fund has reserved on the **paying account** (the rest is paid from the account's available money; a bill beyond both needs a cover — D12) → `nextDueDate += cycle months` (`SINKING_CYCLE_MONTHS`: 12/6/3, `addMonthsToDate` clamps to month end).
+
+### The cover gate and follow rules (`store/cover.ts`, `store/invariants.ts`)
+- **INV-5:** for every account, each reservation ≥ 0 and everything reserved on it ≤ `max(0, balance)` (`invariantViolations`). Reserved money is consumed only by a **confirmed cover released in the same atomic patch**.
+- Every balance-reducing operation — `addTransaction`, `updateTransaction`, `deleteTransaction`, `addTransfer`, `addExchange`, `buyGold`, `updateGoldPurchase`, `updateAccount` (the opening balance: "set the current balance"), `confirmOccurrence`, `paySinkingFund` — takes an optional `OpOptions` and ends in `settle(state, patch, …)`: if an account ends up **worse** than before (more over-reserved, or below zero on an account without `allowNegative`) the operation is applied together with `options.cover` (`[{ fundId, accountId, amount }]`, which must equal the shortfall exactly and fit each fund's reservation; kind `cover`, `sourceTransactionId` = the transaction) and `options.confirm.negative` for an overdraft, **or it throws `NeedsCoverError`** (`shortfalls[]`: kind `cover` | `conversion` | `negative`, account, currency, amount, suggested split) and applies nothing. `proposedOptions(error)` accepts everything proposed (lowest-priority fund first); `mergeOptions` combines a retry with earlier decisions.
+- **A transfer** (same currency): the part above the source's available money (after the fees charged to it, which can never be paid from reserved money without a cover) must be reserved money, so it **follows**: `followPreview` / `followMovements` — split in proportion to each fund's reservation (largest remainder, the lowest-priority fund last takes the rest), editable through `options.follow`, as pairs of `follow_transfer` movements (`groupId` = the transaction id). A notice in the sheet, not a confirmation (Q14). **An exchange** converts that part at its **own recorded rate** (received ÷ sent) as `follow_exchange` pairs and needs `options.confirm.conversion` (D2 #2); when the conversion also needs a cover or an overdraft, the same `NeedsCoverError` carries all of them (**one** sheet).
+- **Edit / delete of a transfer or exchange** first reverses what it carried (`reversalMovements`: per fund, what is still reserved on the destination, up to what travelled, goes back at the same rate; money a fund already released is not re-reserved), then applies the new values with the same rules; the gate compares with the original state. All or nothing.
+- `processDue` has no user to ask: each automatic occurrence is checked against the ones before it and one that would breach INV-5 (or overdraw) is **not recorded**; it stays due and `ops.blockedDue` lists it ("محتاج تغطية" on the Due screen, the `needsCover` Next Best Action); `confirmOccurrence` then asks for the cover. Exchange rules are confirm-only.
+- `utils/runAction` (`utils/runActionCore.ts`): a `NeedsCoverError` is **never an error message** — it opens the cover sheet with the account and the shortfall (`utils/coverRequests.ts` → `NeedsCoverGate`), and the sheet runs the same action again with the decision (`action(options)`; the optional third argument closes the caller's sheet after a retry succeeds).
+- **Q4:** deleting a covered expense re-reserves nothing by itself; `coversOf(state, txId)` is the one-tap "رجّع للصناديق" offer, and `reReserveCovers` gives back what the accounts hold free now (each part a `reserve` tagged with the deleted transaction, so the offer does not return).
+- **Accounts:** the currency is locked while an account has transactions, rules **or reservations** (`ACCOUNT_CURRENCY_LOCKED`); it cannot be archived while money is reserved on it (`ACCOUNT_HAS_RESERVATIONS`) nor deleted (`ACCOUNT_IN_USE`).
+- **Resolver:** `resolveUnresolved({ fundId, currency, accountId })` turns that fund's unresolved movements of that currency into `adjust` reservations (same ids) on the account, if INV-5 still holds, with tombstones for the unresolved records.
 
 ### Cash flow
 - **Fees are spending.** `feeExpenses(state)` reads the fees of every transfer and exchange as VIRTUAL expense rows (never stored; `feeOfId` = the record): in the currency of the account they are charged to, in their category (the fees category by default), dated and valued at the record's own `rateSnapshotId`. `incomeExpenseRows(state)` = recorded income / expense + those rows; it feeds `monthSummary`, `monthExpenses` of plans and the review, and (with `feeExpenses`) analytics `scan`, `drillTransactions`, `runway`. So fees count in month summaries, buckets (رسوم is essentials), plan progress / safe-to-spend (a plan line for رسوم tracks them; with none they are unplanned), Analytics and the review; the move itself never does. `drillTransactions` returns the **parent** transfer / exchange once however many of its fees match (the total still counts every fee), so tapping the row opens the parent. `feeSpendImpact(month, fees)` (planning) is the hint for fees being entered.
@@ -1264,8 +1280,8 @@ All of these take an optional `to` (default the reporting currency) and round ea
 4. `oneTime` expenses count as spending but are excluded from averages (emergency target, plan suggestion).
 5. Cash-flow reports ignore transactions before `settings.trackingStartDate`; balances never do.
 6. Transaction currency always equals its account currency; history keeps its rate snapshot.
-7. Unassigned money = cash not earmarked by fund movements, **per currency**; increasing a fund allocation may not leave more money short (`allocateMany`, `editFund` increases); decreases always allowed. An amount in a currency never changes with the rates (1000 SAR stays 1000 SAR): only its value in another currency (EGP equivalent, fund value, net worth) follows today's rate.
-8. Sinking payments withdraw at most the fund's cash; the rest comes from unassigned money.
+7. Unassigned money = available money (balance − reserved) of the accounts, **per currency**, minus unresolved migrated movements; reserving more than is available is refused; releasing always works. An amount in a currency never changes with the rates (1000 SAR stays 1000 SAR): only its value in another currency (EGP equivalent, fund value, net worth) follows today's rate.
+8. Reserved money is spent only by a confirmed cover (or by the sinking fund it belongs to); a sinking payment spends the fund's reservation on the paying account first, then that account's available money.
 9. Plans are zero-based, one per month, id `plan-YYYY-MM`; fixed lines never count as safe to spend.
 10. Locations: holdings without location and all liabilities count as Egypt.
 11. No interest/APR fields anywhere.
@@ -1367,6 +1383,8 @@ series by location and estimated points, money map, runway, fund projections, ev
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
 
+v8 suites (Phase D): reservations (account choice, split across accounts, Q13 refusal, release order, all-or-nothing batches, rates never change a reservation, D10 net worth across random reserve / release, deleting a fund), migration step 8 (every fund total per currency equal to v7's, unassigned exactly v7's, the four reasons, priority order, idempotence, the INV-8 cash identity), the cover gate (design examples C1–C4: no prompt within available, cover exact and atomic, transfer follow with the design's numbers, an editable split, exchange conversion at its own rate, income delete / opening-balance edit, assets and fees, processDue guard, account lock / archive, sinking payment), `runAction` (**every** balance-reducing operation ends in the cover flow, never an error message), one question for conversion + overdraft, reallocate, the Q4 offer, the transfer notice, the resolver, the Next Best Actions, and a **fuzz** over every write path run three ways (strict accounts with every question answered yes; strict accounts with the overdraft never agreed to — no balance below zero; and from the local seed) asserting INV-5, INV-8 and that failed operations change nothing.
+
 v8 suites (Phase C): transfers vs exchanges (account effects, currency rules, required received amount, fees on the named account, 1,000 repeated transfers with a fee stay exact, rounding per leg, failed operations change nothing, edit / delete atomic, transfer ↔ exchange through an edit, accounts in use), step 7 of the migration (exchange legs = stored amounts, balances identical, both unequal-leg cases with idempotence, recurring rules, the fees category), fees as spending (month summary at the record's own rates, per-day net, plan line, fee impact hint, Analytics totals and drill-down to the parent, review) and the exchange-form helpers (implied rate, 5% warning, rate formatting).
 
 v8 suites (Phase B): the **frozen-v7 oracle** (`store/legacy/*` + `tests/legacy/oracle.v7.ts` report every number v7 derived from a v7 state; `report.v8.ts` reports the same from the live code on the migrated state; `assertRoundingOnly` fails on any difference beyond half a minor unit per contributing row; run on a rich fixture, the example seed and, when present, `seed.local.ts`); countries; rates (A → USD → B, snapshots content-hashed and immutable, dangling id throws, every v7 pairwise rate reproduced); currencies as data; rounding at every write and aggregation boundary (INV-7); the ordered idempotent sub-steps (first k steps then hydrate = full migration, twice = once, throwing step fails closed); holdings cost in native currency; currency preferences; and **reporting currency** (INV-1: cycling it leaves every collection deep-equal, parts add up to the total in every currency, 1,000 SAR − 100 SAR = 900 SAR, the SAR cost of a holding does not move with rates).
@@ -1380,13 +1398,13 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 
 ## 15. Known limitations & tech debt
 
-- **v8 (Phases B–C) is not complete as a product**: unassigned money, fund suggestions, the emergency target, next-action amounts, Goals totals and the fund screens still show EGP whatever the reporting currency is (Phase D). There is one gold price, in EGP (per-country gold pricing is a product-phase item). Net worth snapshots are stored in EGP (their field names say so). Records the migration found without their own rates point at an `estimated` rate snapshot frozen at the migration's rates.
+- **v8 is built but not released**: unassigned money totals, fund suggestions, the emergency target, next-action amounts, Goals totals and the fund screens still show EGP (or the fund's own currency) whatever the reporting currency is — a display choice deferred, no data impact. There is one gold price, in EGP (per-country gold pricing is a product-phase item). Net worth snapshots are stored in EGP (their field names say so). Records the migration found without their own rates point at an `estimated` rate snapshot frozen at the migration's rates.
 - Gold is priced from the world spot price plus a manual local premium, not from an Egyptian
   market feed, and excludes workmanship. Prices refresh only while the app is open. The free
   APIs have no SLA; when they fail the last saved prices stay (`constants/market.ts` values on a
   fresh install that has never been online).
 - No UI yet for: liabilities, currency holdings (only shown if present), editing an
-  opening gold holding. Corresponding operations exist (`addLiability`, `updateHolding`, `updateFundMovement`, …).
+  opening gold holding. Corresponding operations exist (`addLiability`, `updateHolding`, …).
 - `DEFAULT_RATES.lastUpdated` is computed at module load, so a fresh install shows "last updated"
   as the first launch time.
 - `DEFAULT_TRACKING_START_DATE` is the owner's date ('2026-08-05') for every install.
@@ -1487,7 +1505,7 @@ Category(20 defaults, buckets essentials/lifestyle/giving/income; archived? hide
 names unique among active, defaults never deleted), Transaction union
 income|expense|transfer|asset_purchase (rateToEGP snapshot; currency = account currency;
 oneTime flag), Fund emergency|goal|sinking (priority, deadline or frequency+nextDueDate,
-linkedHoldingIds), FundMovement(+/-), Holding gold(weight,karat 18/21/24)|currency,
+linkedHoldingIds), ReservationMovement(account-backed, signed), Holding gold(weight,karat 18/21/24)|currency,
 Liability (no UI yet, no interest fields), RecurringRule{kind income|expense|transfer,
 weekly|monthly|yearly × interval, dayOfMonth clamped, start/end, mode auto|confirm,
 variableAmount, active, skippedDates; transactions link via recurringRuleId+occurrenceDate}, MonthlyPlan{id plan-YYYY-MM,
