@@ -644,18 +644,30 @@ export interface UnassignedSummary {
   // The currencies with money left / with too little, native amounts (> 0.005 only).
   surpluses: CurrencyAmount[];
   deficits: CurrencyAmount[];
+  // Migrated movements not yet assigned to an account, per currency (signed net, only non-zero): reserved for a
+  // fund but "مش محدد حسابه". Already left out of byCurrency.
+  unresolved: { currency: CurrencyCode; amount: number }[];
   // Display only: every currency converted to EGP at today's rate.
   totalEGP: number;
   surplusEGP: number;
   deficitEGP: number;
 }
 
+// Migrated movements nobody could assign to one account yet ("محجوز ومش محدد حسابه"), per currency, each in its
+// own currency (signed net). They count toward their fund's total and are NOT on any account, so they are their own
+// line in the money picture: reserved by accounts + unresolved + unassigned = the cash, per currency.
+export function unresolvedByCurrency(state: Pick<State, 'unresolvedMovements'> & CurrencyListState): Record<CurrencyCode, number> {
+  const result = zeroByCurrency(state);
+  for (const m of state.unresolvedMovements) result[m.currency] = addIn(result[m.currency], m.amount, m.currency);
+  return result;
+}
+
 // Liquid money not yet reserved for a fund, per currency, each in its own currency (linked holdings are not cash):
-// Σ over the accounts of that currency of balance − reserved. Nothing is converted, so 1000 SAR stays 1000 SAR
-// whatever the rates do, and a SAR reservation never takes EGP money. (The v7 "implicit FX" of movements that
-// had no currency is gone: the migration assigned them to an account or left them unresolved.) Unresolved
-// migrated movements count toward their fund's total but never against any account's available money.
-// Negative means more is reserved than the accounts hold (INV-5 prevents it; shown, never hidden).
+// Σ over the accounts of that currency of available (balance − reserved) − what the unresolved migrated movements
+// hold in that currency (not counted twice: the fund has it, so it is not free). Nothing is converted, so 1000 SAR
+// stays 1000 SAR whatever the rates do, and a SAR reservation never takes EGP money. (The v7 "implicit FX" of
+// movements that had no currency is gone.) Negative means more is reserved than the accounts hold (INV-5 prevents
+// it; shown, never hidden).
 export function unassignedByCurrency(
   state: LiquidByCurrencyState & Pick<State, 'reservationMovements'>
 ): Record<CurrencyCode, number> {
@@ -664,14 +676,25 @@ export function unassignedByCurrency(
   for (const account of state.accounts) {
     reserved.set(account.currency, [...(reserved.get(account.currency) ?? []), accountReserved(state, account.id)]);
   }
+  const unresolved = unresolvedByCurrency(state);
   for (const [currency, amounts] of reserved) pool[currency] = roundIn(pool[currency] - sumIn(amounts, currency), currency);
+  for (const currency of Object.keys(pool)) pool[currency] = roundIn(pool[currency] - (unresolved[currency] ?? 0), currency);
   return pool;
 }
 
 export function unassignedSummary(state: State): UnassignedSummary {
   const rates = state.settings.rates;
   const byCurrency = unassignedByCurrency(state);
-  const summary: UnassignedSummary = { byCurrency, surpluses: [], deficits: [], totalEGP: 0, surplusEGP: 0, deficitEGP: 0 };
+  const unresolved = unresolvedByCurrency(state);
+  const summary: UnassignedSummary = {
+    byCurrency,
+    surpluses: [],
+    deficits: [],
+    unresolved: currencyList(state).flatMap((currency) => (Math.abs(unresolved[currency]) > MONEY_EPSILON ? [{ currency, amount: unresolved[currency] }] : [])),
+    totalEGP: 0,
+    surplusEGP: 0,
+    deficitEGP: 0,
+  };
   for (const currency of currencyList(state)) {
     const amount = byCurrency[currency];
     const egp = roundIn(toEGP(amount, currency, rates), 'EGP');
@@ -713,6 +736,9 @@ export interface FundAmount {
   // In `currency`, or in the fund's currency when `currency` is omitted.
   amount: number;
   currency?: CurrencyCode;
+  // The account to reserve on / release from; omitted = chosen by the default rules (largest available / largest
+  // reservation), which the sheet shows and lets the user change.
+  accountId?: string;
 }
 
 // Sum of `amounts` in EGP at current rates (unknown funds count as 0).

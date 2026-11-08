@@ -29,20 +29,26 @@ export function EditAccountSheet({ account, onClose }: EditAccountSheetProps) {
   const [balance, setBalance] = useState(String(Math.round(accountBalance(state, account.id) * 100) / 100));
 
   const handleSave = () => {
-    const saved = runAction('تعذّر الحفظ', () =>
-      state.updateAccount({
-        ...account,
-        name: name.trim(),
-        country: location,
-        openingBalance: openingBalanceForCurrentBalance(state, account.id, parseFloat(balance)),
-      })
+    const saved = runAction(
+      'تعذّر الحفظ',
+      (options) =>
+        state.updateAccount(
+          {
+            ...account,
+            name: name.trim(),
+            country: location,
+            openingBalance: openingBalanceForCurrentBalance(state, account.id, parseFloat(balance)),
+          },
+          options
+        ),
+      onClose
     );
     if (saved) onClose();
   };
 
   // Archive hides the account from pickers (it stays in history and in the "مؤرشفة" group).
   const toggleArchived = () => {
-    if (runAction('تعذّر الحفظ', () => state.updateAccount({ ...account, archived: !account.archived }))) onClose();
+    if (runAction('تعذّر الحفظ', (options) => state.updateAccount({ ...account, archived: !account.archived }, options), onClose)) onClose();
   };
 
   const handleDelete = () =>

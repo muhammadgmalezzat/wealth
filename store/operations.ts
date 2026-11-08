@@ -1,6 +1,6 @@
 import { isKnownCountry } from '@/constants/countries';
 import { isKnownCurrency } from '@/constants/currencyRegistry';
-import { roundMoney } from '@/utils/money';
+import { decimalsFor, roundIn, roundMoney, splitTo, sumIn } from '@/utils/money';
 import { convertCurrency, projectAmount, rateToEGP } from '@/utils/currency';
 import { withEgpRates } from '@/utils/rates';
 import { addMonthsToDate, isDateKey, isMonthKey, shiftDate, toDateKey } from '@/utils/dates';
@@ -9,6 +9,7 @@ import { priceSourceOf, type PriceFetchResult } from '@/utils/prices/fetchPrices
 import { planIdFor } from './migrations';
 import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
+import { NeedsCoverError, planRelease, planReserve, proportionalSplit, reservationsOn, shortfallsBetween, type OpOptions, type Shortfall } from './cover';
 import { feeCategoryId } from './defaultCategories';
 import { snapshotForNow } from './rateSnapshots';
 import { syncSnapshots } from './snapshots';
@@ -226,7 +227,9 @@ function accountInUse(state: State, accountId: string): boolean {
       tx.type === 'transfer' || tx.type === 'exchange'
         ? tx.fromAccountId === accountId || tx.toAccountId === accountId
         : tx.accountId === accountId
-    ) || state.recurringRules.some((r) => r.accountId === accountId)
+    ) ||
+    state.recurringRules.some((r) => r.accountId === accountId) ||
+    state.reservationMovements.some((m) => m.accountId === accountId)
   );
 }
 
@@ -244,14 +247,20 @@ export function addAccount(state: State, raw: NewAccount, ctx: OpContext): Patch
   return { accounts: [...state.accounts, account] };
 }
 
-export function updateAccount(state: State, raw: Editable<Account>, ctx: OpContext): Patch {
+// Editing an account may lower its balance (the opening balance is how "set the current balance" works), so it goes
+// through the cover gate like any other balance-reducing operation. The currency is locked while the account has
+// transactions, rules or reservations, and it cannot be archived while money is reserved on it.
+export function updateAccount(state: State, raw: Editable<Account>, ctx: OpContext, options?: OpOptions): Patch {
   const account = { ...raw, openingBalance: money(raw.openingBalance, raw.currency) };
   validateAccount(account);
   const existing = requireById(state.accounts, account.id, 'account');
   if (existing.currency !== account.currency && accountInUse(state, account.id)) {
     fail('ACCOUNT_CURRENCY_LOCKED', { id: account.id });
   }
-  return { accounts: replaceById(state.accounts, stamp(account, ctx), 'account') };
+  if (account.archived && !existing.archived && accountReserved(state, account.id) > 0) {
+    fail('ACCOUNT_HAS_RESERVATIONS', { id: account.id });
+  }
+  return settle(state, { accounts: replaceById(state.accounts, stamp(account, ctx), 'account') }, ctx, options);
 }
 
 export function deleteAccount(state: State, id: string, ctx: OpContext): Patch {
@@ -385,7 +394,7 @@ function rememberSelection(state: State, selection: LastUsedSelection): Settings
   return { ...state.settings, lastUsed: { ...state.settings.lastUsed, ...selection } };
 }
 
-export function addTransaction(state: State, raw: NewIncomeExpense, ctx: OpContext): Patch {
+function addTransactionCore(state: State, raw: NewIncomeExpense, ctx: OpContext): Patch {
   const input = { ...raw, amount: money(raw.amount, raw.currency) };
   const rates = snapshotForNow(state, ctx.now());
   const tx: IncomeExpenseTransaction = stamp(
@@ -407,8 +416,141 @@ export function addTransaction(state: State, raw: NewIncomeExpense, ctx: OpConte
   };
 }
 
+// --- The cover gate (INV-5) -------------------------------------------------
+//
+// Every operation that can lower an account's balance ends here. If the final state would leave an account with
+// more reserved than it holds, the operation is applied together with a COVER the user chose (reserved money
+// released in the same patch), or it throws NeedsCoverError and applies nothing. Going below zero on an account that
+// does not allow it needs an explicit confirmation too.
+
+function settle(state: State, patch: Patch, ctx: OpContext, options?: OpOptions, sourceTransactionId?: string): Patch {
+  const next: State = { ...state, ...patch };
+  const shortfalls = shortfallsBetween(state, next);
+  if (shortfalls.length === 0) return patch;
+
+  const unmet: Shortfall[] = [];
+  const moves: ReservationMovement[] = [];
+  const use = snapshotForNow(next, ctx.now());
+  for (const s of shortfalls) {
+    if (s.kind === 'negative') {
+      if (!options?.confirm?.negative) unmet.push(s);
+      continue;
+    }
+    const mine = (options?.cover ?? []).filter((c) => c.accountId === s.accountId);
+    const total = sumIn(mine.map((c) => c.amount), s.currency);
+    const fits = mine.every((c) => c.amount > 0 && c.amount <= reservation(next, c.fundId, s.accountId) + 0.005);
+    if (!fits || Math.abs(total - s.amount) > 0.005) {
+      unmet.push(s);
+      continue;
+    }
+    for (const c of mine) {
+      moves.push(newReservation(use.id, c.fundId, s.accountId, -c.amount, 'cover', undefined, ctx, sourceTransactionId ? { sourceTransactionId } : {}));
+    }
+  }
+  if (unmet.length > 0) throw new NeedsCoverError(unmet);
+  return {
+    ...patch,
+    ...ratePatch(use),
+    reservationMovements: [...next.reservationMovements, ...moves],
+  };
+}
+
+const isMove = (tx: Transaction): tx is TransferTransaction | ExchangeTransaction => tx.type === 'transfer' || tx.type === 'exchange';
+
+// Movements that belong to a transfer or exchange: its follow group (groupId = the transaction id, or id:…).
+const inGroupOf = (txId: string) => (m: ReservationMovement) => m.groupId === txId || !!m.groupId?.startsWith(`${txId}:`);
+
+// Reserved money that has to leave the source account WITH a transfer or exchange: the part of the amount above what
+// is available (after the fees charged to the source, which can never be paid from reserved money without a cover).
+// A transfer carries it automatically, split in proportion to each fund's reservation (C3, Q3: editable through
+// options.follow, the last fund takes the remainder; Q14: a notice, not a confirmation). An exchange converts it at
+// its own recorded rate and needs the user's confirmation first (D2 #2, C4). `state` is the state BEFORE the
+// transaction.
+function followMovements(
+  state: State,
+  tx: TransferTransaction | ExchangeTransaction,
+  ctx: OpContext,
+  options: OpOptions | undefined,
+  rateSnapshotId: string
+): ReservationMovement[] {
+  const from = state.accounts.find((a) => a.id === tx.fromAccountId);
+  const to = state.accounts.find((a) => a.id === tx.toAccountId);
+  if (!from || !to) return [];
+  const sent = tx.type === 'transfer' ? tx.amount : tx.sentAmount;
+  const feeOnSource = sumIn(tx.fees.filter((f) => f.accountId === from.id).map((f) => f.amount), from.currency);
+  const room = Math.max(0, accountAvailable(state, from.id) - feeOnSource);
+  // Lowest-priority LAST, so the last fund takes the rounding remainder; the order the sheet lists them in.
+  const reserved = reservationsOn(state, from.id).reverse();
+  // At most what is reserved there: anything beyond is a negative balance, which the gate decides.
+  const need = Math.min(money(sent - room, from.currency), sumIn(reserved.map((r) => r.amount), from.currency));
+  if (need <= 0.005) return [];
+
+  const split = options?.follow ?? proportionalSplit(reserved, need, from.currency);
+  const total = sumIn(split.map((s) => s.amount), from.currency);
+  const ok = Math.abs(total - need) <= 0.005 && split.every((s) => s.amount > 0 && s.amount <= reservation(state, s.fundId, from.id) + 0.005);
+  if (!ok) fail('FOLLOW_INVALID', { id: tx.id });
+  if (tx.type === 'exchange' && !options?.confirm?.conversion) {
+    throw new NeedsCoverError([{ kind: 'conversion', accountId: from.id, currency: from.currency, amount: need, suggested: split }]);
+  }
+
+  const kind: ReservationKind = tx.type === 'transfer' ? 'follow_transfer' : 'follow_exchange';
+  // Each fund's amount at the exchange's own rate (received ÷ sent); the parts add up to the converted total.
+  const converted =
+    tx.type === 'transfer'
+      ? split.map((s) => s.amount)
+      : splitTo(
+          money((need * tx.receivedAmount) / tx.sentAmount, to.currency),
+          split.map((s) => s.amount),
+          decimalsFor(to.currency)
+        );
+  const groupId = state.reservationMovements.some(inGroupOf(tx.id)) ? `${tx.id}:${ctx.newId()}` : tx.id;
+  return split.flatMap((s, i) => [
+    newReservation(rateSnapshotId, s.fundId, from.id, -s.amount, kind, undefined, ctx, { groupId }),
+    newReservation(rateSnapshotId, s.fundId, to.id, converted[i], kind, undefined, ctx, { groupId }),
+  ]);
+}
+
+// Gives back the reservations a transfer or exchange carried: for each fund, what is still reserved on the
+// destination (up to what travelled there) returns to the source, at the same rate. If a fund already released or
+// spent some of it, only what remains goes back and the rest is validated by the gate (it may need a cover).
+function reversalMovements(state: State, tx: TransferTransaction | ExchangeTransaction, ctx: OpContext, rateSnapshotId: string): ReservationMovement[] {
+  const group = state.reservationMovements.filter(inGroupOf(tx.id));
+  if (group.length === 0) return [];
+  const kind: ReservationKind = tx.type === 'transfer' ? 'follow_transfer' : 'follow_exchange';
+  const groupId = `${tx.id}:undo:${ctx.newId()}`;
+  const out: ReservationMovement[] = [];
+  for (const fundId of [...new Set(group.map((m) => m.fundId))]) {
+    const net = (accountId: string) => roundIn(sumIn(group.filter((m) => m.fundId === fundId && m.accountId === accountId).map((m) => m.amount), state.accounts.find((a) => a.id === accountId)?.currency ?? 'EGP'), state.accounts.find((a) => a.id === accountId)?.currency ?? 'EGP');
+    const atTo = net(tx.toAccountId);
+    const atFrom = net(tx.fromAccountId);
+    if (atTo <= 0.005) continue;
+    const cancel = Math.min(atTo, reservation(state, fundId, tx.toAccountId));
+    if (cancel <= 0.005) continue;
+    const to = state.accounts.find((a) => a.id === tx.toAccountId)!;
+    const from = state.accounts.find((a) => a.id === tx.fromAccountId)!;
+    // What goes back to the source is the same fraction of what left it.
+    const back = atTo > 0 ? money((cancel / atTo) * -atFrom, from.currency) : 0;
+    out.push(newReservation(rateSnapshotId, fundId, to.id, -money(cancel, to.currency), kind, undefined, ctx, { groupId }));
+    if (back > 0) out.push(newReservation(rateSnapshotId, fundId, from.id, back, kind, undefined, ctx, { groupId }));
+  }
+  return out;
+}
+
+export function addTransaction(state: State, raw: NewIncomeExpense, ctx: OpContext, options?: OpOptions): Patch {
+  const patch = addTransactionCore(state, raw, ctx);
+  return settle(state, patch, ctx, options, patch.transactions![0].id);
+}
+
 // Same-currency only (a transfer between currencies is addExchange). Fees are spending; the move itself is not.
-export function addTransfer(state: State, raw: NewTransfer, ctx: OpContext): Patch {
+// Reserved money that has to leave the source account travels with it (see followMovements).
+export function addTransfer(state: State, raw: NewTransfer, ctx: OpContext, options?: OpOptions): Patch {
+  const patch = addTransferCore(state, raw, ctx);
+  const tx = patch.transactions![0] as TransferTransaction;
+  const follows = followMovements(state, tx, ctx, options, tx.rateSnapshotId);
+  return settle(state, { ...patch, reservationMovements: [...state.reservationMovements, ...follows] }, ctx, options, tx.id);
+}
+
+function addTransferCore(state: State, raw: NewTransfer, ctx: OpContext): Patch {
   const use = snapshotForNow(state, ctx.now());
   const from = state.accounts.find((a) => a.id === raw.fromAccountId);
   const input = {
@@ -437,8 +579,17 @@ export function addTransfer(state: State, raw: NewTransfer, ctx: OpContext): Pat
 }
 
 // A currency exchange: money out of one account in its currency, the amount that actually arrived in
-// another, and optional fees. Validated as a whole and written as ONE record, so it is all or nothing.
-export function addExchange(state: State, raw: NewExchange, ctx: OpContext): Patch {
+// another, and optional fees. Validated as a whole and written as ONE record, so it is all or nothing. When the
+// amount sent goes beyond the source account's available money, the reserved part is converted at the exchange's
+// own rate: that needs options.confirm.conversion (otherwise NeedsCoverError with the proposed split).
+export function addExchange(state: State, raw: NewExchange, ctx: OpContext, options?: OpOptions): Patch {
+  const patch = addExchangeCore(state, raw, ctx);
+  const tx = patch.transactions![0] as ExchangeTransaction;
+  const follows = followMovements(state, tx, ctx, options, tx.rateSnapshotId);
+  return settle(state, { ...patch, reservationMovements: [...state.reservationMovements, ...follows] }, ctx, options, tx.id);
+}
+
+function addExchangeCore(state: State, raw: NewExchange, ctx: OpContext): Patch {
   const use = snapshotForNow(state, ctx.now());
   const from = state.accounts.find((a) => a.id === raw.fromAccountId);
   const to = state.accounts.find((a) => a.id === raw.toAccountId);
@@ -510,7 +661,27 @@ function syncPurchaseCost(
 // purchase stays a gold purchase (it owns a holding). createdAt and the rate snapshot
 // (rateSnapshotId) are kept from the original; the snapshot is re-taken only when the currency
 // changes, e.g. when the transaction moves to an account in another currency.
-export function updateTransaction(state: State, raw: Editable<Transaction>, ctx: OpContext): Patch {
+export function updateTransaction(state: State, raw: Editable<Transaction>, ctx: OpContext, options?: OpOptions): Patch {
+  const existing = requireById(state.transactions, raw.id, 'transaction');
+  // Reverse what the old record carried (reservations of a transfer / exchange), then apply the new values with the
+  // same rules; the gate compares the final state with the original one. All or nothing.
+  const reversal = isMove(existing) ? reversalMovements(state, existing, ctx, existing.rateSnapshotId) : [];
+  const reversed: State = { ...state, reservationMovements: [...state.reservationMovements, ...reversal] };
+  const patch = updateTransactionCore(reversed, raw, ctx);
+  const updated = patch.transactions!.find((x) => x.id === raw.id)!;
+  const follows = isMove(updated)
+    ? followMovements({ ...reversed, ...patch, transactions: reversed.transactions.filter((x) => x.id !== raw.id) }, updated, ctx, options, updated.rateSnapshotId)
+    : [];
+  return settle(
+    state,
+    { ...patch, reservationMovements: [...reversed.reservationMovements, ...follows] },
+    ctx,
+    options,
+    raw.id
+  );
+}
+
+function updateTransactionCore(state: State, raw: Editable<Transaction>, ctx: OpContext): Patch {
   const tx = roundTransaction(state, raw);
   const existing = requireById(state.transactions, tx.id, 'transaction');
   if ((existing.type === 'asset_purchase') !== (tx.type === 'asset_purchase')) {
@@ -541,7 +712,20 @@ export function updateTransaction(state: State, raw: Editable<Transaction>, ctx:
 
 // Deleting a gold purchase also deletes its holding (and unlinks it from funds), atomically:
 // otherwise the money would be counted twice, as cash and as gold.
-export function deleteTransaction(state: State, id: string, ctx: OpContext): Patch {
+export function deleteTransaction(state: State, id: string, ctx: OpContext, options?: OpOptions): Patch {
+  const tx = requireById(state.transactions, id, 'transaction');
+  const reversal = isMove(tx) ? reversalMovements(state, tx, ctx, tx.rateSnapshotId) : [];
+  const patch = deleteTransactionCore(state, id, ctx);
+  return settle(
+    state,
+    reversal.length > 0 ? { ...patch, reservationMovements: [...state.reservationMovements, ...reversal] } : patch,
+    ctx,
+    options,
+    id
+  );
+}
+
+function deleteTransactionCore(state: State, id: string, ctx: OpContext): Patch {
   const tx = requireById(state.transactions, id, 'transaction');
   const transactions = state.transactions.filter((t) => t.id !== id);
   if (tx.type !== 'asset_purchase') {
@@ -596,7 +780,12 @@ function goldHoldingFor(
 // Buys gold with cash in one atomic step: a gold holding whose cost is what was paid
 // (the amount in EGP at the current rates) and an asset_purchase transaction that takes it out of the account.
 // At cost, net worth is unchanged: cash goes down by exactly what the gold goes up.
-export function buyGold(state: State, purchase: GoldPurchase, ctx: OpContext): Patch {
+export function buyGold(state: State, purchase: GoldPurchase, ctx: OpContext, options?: OpOptions): Patch {
+  const patch = buyGoldCore(state, purchase, ctx);
+  return settle(state, patch, ctx, options, patch.transactions![0].id);
+}
+
+function buyGoldCore(state: State, purchase: GoldPurchase, ctx: OpContext): Patch {
   const account = requireById(state.accounts, purchase.accountId, 'account');
   const input = { ...purchase, amount: money(purchase.amount, account.currency) };
   assertPositive(input.amount, 'amount');
@@ -625,7 +814,11 @@ export function buyGold(state: State, purchase: GoldPurchase, ctx: OpContext): P
 
 // Edits a gold purchase and its holding together. The rate snapshot is kept unless the
 // paying account's currency changes; the holding's cost follows the (new) amount.
-export function updateGoldPurchase(state: State, txId: string, purchase: GoldPurchase, ctx: OpContext): Patch {
+export function updateGoldPurchase(state: State, txId: string, purchase: GoldPurchase, ctx: OpContext, options?: OpOptions): Patch {
+  return settle(state, updateGoldPurchaseCore(state, txId, purchase, ctx), ctx, options, txId);
+}
+
+function updateGoldPurchaseCore(state: State, txId: string, purchase: GoldPurchase, ctx: OpContext): Patch {
   const existing = requireById(state.transactions, txId, 'transaction');
   if (existing.type !== 'asset_purchase') fail('ASSET_PURCHASE_TYPE_LOCKED', { id: txId });
   const previousHolding = requireById(state.holdings, existing.holdingId, 'holding');
@@ -792,13 +985,7 @@ function newReservation(
 
 type ReservationState = Pick<State, 'accounts' | 'transactions' | 'reservationMovements'>;
 
-// Deterministic order: the account with the most of something first, then the oldest account, then the id.
-const byAmountDesc = (state: ReservationState, amountOf: (accountId: string) => number) => (a: Account, b: Account) =>
-  amountOf(b.id) - amountOf(a.id) || (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : 1);
-
-// Reserves `amount` of `currency` for the fund: on `accountId` when given, otherwise on the active accounts of that
-// currency with the most available money, split across them when one cannot hold it all (the last one takes the
-// rest). Never more than is available.
+// Reserves `amount` of `currency` for the fund by the default rules (planReserve: the sheet shows the same plan).
 function reserveFor(
   state: ReservationState,
   fundId: string,
@@ -809,25 +996,12 @@ function reserveFor(
   rateSnapshotId: string,
   accountId?: string
 ): ReservationMovement[] {
-  const candidates = state.accounts.filter((a) => a.currency === currency && !a.archived && (!accountId || a.id === accountId));
-  if (candidates.length === 0) fail('NO_ACCOUNT_IN_CURRENCY');
-  const available = (id: string) => Math.max(0, accountAvailable(state, id));
-  candidates.sort(byAmountDesc(state, available));
-  const moves: ReservationMovement[] = [];
-  let left = amount;
-  for (const account of candidates) {
-    if (left <= 0) break;
-    const take = Math.min(left, available(account.id));
-    if (take <= 0) continue;
-    moves.push(newReservation(rateSnapshotId, fundId, account.id, take, 'reserve', note, ctx));
-    left = money(left - take, currency);
-  }
-  if (left > 0) fail('RESERVE_EXCEEDS_AVAILABLE', { id: fundId });
-  return moves;
+  return planReserve(state, fundId, amount, currency, accountId).map((s) =>
+    newReservation(rateSnapshotId, fundId, s.accountId, s.amount, 'reserve', note, ctx)
+  );
 }
 
-// Gives `amount` of `currency` back from the fund's reservations: the accounts where it is over-reserved first,
-// then the largest reservation. Never more than the fund has reserved in that currency.
+// Gives `amount` of `currency` back from the fund's reservations (planRelease).
 function releaseFrom(
   state: ReservationState,
   fundId: string,
@@ -839,24 +1013,9 @@ function releaseFrom(
   kind: ReservationKind = 'release',
   accountId?: string
 ): ReservationMovement[] {
-  const held = state.accounts.filter((a) => a.currency === currency && (!accountId || a.id === accountId) && reservation(state, fundId, a.id) > 0);
-  const overReserved = (id: string) => (accountReserved(state, id) > Math.max(0, accountBalance(state, id)) ? 1 : 0);
-  held.sort(
-    (a, b) =>
-      overReserved(b.id) - overReserved(a.id) ||
-      byAmountDesc(state, (id) => reservation(state, fundId, id))(a, b)
+  return planRelease(state, fundId, amount, currency, accountId).map((s) =>
+    newReservation(rateSnapshotId, fundId, s.accountId, -s.amount, kind, note, ctx)
   );
-  const moves: ReservationMovement[] = [];
-  let left = amount;
-  for (const account of held) {
-    if (left <= 0) break;
-    const take = Math.min(left, reservation(state, fundId, account.id));
-    if (take <= 0) continue;
-    moves.push(newReservation(rateSnapshotId, fundId, account.id, -take, kind, note, ctx));
-    left = money(left - take, currency);
-  }
-  if (left > 0) fail('WITHDRAW_EXCEEDS_FUND', { id: fundId });
-  return moves;
 }
 
 // Sets `amount` of `currency` aside for the fund (the fund's currency when omitted), from the account with the
@@ -916,9 +1075,9 @@ export function allocateMany(
   const use = snapshotForNow(state, ctx.now());
   let draft: ReservationState = state;
   const added: ReservationMovement[] = [];
-  for (const { fundId, amount, currency } of allocations) {
+  for (const { fundId, amount, currency, accountId } of allocations) {
     const fund = requireById(state.funds, fundId, 'fund');
-    const moves = reserveFor(draft, fundId, amount, currency ?? fund.currency, note, ctx, use.id);
+    const moves = reserveFor(draft, fundId, amount, currency ?? fund.currency, note, ctx, use.id, accountId);
     added.push(...moves);
     draft = { ...draft, reservationMovements: [...draft.reservationMovements, ...moves] };
   }
@@ -942,9 +1101,9 @@ export function withdrawMany(
   const use = snapshotForNow(state, ctx.now());
   let draft: ReservationState = state;
   const added: ReservationMovement[] = [];
-  for (const { fundId, amount, currency } of withdrawals) {
+  for (const { fundId, amount, currency, accountId } of withdrawals) {
     const fund = requireById(state.funds, fundId, 'fund');
-    const moves = releaseFrom(draft, fundId, amount, currency ?? fund.currency, note, ctx, use.id);
+    const moves = releaseFrom(draft, fundId, amount, currency ?? fund.currency, note, ctx, use.id, 'release', accountId);
     added.push(...moves);
     draft = { ...draft, reservationMovements: [...draft.reservationMovements, ...moves] };
   }
@@ -1010,7 +1169,7 @@ export interface SinkingPayment {
 // Records a sinking fund's bill as one atomic step: the expense transaction, a `spend` movement consuming the
 // fund's reservation on the paying account (as much as it holds there; the rest of the bill is paid from the
 // account's available money), and nextDueDate advanced by one cycle.
-export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpContext): Patch {
+export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpContext, options?: OpOptions): Patch {
   const fund = requireById(state.funds, payment.fundId, 'fund');
   if (fund.type !== 'sinking') fail('NOT_A_SINKING_FUND', { id: fund.id });
   if (!fund.frequency || !fund.nextDueDate) fail('SINKING_SCHEDULE_REQUIRED', { id: fund.id });
@@ -1024,7 +1183,7 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
   };
 
   apply(
-    addTransaction(
+    addTransactionCore(
       draft,
       {
         type: 'expense',
@@ -1056,13 +1215,21 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
     funds: draft.funds.map((f) => (f.id === fund.id ? stamp({ ...f, nextDueDate: nextDue }, ctx) : f)),
   });
 
-  return {
-    transactions: draft.transactions,
-    reservationMovements: draft.reservationMovements,
-    funds: draft.funds,
-    settings: draft.settings,
-    rateSnapshots: draft.rateSnapshots,
-  };
+  // D12: the fund's own reservation on the paying account is spent first, then the account's available money; if
+  // that is still not enough the gate asks for a cover. A bill is never paid silently from other funds' money.
+  return settle(
+    state,
+    {
+      transactions: draft.transactions,
+      reservationMovements: draft.reservationMovements,
+      funds: draft.funds,
+      settings: draft.settings,
+      rateSnapshots: draft.rateSnapshots,
+    },
+    ctx,
+    options,
+    paid.id
+  );
 }
 
 // --- Holdings ---------------------------------------------------------------
@@ -1388,26 +1555,58 @@ function occurrenceTransaction(
 // changes nothing. A rule that can't be recorded (e.g. its account was deleted) is left
 // pending instead of blocking the others; everything else is applied in one patch.
 export function processDue(state: State, ctx: OpContext): Patch {
+  return processDueCore(state, ctx).patch;
+}
+
+// The auto occurrences processDue could NOT record because they would eat into reserved money (or an account that
+// does not allow it going below zero): they stay due, flagged "محتاج تغطية", and the user confirms them with a cover.
+export interface BlockedOccurrence {
+  ruleId: string;
+  date: string;
+  shortfalls: Shortfall[];
+}
+
+export function blockedDue(state: State, ctx: OpContext): BlockedOccurrence[] {
+  return processDueCore(state, ctx).blocked;
+}
+
+function processDueCore(state: State, ctx: OpContext): { patch: Patch; blocked: BlockedOccurrence[] } {
   const due = dueOccurrences(state, todayOf(ctx), 'auto');
-  if (due.length === 0) return {};
+  if (due.length === 0) return { patch: {}, blocked: [] };
   const use = snapshotForNow(state, ctx.now());
+  // Each occurrence is checked against what the earlier ones already did (INV-5): there is no user to ask.
+  let draft: State = state;
   const created: Transaction[] = [];
   const touched = new Set<string>();
+  const blocked: BlockedOccurrence[] = [];
   for (const { rule, date } of due) {
     try {
-      created.push(occurrenceTransaction(state, rule, date, {}, ctx, use.id));
+      const tx = occurrenceTransaction(draft, rule, date, {}, ctx, use.id);
+      const follows = isMove(tx) && tx.type === 'transfer' ? followMovements(draft, tx, ctx, undefined, use.id) : [];
+      const next: State = { ...draft, transactions: [tx, ...draft.transactions], reservationMovements: [...draft.reservationMovements, ...follows] };
+      const shortfalls = shortfallsBetween(draft, next);
+      if (shortfalls.length > 0) {
+        blocked.push({ ruleId: rule.id, date, shortfalls });
+        continue;
+      }
+      draft = next;
+      created.push(tx);
       touched.add(rule.id);
     } catch (error) {
-      if (!(error instanceof FinanceValidationError)) throw error;
+      if (!(error instanceof FinanceValidationError) && !(error instanceof NeedsCoverError)) throw error;
     }
   }
-  if (created.length === 0) return {};
-  const transactions = [...created.reverse(), ...state.transactions];
+  if (created.length === 0) return { patch: {}, blocked };
+  const transactions = [...created].reverse().concat(state.transactions);
   const after = { ...state, transactions };
   return {
-    ...ratePatch(use),
-    transactions,
-    recurringRules: state.recurringRules.map((r) => (touched.has(r.id) ? stamp(withNextDate(after, r, ctx), ctx) : r)),
+    blocked,
+    patch: {
+      ...ratePatch(use),
+      transactions,
+      ...(draft.reservationMovements !== state.reservationMovements ? { reservationMovements: draft.reservationMovements } : {}),
+      recurringRules: state.recurringRules.map((r) => (touched.has(r.id) ? stamp(withNextDate(after, r, ctx), ctx) : r)),
+    },
   };
 }
 
@@ -1427,21 +1626,30 @@ export function confirmOccurrence(
   ruleId: string,
   occurrenceDate: string,
   overrides: OccurrenceOverrides,
-  ctx: OpContext
+  ctx: OpContext,
+  options?: OpOptions
 ): Patch {
   const rule = requireDue(state, ruleId, occurrenceDate);
   const use = snapshotForNow(state, ctx.now());
   const tx = occurrenceTransaction(state, rule, occurrenceDate, overrides, ctx, use.id);
+  const follows = isMove(tx) ? followMovements(state, tx, ctx, options, use.id) : [];
   const transactions = [tx, ...state.transactions];
-  return {
-    ...ratePatch(use),
-    transactions,
-    recurringRules: replaceById(
-      state.recurringRules,
-      stamp(withNextDate({ ...state, transactions }, rule, ctx), ctx),
-      'recurringRule'
-    ),
-  };
+  return settle(
+    state,
+    {
+      ...ratePatch(use),
+      transactions,
+      reservationMovements: [...state.reservationMovements, ...follows],
+      recurringRules: replaceById(
+        state.recurringRules,
+        stamp(withNextDate({ ...state, transactions }, rule, ctx), ctx),
+        'recurringRule'
+      ),
+    },
+    ctx,
+    options,
+    tx.id
+  );
 }
 
 // "تخطّي": marks one occurrence as skipped.

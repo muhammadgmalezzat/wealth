@@ -215,18 +215,18 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       const existing = transaction
         ? { ...occurrenceLink, id: transaction.id, createdAt: transaction.createdAt, rateSnapshotId: transaction.rateSnapshotId }
         : null;
-      const saved = runAction('تعذّر الحفظ', () => {
+      const saved = runAction('تعذّر الحفظ', (options) => {
         if (crossCurrency) {
           // The received amount is required: no rate fills it in.
           const exchange = { ...common, sentAmount: value, receivedAmount: receivedValue ?? NaN };
-          if (existing) state.updateTransaction({ ...exchange, ...existing, type: 'exchange' });
-          else state.addExchange(exchange);
+          if (existing) state.updateTransaction({ ...exchange, ...existing, type: 'exchange' }, options);
+          else state.addExchange(exchange, options);
         } else {
           const transfer = { ...common, amount: value };
-          if (existing) state.updateTransaction({ ...transfer, ...existing, type: 'transfer' });
-          else state.addTransfer(transfer);
+          if (existing) state.updateTransaction({ ...transfer, ...existing, type: 'transfer' }, options);
+          else state.addTransfer(transfer, options);
         }
-      });
+      }, onClose);
       if (saved) onClose();
       return;
     }
@@ -251,8 +251,10 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
           ...(editedGold?.note ? { note: editedGold.note } : {}),
         },
       };
-      const saved = runAction('تعذّر الحفظ', () =>
-        transaction ? state.updateGoldPurchase(transaction.id, purchase) : state.buyGold(purchase)
+      const saved = runAction(
+        'تعذّر الحفظ',
+        (options) => (transaction ? state.updateGoldPurchase(transaction.id, purchase, options) : state.buyGold(purchase, options)),
+        onClose
       );
       if (saved) onClose();
       return;
@@ -273,9 +275,9 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       ...noteField,
       ...(type === 'expense' && oneTime ? { oneTime: true } : {}),
     };
-    const saved = runAction('تعذّر الحفظ', () => {
+    const saved = runAction('تعذّر الحفظ', (options) => {
       if (!transaction) {
-        state.addTransaction(fields);
+        state.addTransaction(fields, options);
         return;
       }
       // Keep links that the form doesn't edit (recurring occurrence, liability payment).
@@ -286,15 +288,18 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
               ...(transaction.liabilityId && type === 'expense' ? { liabilityId: transaction.liabilityId } : {}),
             }
           : occurrenceLink;
-      state.updateTransaction({
-        ...fields,
-        ...links,
-        id: transaction.id,
-        createdAt: transaction.createdAt,
-        // The store keeps this unless the currency changed.
-        rateSnapshotId: transaction.rateSnapshotId,
-      });
-    });
+      state.updateTransaction(
+        {
+          ...fields,
+          ...links,
+          id: transaction.id,
+          createdAt: transaction.createdAt,
+          // The store keeps this unless the currency changed.
+          rateSnapshotId: transaction.rateSnapshotId,
+        },
+        options
+      );
+    }, onClose);
     if (saved) onClose();
   };
 
@@ -346,7 +351,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       confirmText: 'حذف',
       cancelText: 'إلغاء',
       onConfirm: () => {
-        if (runAction('تعذّر الحذف', () => state.deleteTransaction(transaction.id))) onClose();
+        if (runAction('تعذّر الحذف', (options) => state.deleteTransaction(transaction.id, options), onClose)) onClose();
       },
     });
   };

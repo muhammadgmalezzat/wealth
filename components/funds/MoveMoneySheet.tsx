@@ -6,9 +6,11 @@ import { AppText } from '@/components/ui/AppText';
 import { FormField } from '@/components/ui/FormField';
 import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { formatMoney } from '@/components/ui/formatMoney';
+import { Chip, ChipRow } from '@/components/ui/Chip';
 import { Segment } from '@/components/ui/Segment';
 import { currencyNameAr } from '@/constants/currencies';
 import { space } from '@/constants/theme';
+import { planRelease, planReserve, type AccountShare } from '@/store/cover';
 import { currencyList, fundCashByCurrency, unassignedByCurrency } from '@/store/selectors';
 import type { CurrencyCode, Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
@@ -35,6 +37,8 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
   const [picked, setPicked] = useState<CurrencyCode>(fund.currency);
   const [amountText, setAmountText] = useState('');
   const [note, setNote] = useState('');
+  // null = chosen automatically (shown below); an account id once the user picks one.
+  const [accountPick, setAccountPick] = useState<string | null>(null);
 
   const cash = fundCashByCurrency(state, fund.id);
   const held = currencyList(state).filter((c) => cash[c] > 0.005);
@@ -47,14 +51,28 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
   const amount = parseAmount(amountText);
   const foreign = currency !== fund.currency;
 
+  // Which account(s) the money comes from / goes back to: the default rules' plan, shown and changeable.
+  const accountChoices = state.accounts.filter((a) => a.currency === currency && !a.archived);
+  const pickedId = accountPick && accountChoices.some((a) => a.id === accountPick) ? accountPick : undefined;
+  let plan: AccountShare[] = [];
+  let planError = false;
+  if (amount !== null) {
+    try {
+      plan = mode === 'allocate' ? planReserve(state, fund.id, amount, currency, pickedId) : planRelease(state, fund.id, amount, currency, pickedId);
+    } catch {
+      planError = true;
+    }
+  }
+  const accountName = (id: string) => state.accounts.find((a) => a.id === id)?.name ?? '—';
+
   const handleSave = () => {
     const value = amount ?? NaN;
     const trimmed = note.trim() || undefined;
     const saved = runAction('تعذّر الحفظ', () =>
       mode === 'allocate'
         ? // allocateMany enforces that the money is actually unassigned, in this currency.
-          state.allocateMany([{ fundId: fund.id, amount: value, currency }], trimmed)
-        : state.withdrawFromFund(fund.id, value, trimmed, currency)
+          state.allocateMany([{ fundId: fund.id, amount: value, currency, ...(pickedId ? { accountId: pickedId } : {}) }], trimmed)
+        : state.withdrawFromFund(fund.id, value, trimmed, currency, pickedId)
     );
     if (saved) onClose();
   };
@@ -92,6 +110,25 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
         <AppText variant="caption" color="textSecondary" align="center">
           بسعر النهارده ≈ {formatMoney(convertCurrency(amount, currency, fund.currency, state.settings.rates), fund.currency)} في الصندوق
         </AppText>
+      )}
+      {accountChoices.length > 0 && (
+        <View style={styles.note}>
+          <AppText variant="secondary" color="textSecondary">
+            {mode === 'allocate' ? 'من أنهي حساب' : 'من أنهي حساب هيرجع'}
+          </AppText>
+          <ChipRow>
+            <Chip label="تلقائي" selected={!pickedId} onPress={() => setAccountPick(null)} />
+            {accountChoices.map((a) => (
+              <Chip key={a.id} label={a.name} selected={pickedId === a.id} onPress={() => setAccountPick(a.id)} />
+            ))}
+          </ChipRow>
+          {plan.length > 0 && !planError && (
+            <AppText variant="caption" color="textSecondary" accessibilityLabel="الحساب المختار">
+              {plan.map((s) => `${formatMoney(s.amount, currency)} ${mode === 'allocate' ? 'من' : 'لـ'} ${accountName(s.accountId)}`).join('، ')}
+              {pickedId ? '' : ' (اختيار تلقائي)'}
+            </AppText>
+          )}
+        </View>
       )}
       <View style={styles.note}>
         <FormField label="ملاحظة (اختياري)">

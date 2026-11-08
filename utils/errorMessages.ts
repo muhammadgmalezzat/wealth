@@ -85,6 +85,8 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   LIABILITY_CURRENCY_LOCKED: () => 'لا يمكن تغيير عملة التزام عليه دفعات',
   RESERVE_EXCEEDS_AVAILABLE: () => 'المبلغ أكبر من المتاح في حساباتك بالعملة دي؛ حرّر من صندوق تاني أو انقل بينهم الأول',
   NO_ACCOUNT_IN_CURRENCY: () => 'مفيش حساب بالعملة دي',
+  ACCOUNT_HAS_RESERVATIONS: () => 'فيه فلوس محجوزة للصناديق في الحساب ده؛ حرّرها أو انقلها الأول',
+  FOLLOW_INVALID: () => 'الفلوس المحجوزة اللي هتتنقل مع التحويل لازم تساوي اللي لازم يخرج من الحساب',
   WITHDRAW_EXCEEDS_FUND: () => 'لا يمكن سحب أكثر من المبلغ المخصص نقداً في الصندوق',
   HOLDING_ALREADY_LINKED: () => 'هذا الاستثمار مربوط بصندوق آخر بالفعل',
   INSUFFICIENT_UNASSIGNED: () => 'المبلغ أكبر من الفلوس اللي بدون وظيفة',

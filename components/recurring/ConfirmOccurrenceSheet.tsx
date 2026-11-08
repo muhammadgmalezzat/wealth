@@ -35,15 +35,23 @@ export function ConfirmOccurrenceSheet({ rule, occurrenceDate, onClose }: Confir
   const crossCurrency = rule.kind === 'exchange' && !!toAccount;
 
   const handleSave = () => {
-    const saved = runAction('تعذّر التسجيل', () =>
-      state.confirmOccurrence(rule.id, occurrenceDate, {
-        amount: parseAmount(amountText) ?? NaN,
-        date,
-        accountId,
-        // What arrived is always entered, never worked out from a rate.
-        ...(crossCurrency ? { toAmount: parseAmount(toAmountText) ?? NaN } : {}),
-        ...(note.trim() ? { note: note.trim() } : {}),
-      })
+    const saved = runAction(
+      'تعذّر التسجيل',
+      (options) =>
+        state.confirmOccurrence(
+          rule.id,
+          occurrenceDate,
+          {
+            amount: parseAmount(amountText) ?? NaN,
+            date,
+            accountId,
+            // What arrived is always entered, never worked out from a rate.
+            ...(crossCurrency ? { toAmount: parseAmount(toAmountText) ?? NaN } : {}),
+            ...(note.trim() ? { note: note.trim() } : {}),
+          },
+          options
+        ),
+      onClose
     );
     if (saved) onClose();
   };

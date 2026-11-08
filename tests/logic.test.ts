@@ -66,6 +66,8 @@ import {
 import * as nba from '@/store/nextActions';
 import * as reviewLogic from '@/store/review';
 import { assertInvariants, invariantViolations } from '@/store/invariants';
+import { mergeOptions, NeedsCoverError, proposedOptions, type OpOptions } from '@/store/cover';
+import { runActionWith, type CoverRequest } from '@/utils/runActionCore';
 import * as analyticsUi from '@/components/analytics/analyticsUi';
 import * as exchangeUi from '@/components/transactions/exchangeUi';
 import * as sankeyLayout from '@/components/analytics/sankeyLayout';
@@ -233,6 +235,25 @@ const account = (
   country,
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: T0,
+  // Most fixtures spend from accounts that start empty: they may go below zero. The cover and overdraft tests use
+  // strictAccount() instead.
+  allowNegative: true,
+});
+
+// An expense written straight into the ledger, bypassing the cover gate: a state that is ALREADY over-reserved (data
+// from before the gate, or a fixture of the shortfall helpers).
+const overspend = (s: FinanceState, input: { amount: number; currency: string; accountId: string; categoryId: string; date: string }): FinanceState => ({
+  ...s,
+  transactions: [
+    { id: `over-${s.transactions.length}`, type: 'expense', rateSnapshotId: S125.id, createdAt: T0, updatedAt: T0, ...input } as Transaction,
+    ...s.transactions,
+  ],
+});
+
+// An account that may NOT go below zero (the default for real accounts).
+const strictAccount = (id: string, currency: string, openingBalance: number, country: string = 'EG') => ({
+  ...account(id, currency, openingBalance, country),
+  allowNegative: false,
 });
 
 // A data-v7 account (the shape the frozen migrations read: `location`, not `country`).
@@ -336,7 +357,8 @@ describe('migration', () => {
     // Two EGP accounts could hold it, so the migration does not pick one: it waits, unresolved, and counts
     // toward the fund but not against any account's available money.
     assert.deepEqual([rows[0].unresolved, v2.unresolvedMovements[0].reason], [true, 'insufficient']);
-    approx(unassignedEGP(v2), liquid);
+    // Unresolved money is not free: the fund has it (its own line, "محجوز ومش محدد حسابه"), as in v7.
+    approx(unassignedEGP(v2), 0);
     approx(fundCurrent(v2, 'g-big'), goldMarket + liquid);
     approx(fundCurrent(v2, 'g-small'), 0);
   });
@@ -390,7 +412,7 @@ describe('migration', () => {
       holdings: 1,
       funds: 2,
       netWorthEGP: liquid + goldMarket,
-      unassignedEGP: liquid,
+      unassignedEGP: 0,
     });
   });
 });
@@ -1092,7 +1114,7 @@ describe('covering overspent fund money', () => {
         resv('m2', 'B', 'egp', 3000, '2026-09-01'),
       ],
     };
-    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 5000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-bills', date: '2026-10-10' }, makeCtx()));
+    s = overspend(s, { amount: 5000, currency: 'EGP', accountId: 'egp', categoryId: 'cat-essentials-bills', date: '2026-10-10' });
     return s;
   };
 
@@ -3826,14 +3848,7 @@ describe('native amounts never drift with the rates', () => {
   const allocate = (s: FinanceState, amount: number, currency?: 'EGP' | 'SAR' | 'USD', fundId = 'F') =>
     apply(s, ops.allocateMany(s, [{ fundId, amount, ...(currency ? { currency } : {}) }], undefined, makeCtx()));
   const spendSar = (s: FinanceState, amount: number) =>
-    apply(
-      s,
-      ops.addTransaction(
-        s,
-        { type: 'expense', amount, currency: 'SAR', accountId: 'sar', categoryId: 'cat-essentials-bills', date: '2026-10-10' },
-        makeCtx()
-      )
-    );
+    overspend(s, { amount, currency: 'SAR', accountId: 'sar', categoryId: 'cat-essentials-bills', date: '2026-10-10' });
 
   it('a 1000 SAR account stays 1000 SAR when SAR_EGP moves 13 → 15; only its EGP value follows', () => {
     const before = base(13);
@@ -5523,9 +5538,6 @@ const PER_ROW_SECTIONS = ['accounts', 'transactions', 'movements', 'holdings', '
 function assertRoundingOnly(v7: ReturnType<typeof richV7>, v8: FinanceState) {
   const rows = v7.transactions.length + v7.fundMovements.length + v7.accounts.length + v7.holdings.length + v7.liabilities.length;
   const beyond = diffReports(oracleReport(v7, ORACLE_NOW), reportV8(v8, ORACLE_NOW), 1e-9).filter((d) => {
-    // The one documented difference (tested below): money of migrated movements nobody could assign to an account
-    // yet is unassigned, and v7's implicit FX between currencies is gone.
-    if (d.path.startsWith('unassignedByCurrency.') || d.path === 'analytics.runwayEGP.unassigned') return false;
     const delta = Math.abs(Number(d.v8) - Number(d.oracle));
     const bound = PER_ROW_SECTIONS.includes(d.path.split('.')[0]) ? 0.005 : 0.005 * rows;
     return !(delta <= bound + 1e-9);
@@ -6391,14 +6403,29 @@ describe('v7 → v8 funds: account-backed reservations (D9)', () => {
     }
   });
 
-  it('unassigned money differs from v7 only by the unresolved movements, per currency', () => {
+  it('unassigned money per currency is exactly what v7 said: unresolved money is counted once, as its own line', () => {
     const v7 = richV7();
     const v8 = applyV8Steps(v7, ctx);
     const old = oracleReport(v7, ORACLE_NOW).unassignedByCurrency;
     const now = sel.unassignedByCurrency(v8);
-    const unresolved = unresolvedByCurrency(v8);
-    assert.ok(Object.keys(unresolved).length > 0, 'the fixture has unresolved movements');
-    for (const c of Object.keys(now)) assert.ok(Math.abs(now[c] - old[c] - (unresolved[c] ?? 0)) <= 0.005, c);
+    assert.ok(v8.unresolvedMovements.length > 0, 'the fixture has unresolved movements');
+    for (const c of Object.keys(now)) assert.ok(Math.abs(now[c] - old[c]) <= 0.005, c);
+    const lines = Object.fromEntries(sel.unassignedSummary(v8).unresolved.map((l) => [l.currency, l.amount]));
+    assert.deepEqual(lines, Object.fromEntries(Object.entries(unresolvedByCurrency(v8)).filter(([, amount]) => Math.abs(amount) > 0.005)));
+  });
+
+  it('INV-8: reserved by accounts + unresolved + unassigned is exactly the cash, per currency, for any fixture', () => {
+    for (const v7 of [richV7(), ...(localSeedV7() ? [localSeedV7()!] : [])]) {
+      const v8 = applyV8Steps(v7, ctx);
+      const cash = sel.liquidByCurrency(v8);
+      const unassigned = sel.unassignedByCurrency(v8);
+      const unresolved = sel.unresolvedByCurrency(v8);
+      for (const c of Object.keys(cash)) {
+        const reserved = roundTo(v8.accounts.filter((a) => a.currency === c).reduce((sum, a) => sum + sel.accountReserved(v8, a.id), 0), 2);
+        // The fund totals are reserved + unresolved; with the free money they never exceed the cash (they add up to it).
+        assert.equal(roundTo(reserved + unresolved[c] + unassigned[c], 2), cash[c], c);
+      }
+    }
   });
 
   it('assigned movements keep their id, date, note and rates, as kind adjust on one account; the reasons are listed', () => {
@@ -6514,7 +6541,7 @@ describe('reservations: money of one account set aside for a fund (D1, D10)', ()
     assert.deepEqual(out.reservationMovements.slice(2).map((m) => [m.accountId, m.amount, m.kind]), [['cash', -500, 'release'], ['bank', -100, 'release']]);
     assert.throws(() => ops.withdrawFromFund(s, 'G', 801, undefined, makeCtx()), { code: 'WITHDRAW_EXCEEDS_FUND' });
     // Spending 400 of the bank's 600 leaves it 100 over-reserved: that account is released first.
-    s = apply(s, ops.addTransaction(s, { type: 'expense', amount: 400, currency: 'SAR', accountId: 'bank', categoryId: 'cat-essentials-bills', date: '2026-10-10' }, makeCtx()));
+    s = overspend(s, { amount: 400, currency: 'SAR', accountId: 'bank', categoryId: 'cat-essentials-bills', date: '2026-10-10' });
     assert.equal(sel.accountAvailable(s, 'bank'), -100);
     const fixed = apply(s, ops.withdrawFromFund(s, 'G', 100, undefined, makeCtx()));
     assert.equal(fixed.reservationMovements.at(-1)!.accountId, 'bank');
@@ -6566,7 +6593,11 @@ describe('reservations: money of one account set aside for a fund (D1, D10)', ()
       unresolvedMovements: [{ id: 'u1', fundId: 'G', amount: 300, currency: 'SAR', date: '2026-09-01', rateSnapshotId: S125.id, reason: 'ambiguous', updatedAt: T0 }],
     };
     assert.equal(sel.fundAllocated(s, 'G'), 300);
-    assert.deepEqual(sel.unassignedByCurrency(s), { EGP: 5000, SAR: 1400, USD: 0 });
+    // 1,400 SAR are held by the accounts; the fund has 300 of it as an unresolved movement, so 1,100 are free: the
+    // 300 is not counted twice (in the fund AND as unassigned), it is its own line.
+    assert.deepEqual(sel.unassignedByCurrency(s), { EGP: 5000, SAR: 1100, USD: 0 });
+    assert.deepEqual(sel.unassignedSummary(s).unresolved, [{ currency: 'SAR', amount: 300 }]);
+    assert.deepEqual(sel.unresolvedByCurrency(s), { EGP: 0, SAR: 300, USD: 0 });
     // It cannot be released (it is not on an account) and the total cannot be edited below it.
     assert.throws(() => ops.withdrawFromFund(s, 'G', 100, undefined, makeCtx()), { code: 'WITHDRAW_EXCEEDS_FUND' });
     assert.throws(() => ops.editFund(s, 'G', { name: 'G', targetAmount: 5000, cashAllocation: 100 }, makeCtx()), { code: 'WITHDRAW_EXCEEDS_FUND' });
@@ -6581,5 +6612,373 @@ describe('reservations: money of one account set aside for a fund (D1, D10)', ()
     const gone = { ...s, reservationMovements: [resv('r1', 'G', 'nope', 5)] };
     assert.ok(invariantViolations(gone).some((v) => v.code === 'UNKNOWN_ACCOUNT'));
     assert.throws(() => assertInvariants(over), { name: 'InvariantError' });
+  });
+});
+
+// --- The cover gate (INV-5), follow rules and the cover flow (design C, D2, D4–D8, D11, D12) ---------------
+
+describe('cover and follow: the design examples', () => {
+  // The design's starting state (rates: 1 SAR = 12.5 EGP).
+  //  A1 كاش مصر EGP 20,000 · reserved 8,000 (F1) · available 12,000
+  //  A2 بنك SAR 5,000 · reserved 2,500 (F2 2,000 + F3 500) · available 2,500
+  //  A3 كاش ريال SAR 1,000 · available 1,000
+  const start = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [strictAccount('A1', 'EGP', 20000), strictAccount('A2', 'SAR', 5000, 'SA'), strictAccount('A3', 'SAR', 1000, 'SA')],
+    funds: [
+      fund({ id: 'F1', priority: 1, targetAmount: 100000 }),
+      fund({ id: 'F2', priority: 2, currency: 'SAR', targetAmount: 10000 }),
+      fund({ id: 'F3', priority: 3, currency: 'SAR', targetAmount: 5000, type: 'sinking', frequency: 'yearly', nextDueDate: '2026-12-01' }),
+    ],
+    reservationMovements: [resv('r1', 'F1', 'A1', 8000), resv('r2', 'F2', 'A2', 2000), resv('r3', 'F3', 'A2', 500)],
+  });
+  const expense = (accountId: string, amount: number, currency: 'EGP' | 'SAR' = 'SAR'): ops.NewIncomeExpense => ({
+    type: 'expense', amount, currency, accountId, categoryId: 'cat-essentials-bills', date: '2026-10-10',
+  });
+  const room = (s: FinanceState, id: string) => [sel.accountBalance(s, id), sel.accountReserved(s, id), sel.accountAvailable(s, id)];
+  const needsCover = (fn: () => unknown): NeedsCoverError => {
+    try {
+      fn();
+    } catch (e) {
+      assert.ok(e instanceof NeedsCoverError, String(e));
+      return e;
+    }
+    throw new Error('expected NeedsCoverError');
+  };
+
+  it('the starting state satisfies INV-5', () => {
+    assert.deepEqual(invariantViolations(start()), []);
+    assert.deepEqual(room(start(), 'A2'), [5000, 2500, 2500]);
+  });
+
+  it('C1 / D2: an expense within available saves with no prompt and no reservation movement', () => {
+    const s = start();
+    const after = apply(s, ops.addTransaction(s, expense('A2', 300), makeCtx()));
+    assert.deepEqual(room(after, 'A2'), [4700, 2500, 2200]);
+    assert.equal(after.reservationMovements.length, s.reservationMovements.length);
+  });
+
+  it('C2 / D2 / D3: touching reserved money asks first, writes nothing, then covers atomically and exactly', () => {
+    const s = start();
+    const frozen = JSON.stringify(s);
+    const error = needsCover(() => ops.addTransaction(s, expense('A2', 2800), makeCtx()));
+    assert.equal(JSON.stringify(s), frozen);
+    // 2,800 − 2,500 available = 300 short on A2; lowest priority (F3) first, capped by what it holds.
+    assert.deepEqual(error.shortfalls.map((x) => [x.kind, x.accountId, x.currency, x.amount, x.suggested]), [['cover', 'A2', 'SAR', 300, [{ fundId: 'F3', amount: 300 }]]]);
+
+    // A selection that does not add up exactly, or takes more than a fund holds on that account, is not a cover.
+    for (const bad of [[{ fundId: 'F3', accountId: 'A2', amount: 299 }], [{ fundId: 'F3', accountId: 'A2', amount: 301 }], [{ fundId: 'F1', accountId: 'A2', amount: 300 }]]) {
+      needsCover(() => ops.addTransaction(s, expense('A2', 2800), makeCtx(), { cover: bad }));
+    }
+    // Choosing F2 instead is allowed: it holds enough.
+    const cover = [{ fundId: 'F2', accountId: 'A2', amount: 300 }];
+    const after = apply(s, ops.addTransaction(s, expense('A2', 2800), makeCtx(), { cover }));
+    assert.deepEqual(room(after, 'A2'), [2200, 2200, 0]); // available exactly 0, never negative
+    const move = after.reservationMovements.at(-1)!;
+    assert.deepEqual([move.kind, move.fundId, move.accountId, move.amount, move.sourceTransactionId], ['cover', 'F2', 'A2', -300, after.transactions[0].id]);
+    assert.deepEqual(invariantViolations(after), []);
+    // Cancel = nothing was applied: the state is what it was.
+    assert.equal(JSON.stringify(s), frozen);
+  });
+
+  it('the default cover (lowest priority first) is accepted as it is', () => {
+    const s = start();
+    const error = needsCover(() => ops.addTransaction(s, expense('A2', 2800), makeCtx()));
+    const after = apply(s, ops.addTransaction(s, expense('A2', 2800), makeCtx(), proposedOptions(error)));
+    assert.deepEqual([sel.reservation(after, 'F3', 'A2'), sel.reservation(after, 'F2', 'A2')], [200, 2000]);
+    assert.deepEqual(invariantViolations(after), []);
+  });
+
+  it('an account may not go below zero without allowNegative; one that allows it needs no confirmation', () => {
+    const s = start();
+    const error = needsCover(() => ops.addTransaction(s, expense('A3', 1200), makeCtx()));
+    assert.deepEqual(error.shortfalls.map((x) => [x.kind, x.accountId, x.amount]), [['negative', 'A3', 200]]);
+    const after = apply(s, ops.addTransaction(s, expense('A3', 1200), makeCtx(), { confirm: { negative: true } }));
+    assert.equal(sel.accountBalance(after, 'A3'), -200);
+    const loose = { ...s, accounts: s.accounts.map((a) => (a.id === 'A3' ? { ...a, allowNegative: true } : a)) };
+    assert.equal(sel.accountBalance(apply(loose, ops.addTransaction(loose, expense('A3', 1200), makeCtx())), 'A3'), -200);
+    // Going below zero on an account with reservations needs both: release them all, and agree to the overdraft.
+    const both = needsCover(() => ops.addTransaction(s, expense('A2', 5200), makeCtx()));
+    assert.deepEqual(both.shortfalls.map((x) => [x.kind, x.amount]).sort(), [['cover', 2500], ['negative', 200]]);
+  });
+
+  it('C3 / D5: a transfer within available moves no reservation; above it the reserved part follows, in proportion', () => {
+    const s = start();
+    const small = apply(s, ops.addTransfer(s, { fromAccountId: 'A2', toAccountId: 'A3', amount: 2000, date: '2026-10-10' }, makeCtx()));
+    assert.deepEqual([room(small, 'A2'), room(small, 'A3')], [[3000, 2500, 500], [3000, 0, 3000]]);
+    assert.equal(small.reservationMovements.length, 3);
+
+    const big = apply(s, ops.addTransfer(s, { fromAccountId: 'A2', toAccountId: 'A3', amount: 4000, date: '2026-10-10' }, makeCtx()));
+    const tx = big.transactions[0];
+    // 4,000 − 2,500 available = 1,500 must be reserved money: F2 80% = 1,200, F3 20% = 300.
+    const follows = big.reservationMovements.slice(3);
+    assert.deepEqual(follows.map((m) => [m.fundId, m.accountId, m.amount, m.kind, m.groupId]), [
+      ['F2', 'A2', -1200, 'follow_transfer', tx.id], ['F2', 'A3', 1200, 'follow_transfer', tx.id],
+      ['F3', 'A2', -300, 'follow_transfer', tx.id], ['F3', 'A3', 300, 'follow_transfer', tx.id],
+    ]);
+    assert.deepEqual([room(big, 'A2'), room(big, 'A3')], [[1000, 1000, 0], [5000, 1500, 3500]]);
+    assert.deepEqual(invariantViolations(big), []);
+    // INV-8: moving money and reservations together changes no net worth, and no fund total.
+    assert.equal(sel.netWorth(big, 'EGP'), sel.netWorth(s, 'EGP'));
+    assert.equal(sel.fundAllocated(big, 'F2'), sel.fundAllocated(s, 'F2'));
+  });
+
+  it('Q3: the split is editable (it must add up to what has to leave); the last fund takes the rounding remainder', () => {
+    const s = start();
+    const edited = apply(s, ops.addTransfer(s, { fromAccountId: 'A2', toAccountId: 'A3', amount: 4000, date: '2026-10-10' }, makeCtx(), { follow: [{ fundId: 'F2', amount: 1000 }, { fundId: 'F3', amount: 500 }] }));
+    assert.deepEqual([sel.reservation(edited, 'F2', 'A3'), sel.reservation(edited, 'F3', 'A3')], [1000, 500]);
+    assert.throws(() => ops.addTransfer(s, { fromAccountId: 'A2', toAccountId: 'A3', amount: 4000, date: '2026-10-10' }, makeCtx(), { follow: [{ fundId: 'F2', amount: 1000 }] }), { code: 'FOLLOW_INVALID' });
+    assert.throws(() => ops.addTransfer(s, { fromAccountId: 'A2', toAccountId: 'A3', amount: 4000, date: '2026-10-10' }, makeCtx(), { follow: [{ fundId: 'F3', amount: 1500 }] }), { code: 'FOLLOW_INVALID' });
+    // 3 funds sharing 100 → 33.34 / 33.33 / 33.33 style: the parts always add up exactly.
+    const third = { ...s, funds: [...s.funds, fund({ id: 'F4', priority: 4, currency: 'SAR' })], reservationMovements: [resv('a', 'F2', 'A2', 1000), resv('b', 'F3', 'A2', 1000), resv('c', 'F4', 'A2', 1000)] };
+    const moved = apply(third, ops.addTransfer(third, { fromAccountId: 'A2', toAccountId: 'A3', amount: 2102.01, date: '2026-10-10' }, makeCtx()));
+    const carried = ['F2', 'F3', 'F4'].map((id) => sel.reservation(moved, id, 'A3'));
+    assert.equal(roundTo(carried.reduce((a, b) => a + b, 0), 2), 102.01);
+  });
+
+  it('D5: deleting or editing the transfer gives the reservations back; the rest is validated normally', () => {
+    const s = start();
+    const big = apply(s, ops.addTransfer(s, { fromAccountId: 'A2', toAccountId: 'A3', amount: 4000, date: '2026-10-10' }, makeCtx()));
+    const gone = apply(big, ops.deleteTransaction(big, big.transactions[0].id, makeCtx()));
+    assert.deepEqual([room(gone, 'A2'), room(gone, 'A3')], [[5000, 2500, 2500], [1000, 0, 1000]]);
+    assert.deepEqual(['F2', 'F3'].map((id) => sel.reservation(gone, id, 'A2')), [2000, 500]);
+    // Editing 4,000 → 2,000: the reservation goes back and nothing follows this time.
+    const tx = big.transactions[0] as Extract<Transaction, { type: 'transfer' }>;
+    const edited = apply(big, ops.updateTransaction(big, { ...tx, amount: 2000 }, makeCtx()));
+    assert.deepEqual([room(edited, 'A2'), room(edited, 'A3')], [[3000, 2500, 500], [3000, 0, 3000]]);
+    assert.deepEqual(invariantViolations(edited), []);
+    // If a fund already released the money on the destination, only what is still reserved there goes back: the
+    // released money is not re-reserved, and everything stays valid.
+    const released = apply(big, ops.withdrawFromFund(big, 'F2', 1200, undefined, makeCtx(), 'SAR', 'A3'));
+    const reverted = apply(released, ops.deleteTransaction(released, big.transactions[0].id, makeCtx()));
+    assert.deepEqual(['F2', 'F3'].map((id) => sel.reservation(reverted, id, 'A2')), [800, 500]);
+    assert.deepEqual(invariantViolations(reverted), []);
+  });
+
+  it('C4 / D6: an exchange within available converts nothing and keeps the fee out of reserved money', () => {
+    const s = start();
+    const after = apply(s, ops.addExchange(s, { fromAccountId: 'A2', toAccountId: 'A1', sentAmount: 1000, receivedAmount: 12400, fees: [{ accountId: 'A2', amount: 5 }], date: '2026-10-10' }, makeCtx()));
+    assert.deepEqual([room(after, 'A2'), room(after, 'A1')], [[3995, 2500, 1495], [32400, 8000, 24400]]);
+    assert.equal(after.reservationMovements.length, s.reservationMovements.length);
+  });
+
+  it('C4 / D6: an exchange that touches reservations asks for confirmation, then converts them at its own rate', () => {
+    const s = start();
+    const input: ops.NewExchange = { fromAccountId: 'A2', toAccountId: 'A1', sentAmount: 3000, receivedAmount: 37200, fees: [{ accountId: 'A2', amount: 5 }], date: '2026-10-10' };
+    const error = needsCover(() => ops.addExchange(s, input, makeCtx()));
+    // Available after the fee 2,495; 3,000 − 2,495 = 505 of reserved money would be converted: F2 404 / F3 101.
+    assert.deepEqual(error.shortfalls.map((x) => [x.kind, x.amount, x.suggested]), [['conversion', 505, [{ fundId: 'F2', amount: 404 }, { fundId: 'F3', amount: 101 }]]]);
+    const after = apply(s, ops.addExchange(s, input, makeCtx(), proposedOptions(error)));
+    const follows = after.reservationMovements.slice(3).map((m) => [m.fundId, m.accountId, m.amount, m.kind]);
+    assert.deepEqual(follows, [
+      ['F2', 'A2', -404, 'follow_exchange'], ['F2', 'A1', 5009.6, 'follow_exchange'],
+      ['F3', 'A2', -101, 'follow_exchange'], ['F3', 'A1', 1252.4, 'follow_exchange'],
+    ]);
+    assert.deepEqual([room(after, 'A2'), room(after, 'A1')], [[1995, 1995, 0], [57200, 14262, 42938]]);
+    assert.deepEqual(invariantViolations(after), []);
+    // D6: F2's value at today's rate drops by exactly the spread on what was converted (404 SAR → 5,009.60 EGP).
+    assert.equal(sel.fundAllocated(after, 'F2'), roundTo(1596 + 5009.6 / 12.5, 2)); // 1,996.77
+    // Without the confirmation it never applies.
+    needsCover(() => ops.addExchange(s, input, makeCtx(), { confirm: {} }));
+    // Deleting the exchange converts the reservations back at the same rate.
+    const back = apply(after, ops.deleteTransaction(after, after.transactions[0].id, makeCtx()));
+    assert.deepEqual(['F2', 'F3'].map((id) => sel.reservation(back, id, 'A2')), [2000, 500]);
+    assert.equal(sel.reservation(back, 'F2', 'A1'), 0);
+  });
+
+  it('D7: deleting an income that funded reservations, or lowering the opening balance, asks for a cover', () => {
+    const withIncome = apply(start(), ops.addTransaction(start(), { type: 'income', amount: 2500, currency: 'SAR', accountId: 'A3', categoryId: 'cat-income-salary', date: '2026-10-01' }, makeCtx()));
+    const funded = apply(withIncome, ops.allocateToFund(withIncome, 'F2', 3000, undefined, makeCtx(), 'SAR', 'A3'));
+    const incomeId = funded.transactions[0].id;
+    const error = needsCover(() => ops.deleteTransaction(funded, incomeId, makeCtx()));
+    assert.deepEqual(error.shortfalls.map((x) => [x.kind, x.accountId, x.amount]), [['cover', 'A3', 2000]]);
+    const done = apply(funded, ops.deleteTransaction(funded, incomeId, makeCtx(), proposedOptions(error)));
+    assert.deepEqual(invariantViolations(done), []);
+    assert.equal(done.transactions.length, 0);
+    // "Set the current balance" lowering the opening balance is the same thing.
+    const lowered = needsCover(() => ops.updateAccount(start(), { ...start().accounts[1], openingBalance: 1000 }, makeCtx()));
+    assert.equal(lowered.shortfalls[0].amount, 1500);
+  });
+
+  it('asset purchases and fees are covered like any expense', () => {
+    const s = start();
+    needsCover(() => ops.buyGold(s, { accountId: 'A2', amount: 4000, date: '2026-10-10', holding: { name: 'g', weightGrams: 1, karat: 24 } }, makeCtx()));
+    // A fee beyond the available money can never ride on a transfer: it is covered like any expense.
+    needsCover(() => ops.addTransfer(s, { fromAccountId: 'A2', toAccountId: 'A3', amount: 100, fees: [{ accountId: 'A2', amount: 2600 }], date: '2026-10-10' }, makeCtx()));
+  });
+
+  it('D8: processDue does not record an auto expense that would breach INV-5; it stays due, flagged', () => {
+    const base = { ...start(), recurringRules: [
+      rule({ id: 'ok', mode: 'auto', accountId: 'A2', currency: 'SAR', amount: 100, startDate: '2026-10-01', dayOfMonth: 1 }),
+      rule({ id: 'big', mode: 'auto', accountId: 'A2', currency: 'SAR', amount: 5000, startDate: '2026-10-01', dayOfMonth: 1 }),
+    ] };
+    const ctx = makeCtx();
+    const patch = ops.processDue(base, ctx);
+    const after = apply(base, patch);
+    assert.deepEqual(after.transactions.map((x) => x.recurringRuleId), ['ok']);
+    assert.deepEqual(invariantViolations(after), []);
+    const blocked = ops.blockedDue(after, ctx);
+    assert.deepEqual(blocked.map((b) => [b.ruleId, b.date, b.shortfalls[0].kind]), [['big', '2026-10-01', 'cover']]);
+    // Still due next time (idempotent), until the user confirms it with a cover.
+    assert.deepEqual(ops.processDue(after, ctx), {});
+    const confirm = needsCover(() => ops.confirmOccurrence(after, 'big', '2026-10-01', {}, ctx));
+    const done = apply(after, ops.confirmOccurrence(after, 'big', '2026-10-01', {}, ctx, proposedOptions(confirm)));
+    assert.equal(done.transactions.length, 2);
+  });
+
+  it('D11: the currency of an account with reservations is locked; it cannot be archived or deleted while reserved', () => {
+    const s = start();
+    assert.throws(() => ops.updateAccount(s, { ...s.accounts[1], currency: 'USD' }, makeCtx()), { code: 'ACCOUNT_CURRENCY_LOCKED' });
+    assert.throws(() => ops.updateAccount(s, { ...s.accounts[1], archived: true }, makeCtx()), { code: 'ACCOUNT_HAS_RESERVATIONS' });
+    assert.throws(() => ops.deleteAccount(s, 'A2', makeCtx()), { code: 'ACCOUNT_IN_USE' });
+    assert.doesNotThrow(() => ops.updateAccount(s, { ...s.accounts[2], archived: true }, makeCtx()));
+  });
+
+  it('D12: a sinking payment spends the fund’s reservation on the paying account first, then available, then needs a cover', () => {
+    const s = start();
+    const pay = (amount: number, options?: OpOptions) => ops.paySinkingFund(s, { fundId: 'F3', accountId: 'A2', categoryId: 'cat-essentials-bills', amount, date: '2026-10-10' }, makeCtx(), options);
+    // 400 ≤ F3's 500 on A2: spent from its reservation; available is untouched.
+    const small = apply(s, pay(400));
+    assert.deepEqual(room(small, 'A2'), [4600, 2100, 2500]);
+    // 3,000: F3's 500 + all 2,500 available is 3,000 exactly, no cover.
+    assert.deepEqual(room(apply(s, pay(3000)), 'A2'), [2000, 2000, 0]);
+    // 3,200 is 200 more than F3's reservation plus the available money: F2's money would be eaten → cover.
+    const error = needsCover(() => pay(3200));
+    assert.deepEqual(error.shortfalls.map((x) => [x.kind, x.amount]), [['cover', 200]]);
+    assert.deepEqual(room(apply(s, pay(3200, proposedOptions(error))), 'A2'), [1800, 1800, 0]);
+  });
+});
+
+describe('every balance-reducing operation, called through runAction, ends in the cover flow, not an error message', () => {
+  const start = (): FinanceState => ({
+    ...emptyState(),
+    // A2 holds 2,500 (1,500 + a 1,000 income), all of it reserved: nothing is available.
+    accounts: [strictAccount('A1', 'EGP', 20000), strictAccount('A2', 'SAR', 1500, 'SA'), strictAccount('A3', 'SAR', 1000, 'SA')],
+    funds: [fund({ id: 'F2', priority: 2, currency: 'SAR', targetAmount: 10000 }), fund({ id: 'F3', priority: 3, currency: 'SAR', targetAmount: 5000, type: 'sinking', frequency: 'yearly', nextDueDate: '2026-12-01' })],
+    reservationMovements: [resv('r2', 'F2', 'A2', 2000), resv('r3', 'F3', 'A2', 500)],
+    transactions: [{ id: 'inc', type: 'income', amount: 1000, currency: 'SAR', accountId: 'A2', categoryId: 'cat-income-salary', date: '2026-10-01', rateSnapshotId: S125.id, createdAt: T0, updatedAt: T0 }],
+    recurringRules: [rule({ id: 'r', mode: 'confirm', accountId: 'A2', currency: 'SAR', amount: 4000, startDate: '2026-10-01', dayOfMonth: 1 })],
+  });
+
+  // Each case: how the UI calls the store action, with the retry's options passed through.
+  type Call = (s: FinanceState, options?: OpOptions) => Partial<FinanceState>;
+  const cases: [string, Call][] = [
+    ['addTransaction (expense)', (s, o) => ops.addTransaction(s, { type: 'expense', amount: 6000, currency: 'SAR', accountId: 'A2', categoryId: 'cat-essentials-bills', date: '2026-10-10' }, makeCtx(), o)],
+    ['addTransfer', (s, o) => ops.addTransfer(s, { fromAccountId: 'A2', toAccountId: 'A3', amount: 2400, fees: [{ accountId: 'A2', amount: 300 }], date: '2026-10-10' }, makeCtx(), o)],
+    ['addExchange', (s, o) => ops.addExchange(s, { fromAccountId: 'A2', toAccountId: 'A1', sentAmount: 5000, receivedAmount: 62000, date: '2026-10-10' }, makeCtx(), o)],
+    ['updateTransaction (income lowered)', (s, o) => ops.updateTransaction(s, { ...(s.transactions[0] as unknown as Extract<Transaction, { type: 'income' | 'expense' }>), amount: 100 }, makeCtx(), o)],
+    ['deleteTransaction (income)', (s, o) => ops.deleteTransaction(s, 'inc', makeCtx(), o)],
+    ['buyGold', (s, o) => ops.buyGold(s, { accountId: 'A2', amount: 5500, date: '2026-10-10', holding: { name: 'g', weightGrams: 1, karat: 24 } }, makeCtx(), o)],
+    ['updateAccount (opening balance)', (s, o) => ops.updateAccount(s, { ...s.accounts[1], openingBalance: 100 }, makeCtx(), o)],
+    ['confirmOccurrence', (s, o) => ops.confirmOccurrence(s, 'r', '2026-10-01', {}, makeCtx(), o)],
+    ['paySinkingFund', (s, o) => ops.paySinkingFund(s, { fundId: 'F3', accountId: 'A2', categoryId: 'cat-essentials-bills', amount: 6000, date: '2026-10-10' }, makeCtx(), o)],
+  ];
+
+  for (const [name, call] of cases) {
+    it(name, () => {
+      let s = start();
+      const messages: string[] = [];
+      const requests: CoverRequest[] = [];
+      const handlers = { showMessage: (_t: string, m: string) => messages.push(m), errorMessage: errorMessage, openCover: (r: CoverRequest) => requests.push(r) };
+      const before = JSON.stringify(s);
+      const saved = runActionWith(handlers, 'تعذّر الحفظ', (options) => { s = apply(s, call(s, options)); });
+      // Not an error message: the cover flow opened, nothing was applied.
+      assert.equal(saved, false);
+      assert.deepEqual(messages, []);
+      assert.equal(requests.length, 1);
+      assert.equal(JSON.stringify(s), before);
+      assert.ok(requests[0].error.shortfalls.length > 0);
+      assert.ok(requests[0].error.shortfalls.every((x) => x.amount > 0 && !!x.accountId && !!x.currency));
+      // The sheet runs the same action again with the user's decision (a second question, e.g. an overdraft after a
+      // conversion, opens the flow again); the state then satisfies INV-5. Never an error message.
+      let request = requests[0];
+      for (let round = 0; round < 3 && !request.retry(proposedOptions(request.error)); round++) request = requests.at(-1)!;
+      assert.deepEqual(invariantViolations(s), []);
+      assert.notEqual(JSON.stringify(s), before);
+      assert.deepEqual(messages, []);
+    });
+  }
+
+  it('a real validation error is still an error message, and mergeOptions keeps earlier decisions', () => {
+    const messages: string[] = [];
+    const handlers = { showMessage: (_t: string, m: string) => messages.push(m), errorMessage, openCover: () => { throw new Error('no cover expected'); } };
+    assert.equal(runActionWith(handlers, 'تعذّر الحفظ', () => ops.addTransaction(start(), { type: 'expense', amount: 0, currency: 'SAR', accountId: 'A2', categoryId: 'cat-essentials-bills', date: '2026-10-10' }, makeCtx())), false);
+    assert.equal(messages.length, 1);
+    assert.deepEqual(mergeOptions({ confirm: { negative: true } }, { cover: [], confirm: { conversion: true } }), { cover: [], confirm: { negative: true, conversion: true } });
+  });
+});
+
+describe('INV-5 holds on every write path (D4 fuzz) and failed operations change nothing (INV-6)', () => {
+  it('a long random sequence of operations never leaves an invalid state, with or without a cover', () => {
+    let s: FinanceState = {
+      ...emptyState(),
+      accounts: [strictAccount('E1', 'EGP', 30000), strictAccount('E2', 'EGP', 5000), strictAccount('S1', 'SAR', 4000, 'SA'), strictAccount('S2', 'SAR', 1500, 'SA')],
+      funds: [fund({ id: 'F1', priority: 1, targetAmount: 90000 }), fund({ id: 'F2', priority: 2, currency: 'SAR', targetAmount: 9000 }), fund({ id: 'F3', priority: 3, currency: 'SAR', targetAmount: 4000 })],
+    };
+    let seed = 11;
+    const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const pick = <T,>(items: T[]): T => items[Math.floor(rand() * items.length)];
+    const amountIn = (max: number) => roundTo(rand() * max + 0.01, 2);
+    const ctx = makeCtx();
+    const sarIds = ['S1', 'S2'];
+    const egpIds = ['E1', 'E2'];
+    let applied = 0;
+    let asked = 0;
+    for (let i = 0; i < 400; i++) {
+      const before = JSON.stringify(s);
+      const kind = pick(['expense', 'income', 'transfer', 'exchange', 'gold', 'reserve', 'release', 'delete', 'edit', 'opening']);
+      const sar = rand() < 0.5;
+      const ids = sar ? sarIds : egpIds;
+      const currency = sar ? 'SAR' : 'EGP';
+      const run = (call: (o?: OpOptions) => Partial<FinanceState>) => {
+        try {
+          s = apply(s, call());
+          applied++;
+        } catch (e) {
+          if (e instanceof NeedsCoverError) {
+            asked++;
+            // Not applied; deciding the default cover applies it, still valid.
+            assert.equal(JSON.stringify(s), before);
+            try {
+              s = apply(s, call(proposedOptions(e)));
+              applied++;
+            } catch (e2) {
+              assert.ok(e2 instanceof NeedsCoverError || e2 instanceof ops.FinanceValidationError, String(e2));
+              assert.equal(JSON.stringify(s), before);
+            }
+          } else {
+            assert.ok(e instanceof ops.FinanceValidationError, String(e));
+            assert.equal(JSON.stringify(s), before);
+          }
+        }
+      };
+      const snapshot = s;
+      if (kind === 'expense') run((o) => ops.addTransaction(snapshot, { type: 'expense', amount: amountIn(sar ? 3000 : 15000), currency, accountId: pick(ids), categoryId: 'cat-essentials-bills', date: '2026-10-10' }, ctx, o));
+      else if (kind === 'income') run((o) => ops.addTransaction(snapshot, { type: 'income', amount: amountIn(2000), currency, accountId: pick(ids), categoryId: 'cat-income-salary', date: '2026-10-11' }, ctx, o));
+      else if (kind === 'transfer') run((o) => ops.addTransfer(snapshot, { fromAccountId: ids[0], toAccountId: ids[1], amount: amountIn(sar ? 3000 : 15000), fees: rand() < 0.3 ? [{ accountId: pick(ids), amount: amountIn(20) }] : [], date: '2026-10-12' }, ctx, o));
+      else if (kind === 'exchange') {
+        const amount = amountIn(2500);
+        run((o) => ops.addExchange(snapshot, sar ? { fromAccountId: pick(sarIds), toAccountId: pick(egpIds), sentAmount: amount, receivedAmount: roundTo(amount * 12.4, 2), fees: rand() < 0.3 ? [{ accountId: pick(sarIds), amount: amountIn(10) }] : [], date: '2026-10-13' } : { fromAccountId: pick(egpIds), toAccountId: pick(sarIds), sentAmount: roundTo(amount * 12.6, 2), receivedAmount: amount, date: '2026-10-13' }, ctx, o));
+      } else if (kind === 'gold') run((o) => ops.buyGold(snapshot, { accountId: pick(ids), amount: amountIn(sar ? 2000 : 10000), date: '2026-10-14', holding: { name: 'g', weightGrams: 1, karat: 24 } }, ctx, o));
+      else if (kind === 'reserve') run(() => ops.allocateToFund(snapshot, pick(['F1', 'F2', 'F3']), amountIn(sar ? 800 : 4000), undefined, ctx, rand() < 0.5 ? undefined : currency));
+      else if (kind === 'release') run(() => ops.withdrawFromFund(snapshot, pick(['F1', 'F2', 'F3']), amountIn(sar ? 800 : 4000), undefined, ctx, currency));
+      else if (kind === 'delete' && snapshot.transactions.length > 0) run((o) => ops.deleteTransaction(snapshot, pick(snapshot.transactions).id, ctx, o));
+      else if (kind === 'edit' && snapshot.transactions.length > 0) {
+        const tx = pick(snapshot.transactions);
+        if (tx.type === 'expense' || tx.type === 'income') run((o) => ops.updateTransaction(snapshot, { ...tx, amount: amountIn(sar ? 2500 : 12000) }, ctx, o));
+        else if (tx.type === 'transfer') run((o) => ops.updateTransaction(snapshot, { ...tx, amount: amountIn(2000) }, ctx, o));
+      } else if (kind === 'opening') {
+        const account = pick(snapshot.accounts);
+        run((o) => ops.updateAccount(snapshot, { ...account, openingBalance: roundTo(account.openingBalance * (0.4 + rand()), 2) }, ctx, o));
+      }
+      assert.deepEqual(invariantViolations(s), [], `after step ${i} (${kind})`);
+      for (const c of ['EGP', 'SAR']) {
+        const cash = sel.liquidByCurrency(s)[c];
+        const reserved = snapshot.accounts.length && roundTo(s.accounts.filter((a) => a.currency === c).reduce((sum, a) => sum + sel.accountReserved(s, a.id), 0), 2);
+        assert.equal(roundTo((reserved as number) + sel.unresolvedByCurrency(s)[c] + sel.unassignedByCurrency(s)[c], 2), cash, c);
+      }
+    }
+    assert.ok(applied > 150, `applied ${applied}`);
+    assert.ok(asked > 20, `asked ${asked}`);
   });
 });

@@ -22,7 +22,7 @@ const EPSILON = 0.005;
 export function UnassignedPanel({ state }: { state: FinanceState }) {
   const [sheet, setSheet] = useState<'assign' | 'cover' | null>(null);
   const summary = unassignedSummary(state);
-  const rows = currencyList(state).filter((c) => Math.abs(summary.byCurrency[c]) > EPSILON);
+  const rows = currencyList(state).filter((c) => Math.abs(summary.byCurrency[c]) > EPSILON || summary.unresolved.some((u) => u.currency === c));
   const short = summary.deficits.length > 0;
   const spare = summary.surpluses.length > 0;
 
@@ -75,6 +75,18 @@ export function UnassignedPanel({ state }: { state: FinanceState }) {
             </View>
           )}
         </View>
+        {summary.unresolved.length > 0 && (
+          <View accessibilityLabel="محجوز ومش محدد حسابه">
+            {summary.unresolved.map((u) => (
+              <View key={u.currency} style={styles.row}>
+                <AppText variant="secondary" color="textSecondary" style={styles.flex}>
+                  محجوز ومش محدد حسابه · {currencyNameAr(u.currency)}
+                </AppText>
+                <Money amount={u.amount} currency={u.currency} size="row" tone="muted" align="left" />
+              </View>
+            ))}
+          </View>
+        )}
         {short && (
           <AppText variant="bodyStrong" color="danger">
             استخدمت جزء من فلوس الصناديق.

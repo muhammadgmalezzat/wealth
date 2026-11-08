@@ -13,6 +13,7 @@ import { Screen } from '@/components/ui/Screen';
 import { SectionHeader } from '@/components/ui/SectionHeader';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { space } from '@/constants/theme';
+import { blockedDue } from '@/store/operations';
 import { dueOccurrences, type Occurrence } from '@/store/recurring';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { toDateKey } from '@/utils/dates';
@@ -30,13 +31,18 @@ export default function DueScreen() {
 
   const today = toDateKey(new Date());
   const items = dueOccurrences(state, today, 'confirm');
+  // Automatic items that were NOT recorded because they would eat into reserved money: still due, flagged.
+  const needCover: Occurrence[] = blockedDue(state, { newId: () => 'preview', now: () => new Date() }).flatMap((b) => {
+    const rule = state.recurringRules.find((r) => r.id === b.ruleId);
+    return rule ? [{ rule, date: b.date }] : [];
+  });
   const thisMonth = today.slice(0, 7);
   const missed = items.filter((o) => o.date.slice(0, 7) < thisMonth);
   const current = items.filter((o) => o.date.slice(0, 7) >= thisMonth);
   const accountName = (id?: string) => state.accounts.find((a) => a.id === id)?.name ?? '—';
   const confirmRule = confirming && state.recurringRules.find((r) => r.id === confirming.ruleId);
 
-  const row = ({ rule, date }: Occurrence) => (
+  const row = ({ rule, date }: Occurrence, flagged = false) => (
     <View key={`${rule.id}-${date}`} style={styles.item}>
       <View style={styles.line}>
         <AppText variant="bodyStrong" numberOfLines={1} style={styles.flex}>
@@ -49,6 +55,7 @@ export default function DueScreen() {
         )}
         <Money amount={rule.amount} currency={rule.currency} align="left" tone={rule.kind === 'income' ? 'positive' : 'default'} />
       </View>
+      {flagged && <StatusChip label="محتاج تغطية" tone="attention" icon="savings" />}
       <AppText variant="secondary" color="textSecondary">
         {formatDayLabel(date)} · {accountName(rule.accountId)}
       </AppText>
@@ -65,7 +72,13 @@ export default function DueScreen() {
 
   return (
     <Screen scroll edges={['bottom']} contentStyle={styles.content}>
-      {items.length === 0 ? (
+      {needCover.length > 0 && (
+        <View>
+          <SectionHeader title={`محتاج تغطية (${needCover.length})`} />
+          <ListGroup>{needCover.map((o) => row(o, true))}</ListGroup>
+        </View>
+      )}
+      {items.length === 0 && needCover.length === 0 ? (
         <>
           <EmptyState icon="inbox" title="مفيش حاجة مستنياك." body="كل المستحقات متسجلة." />
           <View style={styles.center}>
@@ -80,13 +93,13 @@ export default function DueScreen() {
                 title={`فات ومتسجلش (${missed.length})`}
                 trailing={<StatusChip label="فات ميعاده" tone="attention" icon="schedule" />}
               />
-              <ListGroup>{missed.map(row)}</ListGroup>
+              <ListGroup>{missed.map((o) => row(o))}</ListGroup>
             </View>
           )}
           {current.length > 0 && (
             <View>
               <SectionHeader title={`المستحق الشهر ده (${current.length})`} />
-              <ListGroup>{current.map(row)}</ListGroup>
+              <ListGroup>{current.map((o) => row(o))}</ListGroup>
             </View>
           )}
         </>

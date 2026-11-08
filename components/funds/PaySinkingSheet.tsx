@@ -11,7 +11,8 @@ import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { formatDateAr } from '@/components/ui/formatDateAr';
 import { formatMoney } from '@/components/ui/formatMoney';
 import { space } from '@/constants/theme';
-import { fundAllocated, pickerCategories, SINKING_CYCLE_MONTHS } from '@/store/selectors';
+import { defaultSinkingAccountId } from '@/store/cover';
+import { accountAvailable, pickerCategories, reservation, SINKING_CYCLE_MONTHS } from '@/store/selectors';
 import type { Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { convertCurrency } from '@/utils/currency';
@@ -35,9 +36,8 @@ export function PaySinkingSheet({ fund, onClose }: PaySinkingSheetProps) {
   const expenseCategories = pickerCategories(state.categories, 'expense');
   const lastUsed = state.settings.lastUsed?.expense;
 
-  const [accountId, setAccountId] = useState(
-    accounts.find((a) => a.id === lastUsed?.accountId)?.id ?? accounts[0]?.id ?? ''
-  );
+  // The account holding the fund's largest reservation, so that is what the bill spends (shown below; change it here).
+  const [accountId, setAccountId] = useState(defaultSinkingAccountId(state, fund.id) ?? '');
   const [categoryId, setCategoryId] = useState(
     expenseCategories.find((c) => c.id === lastUsed?.categoryId)?.id ?? ''
   );
@@ -57,15 +57,21 @@ export function PaySinkingSheet({ fund, onClose }: PaySinkingSheetProps) {
       : undefined;
 
   const handleSave = () => {
-    const saved = runAction('تعذّر الحفظ', () =>
-      state.paySinkingFund({
-        fundId: fund.id,
-        accountId,
-        categoryId,
-        amount: parseAmount(amountValue) ?? NaN,
-        date,
-        ...(note.trim() ? { note: note.trim() } : {}),
-      })
+    const saved = runAction(
+      'تعذّر الحفظ',
+      (options) =>
+        state.paySinkingFund(
+          {
+            fundId: fund.id,
+            accountId,
+            categoryId,
+            amount: parseAmount(amountValue) ?? NaN,
+            date,
+            ...(note.trim() ? { note: note.trim() } : {}),
+          },
+          options
+        ),
+      onClose
     );
     if (saved) onClose();
   };
@@ -97,8 +103,10 @@ export function PaySinkingSheet({ fund, onClose }: PaySinkingSheetProps) {
       </FormField>
 
       <AppText variant="secondary" color="textSecondary" style={styles.info}>
-        هيتسحب من الصندوق لحد {formatMoney(fundAllocated(state, fund.id), fund.currency)} نقداً
-        {nextDue ? `، والموعد الجاي هيبقى ${formatDateAr(nextDue)}` : ''}.
+        {account
+          ? `هيتصرف من المحجوز للصندوق في «${account.name}» (${formatMoney(reservation(state, fund.id, account.id), account.currency)})، والباقي من المتاح فيه (${formatMoney(Math.max(0, accountAvailable(state, account.id)), account.currency)}). لو مش كفاية هيطلب تغطية.`
+          : ''}
+        {nextDue ? ` والموعد الجاي هيبقى ${formatDateAr(nextDue)}.` : ''}
       </AppText>
     </FormSheet>
   );

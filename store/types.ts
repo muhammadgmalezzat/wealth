@@ -34,6 +34,9 @@ export interface Account extends Synced {
   country: CountryCode;
   createdAt: string;
   archived?: boolean;
+  // A genuine overdraft / credit account: its balance may go below zero without asking. Such an account holds no
+  // reservations (they only ever fit in max(0, balance)). Missing = false: going below zero needs a confirmation.
+  allowNegative?: boolean;
 }
 
 export interface Category extends Synced {
