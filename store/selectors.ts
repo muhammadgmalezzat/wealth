@@ -838,47 +838,6 @@ export function suggestAllocationIn(
   return result;
 }
 
-export interface CoverPlan {
-  withdrawals: FundAmount[];
-  // EGP still uncovered after the withdrawals (0 when fully covered).
-  remainingEGP: number;
-}
-
-// Withdraws cash from the chosen funds, lowest priority first, until each short currency's
-// unassigned money is back to zero. A currency is covered by funds' cash in that same currency
-// (the shortfall is in that currency's money). `only` limits it to one currency. Funds without
-// cash in the currency are skipped.
-export function planCover(state: State, fundIds: string[], only?: CurrencyCode): CoverPlan {
-  const rates = state.settings.rates;
-  const unassigned = unassignedByCurrency(state);
-  const chosen = state.funds
-    .filter((f) => fundIds.includes(f.id))
-    .sort((a, b) => b.priority - a.priority);
-  const withdrawals: FundAmount[] = [];
-  let remainingEGP = 0;
-  for (const currency of currencyList(state)) {
-    if (only && currency !== only) continue;
-    let deficit = Math.max(0, -unassigned[currency]);
-    for (const fund of chosen) {
-      if (deficit <= MONEY_EPSILON) break;
-      const cash = fundReservedIn(state, fund.id, currency);
-      const take = Math.min(cash, deficit);
-      if (take <= MONEY_EPSILON) continue;
-      // Round up to the cent so the cover never falls a fraction short.
-      withdrawals.push(withdrawalOf(fund, currency, Math.min(cash, Math.ceil(take * 100) / 100)));
-      deficit -= take;
-    }
-    remainingEGP = addIn(remainingEGP, roundIn(toEGP(Math.max(0, deficit), currency, rates), 'EGP'), 'EGP');
-  }
-  return { withdrawals, remainingEGP };
-}
-
-// Default cover choice: the lowest-priority fund that holds cash (in `currency`, when given).
-export function defaultCoverFundId(state: State, currency?: CurrencyCode): string | undefined {
-  return [...fundsByPriority(state)]
-    .reverse()
-    .find((f) => (currency ? fundReservedIn(state, f.id, currency) : fundAllocated(state, f.id)) > 0)?.id;
-}
 // --- Transaction lists ------------------------------------------------------
 
 // The "تحويل" filter covers transfers and exchanges alike.

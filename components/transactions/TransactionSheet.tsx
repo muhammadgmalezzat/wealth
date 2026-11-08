@@ -9,10 +9,12 @@ import { PastDateField } from '@/components/ui/DateFields';
 import { FormField } from '@/components/ui/FormField';
 import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { formatMoney } from '@/components/ui/formatMoney';
+import { Card } from '@/components/ui/Card';
 import { Segment } from '@/components/ui/Segment';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { colors, space } from '@/constants/theme';
 import type { NewRecurringRule } from '@/store/operations';
+import { coversOf, followPreview, mergeOptions, type OpOptions } from '@/store/cover';
 import { feeCategoryId } from '@/store/defaultCategories';
 import { feeSpendImpact, planFor, spendImpact } from '@/store/planning';
 import { pickerCategories } from '@/store/selectors';
@@ -110,6 +112,8 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   const [toAccountId, setToAccountId] = useState(initialTransfer.to);
   // An exchange's received amount: typed by the user, never filled in from a rate.
   const [receivedText, setReceivedText] = useState(transaction?.type === 'exchange' ? String(transaction.receivedAmount) : '');
+  // The reserved money that travels with a new transfer, as the user edited it (null = the proportional default).
+  const [followEdit, setFollowEdit] = useState<Record<string, string> | null>(null);
   const [fees, setFees] = useState<FeeDraft[]>(() =>
     transaction?.type === 'transfer' || transaction?.type === 'exchange'
       ? transaction.fees.map((fee, i) => ({
@@ -146,6 +150,18 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
     const feeCurrency = (fee.side === 'from' ? fromAccount : toAccount)?.currency;
     return feeAmount !== null && feeCurrency ? [{ amount: feeAmount, currency: feeCurrency }] : [];
   });
+  // Reserved money that has to leave the source account WITH a new transfer or exchange (design C3 / C4): a notice,
+  // not a question; an exchange converts it at its own rate and the cover sheet asks for that.
+  const feeOnSource = fees.filter((f) => f.side === 'from').reduce((sum, f) => sum + (parseAmount(f.amountText) ?? 0), 0);
+  const followNotice =
+    !transaction && isTransfer && fromAccount && amount !== null ? followPreview(state, fromAccount.id, amount, feeOnSource) : null;
+  const fundName = (id: string) => state.funds.find((f) => f.id === id)?.name ?? '—';
+  const followOverride = (): OpOptions | undefined => {
+    if (!followNotice || followNotice.need <= 0 || !followEdit) return undefined;
+    return {
+      follow: followNotice.split.map((s) => ({ fundId: s.fundId, amount: parseAmount(followEdit[s.fundId] ?? '') ?? NaN })),
+    };
+  };
   const impact = transaction
     ? null
     : type === 'expense' && categoryId && amount !== null && flowAccount
@@ -215,7 +231,9 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       const existing = transaction
         ? { ...occurrenceLink, id: transaction.id, createdAt: transaction.createdAt, rateSnapshotId: transaction.rateSnapshotId }
         : null;
-      const saved = runAction('تعذّر الحفظ', (options) => {
+      const override = followOverride();
+      const saved = runAction('تعذّر الحفظ', (decided) => {
+        const options = override ? mergeOptions(override, decided) : decided;
         if (crossCurrency) {
           // The received amount is required: no rate fills it in.
           const exchange = { ...common, sentAmount: value, receivedAmount: receivedValue ?? NaN };
@@ -351,7 +369,21 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       confirmText: 'حذف',
       cancelText: 'إلغاء',
       onConfirm: () => {
-        if (runAction('تعذّر الحذف', (options) => state.deleteTransaction(transaction.id, options), onClose)) onClose();
+        // Q4: what a cover took from the funds for this transaction is NOT re-reserved by itself; offer it, once.
+        const covers = coversOf(state, transaction.id);
+        const afterDelete = () => {
+          if (covers.length > 0) {
+            confirmAction({
+              title: 'رجّع للصناديق؟',
+              message: 'المعاملة دي كانت واخدة فلوس من صناديق. تحب ترجّعها لهم (على قد المتاح في الحسابات)؟',
+              confirmText: 'رجّع',
+              cancelText: 'لأ',
+              onConfirm: () => runAction('تعذّر الرجوع', () => state.reReserveCovers(covers, transaction.id)),
+            });
+          }
+          onClose();
+        };
+        if (runAction('تعذّر الحذف', (options) => state.deleteTransaction(transaction.id, options), afterDelete)) afterDelete();
       },
     });
   };
@@ -483,6 +515,35 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
             />
           )}
           <FeeFields fees={fees} onChange={setFees} from={fromAccount} to={toAccount} />
+          {followNotice && followNotice.need > 0 && (
+            <Card variant="subtle" style={styles.follow}>
+              <AppText variant="bodyStrong">
+                {formatMoney(followNotice.need, followNotice.currency)} من فلوس الصناديق هتتنقل مع {crossCurrency ? 'التحويل (وهتتحوّل بسعره، وهيطلب تأكيدك)' : 'التحويل'}.
+              </AppText>
+              {followNotice.split.map((s) =>
+                followEdit && !crossCurrency ? (
+                  <FormField key={s.fundId} label={fundName(s.fundId)}>
+                    <FormInput
+                      value={followEdit[s.fundId] ?? ''}
+                      onChangeText={(text) => setFollowEdit((prev) => ({ ...(prev ?? {}), [s.fundId]: text }))}
+                      keyboardType="decimal-pad"
+                    />
+                  </FormField>
+                ) : (
+                  <AppText key={s.fundId} variant="secondary" color="textSecondary">
+                    {fundName(s.fundId)}: {formatMoney(s.amount, followNotice.currency)}
+                  </AppText>
+                )
+              )}
+              {!crossCurrency && (
+                <Button
+                  label={followEdit ? 'خلّيها تلقائي' : 'عدّل التقسيم'}
+                  variant="tertiary"
+                  onPress={() => setFollowEdit(followEdit ? null : Object.fromEntries(followNotice.split.map((s) => [s.fundId, String(s.amount)])))}
+                />
+              )}
+            </Card>
+          )}
         </>
       ) : (
         <AccountPicker
@@ -561,6 +622,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
 }
 
 const styles = StyleSheet.create({
+  follow: { gap: space.xs, marginTop: space.sm },
   lockedType: { gap: space.xs, alignItems: 'flex-end' },
   hint: { marginTop: space.sm },
   date: { marginTop: space.lg, gap: space.sm },

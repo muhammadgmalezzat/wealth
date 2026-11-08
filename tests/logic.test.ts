@@ -66,7 +66,7 @@ import {
 import * as nba from '@/store/nextActions';
 import * as reviewLogic from '@/store/review';
 import { assertInvariants, invariantViolations } from '@/store/invariants';
-import { mergeOptions, NeedsCoverError, proposedOptions, type OpOptions } from '@/store/cover';
+import { coversOf, followPreview, mergeOptions, NeedsCoverError, proposedOptions, type OpOptions } from '@/store/cover';
 import { runActionWith, type CoverRequest } from '@/utils/runActionCore';
 import * as analyticsUi from '@/components/analytics/analyticsUi';
 import * as exchangeUi from '@/components/transactions/exchangeUi';
@@ -79,7 +79,6 @@ import * as recurring from '@/store/recurring';
 import * as ops from '@/store/operations';
 import {
   accountBalance,
-  defaultCoverFundId,
   fundAllocated,
   fundCurrent,
   fundProgress,
@@ -98,7 +97,6 @@ import {
   netWorth,
   openingBalanceForCurrentBalance,
   pickerCategories,
-  planCover,
   sinkingMonthlySuggestion,
   stateSummary,
   suggestAllocation,
@@ -1102,7 +1100,7 @@ describe('fund allocation', () => {
   });
 });
 
-describe('covering overspent fund money', () => {
+describe('an over-reserved account (old data): releasing, and deleting a fund', () => {
   // 10,000 liquid, 9,000 allocated; then a 5,000 expense → unassigned −4,000.
   const state = (): FinanceState => {
     let s: FinanceState = {
@@ -1118,27 +1116,14 @@ describe('covering overspent fund money', () => {
     return s;
   };
 
-  it('defaults to the lowest-priority fund with cash and reports what is left', () => {
+  it('a release comes out of the over-reserved account, and it brings unassigned back to zero', () => {
     const s = state();
     approx(unassignedEGP(s), -4000);
-    assert.equal(defaultCoverFundId(s), 'B');
-    const plan = planCover(s, ['B']);
-    assert.deepEqual(plan.withdrawals, [{ fundId: 'B', amount: 3000 }]);
-    approx(plan.remainingEGP, 1000);
-  });
-
-  it('brings unassigned money back to zero when enough funds are chosen', () => {
-    const s = state();
-    const plan = planCover(s, ['A', 'B']);
-    assert.deepEqual(plan.withdrawals, [
-      { fundId: 'B', amount: 3000 },
-      { fundId: 'A', amount: 1000 },
-    ]);
-    assert.equal(plan.remainingEGP, 0);
-    const after = apply(s, ops.withdrawMany(s, plan.withdrawals, 'تغطية مصروف', makeCtx()));
+    const after = apply(s, ops.withdrawMany(s, [{ fundId: 'B', amount: 3000 }, { fundId: 'A', amount: 1000 }], undefined, makeCtx()));
     assert.ok(unassignedEGP(after) >= 0);
     approx(fundAllocated(after, 'A'), 5000);
     approx(fundAllocated(after, 'B'), 0);
+    assert.deepEqual(invariantViolations(after), []);
   });
 
   it('withdrawMany rejects taking more than a fund holds', () => {
@@ -2723,20 +2708,29 @@ describe('next best actions: rules and ordering', () => {
     assert.deepEqual(by('backup').cta, { label: 'تصدير نسخة', route: '/settings', params: { export: '1' } });
   });
 
-  it('puts covering spent fund money right after due items, and asks for a plan when there is none', () => {
+  it('puts migrated reservations without an account right after due items, and asks for a plan when there is none', () => {
     const s: FinanceState = {
       ...emptyState(),
-      accounts: [account('egp', 'EGP', 1000)],
+      accounts: [account('egp', 'EGP', 300)],
       funds: [fund({ id: 'goal', name: 'جواز', deadline: '2027-09-30' })],
-      reservationMovements: [resv('m', 'goal', 'egp', 5000, '2026-09-01')],
+      unresolvedMovements: [{ id: 'u', fundId: 'goal', amount: 300, currency: 'EGP', date: '2026-09-01', rateSnapshotId: S125.id, reason: 'ambiguous', updatedAt: T0 }],
       recurringRules: [rule({ id: 'r', startDate: '2026-10-05' })],
     };
-    assert.deepEqual(ids(s), ['due', 'cover', 'plan-2026-10', 'emergency', 'backup']);
-    const cover = nba.nextActions(s, NOW)[1];
-    assert.equal(cover.severity, 'urgent');
-    assert.equal(cover.cta.route, 'cover');
-    approx(cover.amount!, 4000);
-    assert.ok(cover.title.startsWith('صرفت ') && cover.title.endsWith(' من فلوس مخصصة'));
+    assert.deepEqual(ids(s), ['due', 'resolve', 'plan-2026-10', 'emergency', 'backup']);
+    const resolve = nba.nextActions(s, NOW)[1];
+    assert.equal(resolve.severity, 'urgent');
+    assert.equal(resolve.cta.route, 'resolve');
+    assert.equal(resolve.dismissible, false);
+  });
+
+  it('automatic items waiting for a cover are an urgent, non-dismissible action', () => {
+    const s: FinanceState = { ...emptyState(), accounts: [account('egp', 'EGP', 1000)] };
+    assert.ok(!ids(s).includes('needsCover'));
+    const asked = nba.nextActions(s, NOW, 2);
+    const action = asked.find((a) => a.id === 'needsCover')!;
+    assert.deepEqual([action.severity, action.cta.route, action.dismissible], ['urgent', '/due', false]);
+    assert.ok(action.title.startsWith('2 معاملات تلقائية'));
+    assert.equal(nba.nextActions(s, NOW, 1).find((a) => a.id === 'needsCover')!.title, 'معاملة تلقائية محتاجة تغطية');
   });
 
   it('marks only due items and spent fund money as non-dismissible', () => {
@@ -2853,7 +2847,7 @@ describe('next best actions: snooze', () => {
   });
 
   it('refuses to snooze due items and spent fund money, and ignores such records', () => {
-    for (const id of ['due', 'cover']) {
+    for (const id of ['due', 'needsCover', 'resolve']) {
       assert.throws(
         () => ops.dismissAction(s(), id, makeCtx()),
         (e: unknown) => e instanceof FinanceValidationError && e.code === 'ACTION_NOT_DISMISSIBLE'
@@ -3970,30 +3964,19 @@ describe('native amounts never drift with the rates', () => {
     assert.throws(() => ops.allocateToFund(funded, 'F', 1, undefined, ctx, 'XYZ' as 'SAR'), { code: 'UNKNOWN_CURRENCY' });
   });
 
-  it('a shortfall in SAR is covered with SAR cash, never with another currency', () => {
+  it('an over-reserved account (old data) is a shortfall in ITS currency; only a release of that currency fixes it', () => {
     const funded = allocate(allocate(withFund(), 400, 'SAR'), 2000, 'EGP');
     const short = spendSar(funded, 800); // SAR balance 200, SAR set aside 400
     const summary = sel.unassignedSummary(short);
     assert.deepEqual(summary.deficits, [{ currency: 'SAR', amount: 200 }]);
     assert.equal(summary.byCurrency.EGP, 3000);
-
-    const plan = planCover(short, ['F']);
-    assert.deepEqual(plan.withdrawals, [{ fundId: 'F', amount: 200, currency: 'SAR' }]);
-    assert.equal(plan.remainingEGP, 0);
-    assert.deepEqual(planCover(short, ['F'], 'EGP').withdrawals, []);
-
-    const covered = apply(short, ops.withdrawMany(short, plan.withdrawals, 'تغطية مصروف', makeCtx()));
-    assert.deepEqual(sel.unassignedSummary(covered).deficits, []);
-    assert.deepEqual(sel.fundCashByCurrency(covered, 'F'), { EGP: 2000, SAR: 200, USD: 0 });
-
-    // Home asks for it in the shortfall's own currency.
-    const action = nba.nextActions(short, NOW).find((a) => a.id === 'cover')!;
-    assert.equal(action.currency, 'SAR');
-    assert.equal(action.amount, 200);
-    // A fund with no SAR cash can't cover a SAR shortfall.
-    const onlyEgp = allocate(allocate(withFund(), 400, 'SAR'), 2000, 'EGP', 'F');
-    const noSar = { ...spendSar(onlyEgp, 800), funds: [...onlyEgp.funds, fund({ id: 'G', priority: 2 })] };
-    approx(planCover(noSar, ['G']).remainingEGP, 200 * 13);
+    // EGP cash cannot be released to fix SAR money.
+    assert.throws(() => ops.withdrawFromFund(short, 'F', 2001, undefined, makeCtx(), 'SAR'), { code: 'WITHDRAW_EXCEEDS_FUND' });
+    const fixed = apply(short, ops.withdrawFromFund(short, 'F', 200, undefined, makeCtx(), 'SAR'));
+    assert.deepEqual(sel.unassignedSummary(fixed).deficits, []);
+    assert.deepEqual(sel.fundCashByCurrency(fixed, 'F'), { EGP: 2000, SAR: 200, USD: 0 });
+    // The old "you spent fund money" action is gone: such a spend now asks for a cover when it is made.
+    assert.ok(!nba.nextActions(short, NOW).some((a) => a.id === 'cover'));
   });
 
   it('Home quotes money without a job in its own currency, or the EGP total for several', () => {
@@ -6909,27 +6892,31 @@ describe('every balance-reducing operation, called through runAction, ends in th
 });
 
 describe('INV-5 holds on every write path (D4 fuzz) and failed operations change nothing (INV-6)', () => {
-  it('a long random sequence of operations never leaves an invalid state, with or without a cover', () => {
-    let s: FinanceState = {
-      ...emptyState(),
-      accounts: [strictAccount('E1', 'EGP', 30000), strictAccount('E2', 'EGP', 5000), strictAccount('S1', 'SAR', 4000, 'SA'), strictAccount('S2', 'SAR', 1500, 'SA')],
-      funds: [fund({ id: 'F1', priority: 1, targetAmount: 90000 }), fund({ id: 'F2', priority: 2, currency: 'SAR', targetAmount: 9000 }), fund({ id: 'F3', priority: 3, currency: 'SAR', targetAmount: 4000 })],
-    };
-    let seed = 11;
+  // A long random sequence over EVERY write path. A NeedsCoverError is answered with the proposed decision (or, when
+  // `grantNegative` is false, with everything except the permission to go below zero), exactly like the cover sheet.
+  function fuzz(initial: FinanceState, seed0: number, steps: number, grantNegative: boolean) {
+    let s = initial;
+    let seed = seed0;
     const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
     const pick = <T,>(items: T[]): T => items[Math.floor(rand() * items.length)];
     const amountIn = (max: number) => roundTo(rand() * max + 0.01, 2);
     const ctx = makeCtx();
-    const sarIds = ['S1', 'S2'];
-    const egpIds = ['E1', 'E2'];
+    const idsOf = (c: string) => initial.accounts.filter((a) => !a.archived && a.currency === c).map((a) => a.id);
+    const currencies = ['EGP', 'SAR'].filter((c) => idsOf(c).length > 0);
+    const funds = initial.funds.map((x) => x.id);
+    const decide = (e: NeedsCoverError): OpOptions => {
+      const options = proposedOptions(e);
+      return grantNegative ? options : { ...options, confirm: { ...options.confirm, negative: false } };
+    };
     let applied = 0;
     let asked = 0;
-    for (let i = 0; i < 400; i++) {
+    for (let i = 0; i < steps; i++) {
       const before = JSON.stringify(s);
       const kind = pick(['expense', 'income', 'transfer', 'exchange', 'gold', 'reserve', 'release', 'delete', 'edit', 'opening']);
-      const sar = rand() < 0.5;
-      const ids = sar ? sarIds : egpIds;
-      const currency = sar ? 'SAR' : 'EGP';
+      const currency = pick(currencies);
+      const ids = idsOf(currency);
+      const scale = currency === 'SAR' ? 1 : 12.5;
+      const snapshot = s;
       const run = (call: (o?: OpOptions) => Partial<FinanceState>) => {
         try {
           s = apply(s, call());
@@ -6937,10 +6924,10 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
         } catch (e) {
           if (e instanceof NeedsCoverError) {
             asked++;
-            // Not applied; deciding the default cover applies it, still valid.
+            // Not applied; deciding it applies it, still valid, or it asks again.
             assert.equal(JSON.stringify(s), before);
             try {
-              s = apply(s, call(proposedOptions(e)));
+              s = apply(s, call(decide(e)));
               applied++;
             } catch (e2) {
               assert.ok(e2 instanceof NeedsCoverError || e2 instanceof ops.FinanceValidationError, String(e2));
@@ -6952,33 +6939,195 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
           }
         }
       };
-      const snapshot = s;
-      if (kind === 'expense') run((o) => ops.addTransaction(snapshot, { type: 'expense', amount: amountIn(sar ? 3000 : 15000), currency, accountId: pick(ids), categoryId: 'cat-essentials-bills', date: '2026-10-10' }, ctx, o));
-      else if (kind === 'income') run((o) => ops.addTransaction(snapshot, { type: 'income', amount: amountIn(2000), currency, accountId: pick(ids), categoryId: 'cat-income-salary', date: '2026-10-11' }, ctx, o));
-      else if (kind === 'transfer') run((o) => ops.addTransfer(snapshot, { fromAccountId: ids[0], toAccountId: ids[1], amount: amountIn(sar ? 3000 : 15000), fees: rand() < 0.3 ? [{ accountId: pick(ids), amount: amountIn(20) }] : [], date: '2026-10-12' }, ctx, o));
-      else if (kind === 'exchange') {
+      if (kind === 'expense') run((o) => ops.addTransaction(snapshot, { type: 'expense', amount: amountIn(3000 * scale), currency, accountId: pick(ids), categoryId: 'cat-essentials-bills', date: '2026-10-10' }, ctx, o));
+      else if (kind === 'income') run((o) => ops.addTransaction(snapshot, { type: 'income', amount: amountIn(2000 * scale), currency, accountId: pick(ids), categoryId: 'cat-income-salary', date: '2026-10-11' }, ctx, o));
+      else if (kind === 'transfer' && ids.length >= 2) run((o) => ops.addTransfer(snapshot, { fromAccountId: ids[0], toAccountId: ids[1], amount: amountIn(3000 * scale), fees: rand() < 0.3 ? [{ accountId: pick(ids.slice(0, 2)), amount: amountIn(20) }] : [], date: '2026-10-12' }, ctx, o));
+      else if (kind === 'exchange' && currencies.length === 2) {
+        const [from, to] = rand() < 0.5 ? currencies : [...currencies].reverse();
         const amount = amountIn(2500);
-        run((o) => ops.addExchange(snapshot, sar ? { fromAccountId: pick(sarIds), toAccountId: pick(egpIds), sentAmount: amount, receivedAmount: roundTo(amount * 12.4, 2), fees: rand() < 0.3 ? [{ accountId: pick(sarIds), amount: amountIn(10) }] : [], date: '2026-10-13' } : { fromAccountId: pick(egpIds), toAccountId: pick(sarIds), sentAmount: roundTo(amount * 12.6, 2), receivedAmount: amount, date: '2026-10-13' }, ctx, o));
-      } else if (kind === 'gold') run((o) => ops.buyGold(snapshot, { accountId: pick(ids), amount: amountIn(sar ? 2000 : 10000), date: '2026-10-14', holding: { name: 'g', weightGrams: 1, karat: 24 } }, ctx, o));
-      else if (kind === 'reserve') run(() => ops.allocateToFund(snapshot, pick(['F1', 'F2', 'F3']), amountIn(sar ? 800 : 4000), undefined, ctx, rand() < 0.5 ? undefined : currency));
-      else if (kind === 'release') run(() => ops.withdrawFromFund(snapshot, pick(['F1', 'F2', 'F3']), amountIn(sar ? 800 : 4000), undefined, ctx, currency));
+        const received = from === 'SAR' ? roundTo(amount * 12.4, 2) : roundTo(amount / 12.6, 2);
+        run((o) => ops.addExchange(snapshot, { fromAccountId: pick(idsOf(from)), toAccountId: pick(idsOf(to)), sentAmount: amount, receivedAmount: received, fees: rand() < 0.3 ? [{ accountId: pick(idsOf(from)), amount: amountIn(10) }] : [], date: '2026-10-13' }, ctx, o));
+      } else if (kind === 'gold') run((o) => ops.buyGold(snapshot, { accountId: pick(ids), amount: amountIn(2000 * scale), date: '2026-10-14', holding: { name: 'g', weightGrams: 1, karat: 24 } }, ctx, o));
+      else if (kind === 'reserve') run(() => ops.allocateToFund(snapshot, pick(funds), amountIn(800 * scale), undefined, ctx, rand() < 0.5 ? undefined : currency));
+      else if (kind === 'release') run(() => ops.withdrawFromFund(snapshot, pick(funds), amountIn(800 * scale), undefined, ctx, currency));
       else if (kind === 'delete' && snapshot.transactions.length > 0) run((o) => ops.deleteTransaction(snapshot, pick(snapshot.transactions).id, ctx, o));
       else if (kind === 'edit' && snapshot.transactions.length > 0) {
         const tx = pick(snapshot.transactions);
-        if (tx.type === 'expense' || tx.type === 'income') run((o) => ops.updateTransaction(snapshot, { ...tx, amount: amountIn(sar ? 2500 : 12000) }, ctx, o));
+        if (tx.type === 'expense' || tx.type === 'income') run((o) => ops.updateTransaction(snapshot, { ...tx, amount: amountIn(2500 * (tx.currency === 'SAR' ? 1 : 12.5)) }, ctx, o));
         else if (tx.type === 'transfer') run((o) => ops.updateTransaction(snapshot, { ...tx, amount: amountIn(2000) }, ctx, o));
       } else if (kind === 'opening') {
-        const account = pick(snapshot.accounts);
+        const account = pick(snapshot.accounts.filter((a) => !a.archived));
         run((o) => ops.updateAccount(snapshot, { ...account, openingBalance: roundTo(account.openingBalance * (0.4 + rand()), 2) }, ctx, o));
       }
       assert.deepEqual(invariantViolations(s), [], `after step ${i} (${kind})`);
-      for (const c of ['EGP', 'SAR']) {
+      for (const c of currencies) {
         const cash = sel.liquidByCurrency(s)[c];
-        const reserved = snapshot.accounts.length && roundTo(s.accounts.filter((a) => a.currency === c).reduce((sum, a) => sum + sel.accountReserved(s, a.id), 0), 2);
-        assert.equal(roundTo((reserved as number) + sel.unresolvedByCurrency(s)[c] + sel.unassignedByCurrency(s)[c], 2), cash, c);
+        const reserved = roundTo(s.accounts.filter((a) => a.currency === c).reduce((sum, a) => sum + sel.accountReserved(s, a.id), 0), 2);
+        assert.equal(roundTo(reserved + sel.unresolvedByCurrency(s)[c] + sel.unassignedByCurrency(s)[c], 2), cash, c);
+      }
+      if (!grantNegative) {
+        // Never granted: an account that does not allow it never goes below zero.
+        for (const a of s.accounts) if (!a.allowNegative) assert.ok(sel.accountBalance(s, a.id) >= -0.005, `${a.id} went negative at step ${i} (${kind})`);
       }
     }
+    return { applied, asked, state: s };
+  }
+
+  const world = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [strictAccount('E1', 'EGP', 30000), strictAccount('E2', 'EGP', 5000), strictAccount('S1', 'SAR', 4000, 'SA'), strictAccount('S2', 'SAR', 1500, 'SA')],
+    funds: [fund({ id: 'F1', priority: 1, targetAmount: 90000 }), fund({ id: 'F2', priority: 2, currency: 'SAR', targetAmount: 9000 }), fund({ id: 'F3', priority: 3, currency: 'SAR', targetAmount: 4000 })],
+  });
+
+  it('every account strict, every cover and overdraft question answered yes: never an invalid state', () => {
+    const { applied, asked } = fuzz(world(), 11, 400, true);
     assert.ok(applied > 150, `applied ${applied}`);
     assert.ok(asked > 20, `asked ${asked}`);
+  });
+
+  it('every account strict (allowNegative: false, like the real ones), the overdraft NEVER agreed to: no balance ever goes below zero', () => {
+    const w = world();
+    assert.ok(w.accounts.every((a) => a.allowNegative === false));
+    const { applied, asked, state } = fuzz(w, 23, 500, false);
+    assert.ok(applied > 120, `applied ${applied}`);
+    assert.ok(asked > 20, `asked ${asked}`);
+    assert.ok(state.accounts.every((a) => sel.accountBalance(state, a.id) >= -0.005));
+  });
+
+  it('starting from the local seed (migrated, accounts strict), with funds reserved on its accounts', () => {
+    const local = localSeedV7();
+    if (!local) return;
+    let s = applyV8Steps(local, MIGRATION_CTX);
+    assert.ok(s.accounts.every((a) => !a.allowNegative));
+    s = { ...s, funds: [fund({ id: 'FA', priority: 1, targetAmount: 90000 }), fund({ id: 'FB', priority: 2, currency: 'SAR', targetAmount: 9000 })] };
+    // Reserve some of what the accounts hold, by the default rules.
+    for (const [fundId, amount, currency] of [['FA', 5000, 'EGP'], ['FB', 300, 'SAR']] as const) {
+      try {
+        s = apply(s, ops.allocateToFund(s, fundId, amount, undefined, makeCtx(), currency));
+      } catch {
+        // The seed may not hold that currency: nothing to reserve then.
+      }
+    }
+    assert.deepEqual(invariantViolations(s), []);
+    for (const grant of [true, false]) {
+      const { applied } = fuzz(s, grant ? 31 : 37, 300, grant);
+      assert.ok(applied > 40, `applied ${applied} (grant ${grant})`);
+    }
+  });
+});
+
+describe('step 3: one cover sheet, reallocate, the Q4 offer, the transfer notice and the resolver', () => {
+  const start = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [strictAccount('A1', 'EGP', 20000), strictAccount('A2', 'SAR', 5000, 'SA'), strictAccount('A3', 'SAR', 1000, 'SA')],
+    funds: [
+      fund({ id: 'F1', priority: 1, targetAmount: 100000 }),
+      fund({ id: 'F2', priority: 2, currency: 'SAR', targetAmount: 10000 }),
+      fund({ id: 'F3', priority: 3, currency: 'SAR', targetAmount: 5000, type: 'sinking', frequency: 'yearly', nextDueDate: '2026-12-01' }),
+    ],
+    reservationMovements: [resv('r1', 'F1', 'A1', 8000), resv('r2', 'F2', 'A2', 2000), resv('r3', 'F3', 'A2', 500)],
+  });
+  const asked = (fn: () => unknown): NeedsCoverError => {
+    try { fn(); } catch (e) { assert.ok(e instanceof NeedsCoverError, String(e)); return e; }
+    throw new Error('expected NeedsCoverError');
+  };
+
+  it('an exchange that converts reserved money AND overdraws is ONE question carrying every part of it', () => {
+    const s = start();
+    // 5,500 SAR out of an account holding 5,000 (2,500 reserved): convert the reserved 2,500, and 500 below zero.
+    const input: ops.NewExchange = { fromAccountId: 'A2', toAccountId: 'A1', sentAmount: 5500, receivedAmount: 68200, fees: [], date: '2026-10-10' };
+    const error = asked(() => ops.addExchange(s, input, makeCtx()));
+    assert.deepEqual(error.shortfalls.map((x) => x.kind).sort(), ['conversion', 'negative']);
+    // One decision applies the whole thing.
+    const after = apply(s, ops.addExchange(s, input, makeCtx(), proposedOptions(error)));
+    assert.equal(sel.accountBalance(after, 'A2'), -500);
+    assert.deepEqual(invariantViolations(after), []);
+    // Through runAction it is a single request, and its retry is the one that saves.
+    let state = s;
+    const requests: CoverRequest[] = [];
+    const handlers = { showMessage: () => { throw new Error('message'); }, errorMessage, openCover: (r: CoverRequest) => requests.push(r) };
+    runActionWith(handlers, 'x', (o) => { state = apply(state, ops.addExchange(state, input, makeCtx(), o)); });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].retry(proposedOptions(requests[0].error)), true);
+    assert.equal(requests.length, 1);
+    assert.equal(sel.accountBalance(state, 'A2'), -500);
+  });
+
+  it('an exchange needing a conversion AND a cover for its fee is one question too', () => {
+    const s = start();
+    const input: ops.NewExchange = { fromAccountId: 'A2', toAccountId: 'A1', sentAmount: 2500, receivedAmount: 31000, fees: [{ accountId: 'A2', amount: 2600 }], date: '2026-10-10' };
+    const error = asked(() => ops.addExchange(s, input, makeCtx()));
+    assert.ok(error.shortfalls.some((x) => x.kind === 'conversion'));
+    assert.ok(error.shortfalls.length >= 2);
+    assert.deepEqual(invariantViolations(apply(s, ops.addExchange(s, input, makeCtx(), proposedOptions(error)))), []);
+  });
+
+  it('reallocate moves reserved money between funds on the same account: no cash moves and nothing is "saved"', () => {
+    const s = start();
+    const after = apply(s, ops.reallocate(s, { fromFundId: 'F2', toFundId: 'F3', amount: 700, currency: 'SAR' }, makeCtx()));
+    assert.deepEqual([sel.reservation(after, 'F2', 'A2'), sel.reservation(after, 'F3', 'A2')], [1300, 1200]);
+    const pair = after.reservationMovements.slice(3);
+    assert.deepEqual(pair.map((m) => [m.fundId, m.amount, m.kind]), [['F2', -700, 'reallocate'], ['F3', 700, 'reallocate']]);
+    assert.equal(pair[0].groupId, pair[1].groupId);
+    assert.deepEqual(invariantViolations(after), []);
+    assert.equal(sel.accountAvailable(after, 'A2'), sel.accountAvailable(s, 'A2'));
+    assert.equal(sel.netWorth(after, 'EGP'), sel.netWorth(s, 'EGP'));
+    assert.equal(sel.monthFlows(after, '2026-10', 'EGP').savedToFunds, sel.monthFlows(s, '2026-10', 'EGP').savedToFunds);
+    assert.throws(() => ops.reallocate(s, { fromFundId: 'F2', toFundId: 'F3', amount: 2001, currency: 'SAR' }, makeCtx()), { code: 'WITHDRAW_EXCEEDS_FUND' });
+    assert.throws(() => ops.reallocate(s, { fromFundId: 'F2', toFundId: 'F2', amount: 1, currency: 'SAR' }, makeCtx()), { code: 'DUPLICATE_ENTRY' });
+  });
+
+  it('Q4: deleting a covered expense re-reserves nothing by itself; coversOf is the one-tap offer, given back once', () => {
+    const s = start();
+    const expense: ops.NewIncomeExpense = { type: 'expense', amount: 2800, currency: 'SAR', accountId: 'A2', categoryId: 'cat-essentials-bills', date: '2026-10-10' };
+    const covered = apply(s, ops.addTransaction(s, expense, makeCtx(), proposedOptions(asked(() => ops.addTransaction(s, expense, makeCtx())))));
+    const txId = covered.transactions[0].id;
+    const offer = coversOf(covered, txId);
+    assert.deepEqual(offer, [{ fundId: 'F3', accountId: 'A2', amount: 300 }]);
+    const deleted = apply(covered, ops.deleteTransaction(covered, txId, makeCtx()));
+    // Nothing came back by itself: F3 still holds 200 of its original 500, and the 300 is free.
+    assert.equal(sel.reservation(deleted, 'F3', 'A2'), 200);
+    assert.deepEqual(coversOf(deleted, txId), offer);
+    const back = apply(deleted, ops.reReserveCovers(deleted, offer, txId, makeCtx()));
+    assert.equal(sel.reservation(back, 'F3', 'A2'), 500);
+    assert.deepEqual(coversOf(back, txId), []);
+    assert.deepEqual(invariantViolations(back), []);
+    // Only as far as the account holds it free now.
+    const tight = apply(deleted, ops.addTransaction(deleted, { ...expense, amount: 2800 }, makeCtx()));
+    assert.equal(sel.accountAvailable(tight, 'A2'), 0);
+    assert.throws(() => ops.reReserveCovers(tight, offer, txId, makeCtx()), { code: 'RESERVE_EXCEEDS_AVAILABLE' });
+  });
+
+  it('the transfer notice: followPreview is what the transfer will carry, and editing the split is accepted when it adds up', () => {
+    const s = start();
+    assert.deepEqual(followPreview(s, 'A2', 2000), { need: 0, currency: 'SAR', split: [] });
+    const preview = followPreview(s, 'A2', 4000)!;
+    assert.deepEqual([preview.need, preview.split], [1500, [{ fundId: 'F2', amount: 1200 }, { fundId: 'F3', amount: 300 }]]);
+    // A fee on the source is paid from available first, so more has to travel.
+    assert.equal(followPreview(s, 'A2', 2400, 200)!.need, 100);
+    const done = apply(s, ops.addTransfer(s, { fromAccountId: 'A2', toAccountId: 'A3', amount: 4000, date: '2026-10-10' }, makeCtx(), { follow: [{ fundId: 'F2', amount: 1000 }, { fundId: 'F3', amount: 500 }] }));
+    assert.deepEqual([sel.reservation(done, 'F2', 'A3'), sel.reservation(done, 'F3', 'A3')], [1000, 500]);
+  });
+
+  it('the resolver gives a fund’s unresolved money an account, if that account holds it; the fund total does not change', () => {
+    const s: FinanceState = {
+      ...start(),
+      reservationMovements: [],
+      unresolvedMovements: [
+        { id: 'u1', fundId: 'F2', amount: 1500, currency: 'SAR', date: '2026-09-01', note: 'x', rateSnapshotId: S125.id, reason: 'ambiguous', updatedAt: T0 },
+        { id: 'u2', fundId: 'F2', amount: 300, currency: 'SAR', date: '2026-09-05', rateSnapshotId: S125.id, reason: 'ambiguous', updatedAt: T0 },
+      ],
+    };
+    const total = sel.fundAllocated(s, 'F2');
+    const after = apply(s, ops.resolveUnresolved(s, { fundId: 'F2', currency: 'SAR', accountId: 'A2' }, makeCtx()));
+    assert.deepEqual(after.unresolvedMovements, []);
+    assert.deepEqual(after.reservationMovements.map((m) => [m.id, m.accountId, m.amount, m.kind, m.date]), [['u1', 'A2', 1500, 'adjust', '2026-09-01'], ['u2', 'A2', 300, 'adjust', '2026-09-05']]);
+    assert.equal(sel.fundAllocated(after, 'F2'), total);
+    assert.deepEqual(invariantViolations(after), []);
+    assert.deepEqual(after.tombstones.map((x) => x.entity), ['unresolvedMovement', 'unresolvedMovement']);
+    // INV-5 decides: A3 holds only 1,000.
+    assert.throws(() => ops.resolveUnresolved(s, { fundId: 'F2', currency: 'SAR', accountId: 'A3' }, makeCtx()), { code: 'RESERVE_EXCEEDS_AVAILABLE' });
+    assert.throws(() => ops.resolveUnresolved(s, { fundId: 'F2', currency: 'EGP', accountId: 'A1' }, makeCtx()), { code: 'NOT_FOUND' });
+    assert.throws(() => ops.resolveUnresolved(s, { fundId: 'F2', currency: 'SAR', accountId: 'A1' }, makeCtx()), { code: 'CURRENCY_MISMATCH' });
   });
 });

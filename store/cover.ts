@@ -248,3 +248,41 @@ export function defaultSinkingAccountId(
   const last = state.settings.lastUsed?.expense?.accountId;
   return best?.id ?? active.find((a) => a.id === last)?.id ?? active[0]?.id;
 }
+
+// --- What travels with a transfer or exchange (the sheet's notice and the operations share it) ---------------------
+
+// Reserved money that has to leave `fromAccountId` WITH a move of `sent` (in its currency): the part above what is
+// available after the fees charged to that account, at most what is reserved there. `split` is the default one:
+// in proportion to each fund's reservation, the lowest-priority fund last (it takes the rounding remainder).
+export function followPreview(
+  state: Pick<FinanceState, 'accounts' | 'funds' | 'transactions' | 'reservationMovements'>,
+  fromAccountId: string,
+  sent: number,
+  feeOnSource = 0
+): { need: number; currency: CurrencyCode; split: { fundId: string; amount: number }[] } | null {
+  const from = state.accounts.find((a) => a.id === fromAccountId);
+  if (!from) return null;
+  const available = Math.max(0, roundIn(accountBalance(state, from.id) - accountReserved(state, from.id), from.currency));
+  const reserved = reservationsOn(state, from.id).reverse();
+  const need = Math.min(roundIn(sent - Math.max(0, available - feeOnSource), from.currency), roundIn(reserved.reduce((s, r) => s + r.amount, 0), from.currency));
+  if (!(need > EPSILON)) return { need: 0, currency: from.currency, split: [] };
+  return { need, currency: from.currency, split: proportionalSplit(reserved, need, from.currency) };
+}
+
+// What covering a transaction took from the funds (Q4): per fund and account, net of any re-reservation of it.
+// After that transaction is deleted this is what the one-tap "رجّع للصناديق" offer gives back.
+export function coversOf(
+  state: Pick<FinanceState, 'reservationMovements'>,
+  sourceTransactionId: string
+): CoverSelection[] {
+  const net = new Map<string, CoverSelection>();
+  for (const m of state.reservationMovements) {
+    if (m.sourceTransactionId !== sourceTransactionId || (m.kind !== 'cover' && m.kind !== 'reserve')) continue;
+    const key = `${m.fundId}|${m.accountId}`;
+    const entry = net.get(key) ?? { fundId: m.fundId, accountId: m.accountId, amount: 0 };
+    // A cover is negative (taken), a re-reservation positive (given back).
+    entry.amount = Math.round((entry.amount - m.amount) * 100) / 100;
+    net.set(key, entry);
+  }
+  return [...net.values()].filter((c) => c.amount > EPSILON);
+}

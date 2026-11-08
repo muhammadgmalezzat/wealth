@@ -18,7 +18,7 @@ import { convertCurrency } from '@/utils/currency';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
-type Mode = 'allocate' | 'withdraw';
+type Mode = 'allocate' | 'withdraw' | 'move';
 
 interface MoveMoneySheetProps {
   fund: Fund;
@@ -39,11 +39,15 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
   const [note, setNote] = useState('');
   // null = chosen automatically (shown below); an account id once the user picks one.
   const [accountPick, setAccountPick] = useState<string | null>(null);
+  // Moving: the fund that receives the reserved money (same account, nothing leaves the account).
+  const [targetId, setTargetId] = useState<string | null>(null);
 
   const cash = fundCashByCurrency(state, fund.id);
   const held = currencyList(state).filter((c) => cash[c] > 0.005);
   // Withdrawing is only possible in a currency the fund holds.
   const options: readonly CurrencyCode[] = mode === 'allocate' ? currencyList(state) : held.length > 0 ? held : [fund.currency];
+  const otherFunds = state.funds.filter((f) => f.id !== fund.id);
+  const target = otherFunds.find((f) => f.id === targetId) ?? otherFunds[0];
   const currency = options.includes(picked) ? picked : options[0];
 
   const available =
@@ -68,6 +72,14 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
   const handleSave = () => {
     const value = amount ?? NaN;
     const trimmed = note.trim() || undefined;
+    if (mode === 'move') {
+      if (!target) return;
+      const done = runAction('تعذّر الحفظ', () =>
+        state.reallocate({ fromFundId: fund.id, toFundId: target.id, amount: value, currency, ...(pickedId ? { accountId: pickedId } : {}), ...(trimmed ? { note: trimmed } : {}) })
+      );
+      if (done) onClose();
+      return;
+    }
     const saved = runAction('تعذّر الحفظ', () =>
       mode === 'allocate'
         ? // allocateMany enforces that the money is actually unassigned, in this currency.
@@ -83,6 +95,7 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
         options={[
           { label: 'إضافة', value: 'allocate' },
           { label: 'سحب', value: 'withdraw' },
+          ...(otherFunds.length > 0 ? [{ label: 'نقل لصندوق', value: 'move' as const }] : []),
         ]}
         value={mode}
         onChange={setMode}
@@ -106,6 +119,18 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
           text: `${mode === 'allocate' ? 'المتاح للتخطيط' : 'في الصندوق نقداً'}: ${formatMoney(available, currency)}`,
         }}
       />
+      {mode === 'move' && otherFunds.length > 0 && (
+        <View style={styles.note}>
+          <AppText variant="secondary" color="textSecondary">
+            لصندوق (الفلوس بتفضل في نفس الحساب)
+          </AppText>
+          <ChipRow>
+            {otherFunds.map((f) => (
+              <Chip key={f.id} label={f.name} selected={target?.id === f.id} onPress={() => setTargetId(f.id)} />
+            ))}
+          </ChipRow>
+        </View>
+      )}
       {foreign && amount !== null && (
         <AppText variant="caption" color="textSecondary" align="center">
           بسعر النهارده ≈ {formatMoney(convertCurrency(amount, currency, fund.currency, state.settings.rates), fund.currency)} في الصندوق
@@ -114,7 +139,7 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
       {accountChoices.length > 0 && (
         <View style={styles.note}>
           <AppText variant="secondary" color="textSecondary">
-            {mode === 'allocate' ? 'من أنهي حساب' : 'من أنهي حساب هيرجع'}
+            {mode === 'allocate' ? 'من أنهي حساب' : mode === 'move' ? 'من أنهي حساب' : 'من أنهي حساب هيرجع'}
           </AppText>
           <ChipRow>
             <Chip label="تلقائي" selected={!pickedId} onPress={() => setAccountPick(null)} />
@@ -124,7 +149,7 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
           </ChipRow>
           {plan.length > 0 && !planError && (
             <AppText variant="caption" color="textSecondary" accessibilityLabel="الحساب المختار">
-              {plan.map((s) => `${formatMoney(s.amount, currency)} ${mode === 'allocate' ? 'من' : 'لـ'} ${accountName(s.accountId)}`).join('، ')}
+              {plan.map((s) => `${formatMoney(s.amount, currency)} ${mode === 'allocate' || mode === 'move' ? 'من' : 'لـ'} ${accountName(s.accountId)}`).join('، ')}
               {pickedId ? '' : ' (اختيار تلقائي)'}
             </AppText>
           )}

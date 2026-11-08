@@ -25,8 +25,8 @@ type State = FinanceState;
 
 export type ActionSeverity = 'urgent' | 'warning' | 'opportunity' | 'info';
 
-// Screens, or a sheet Home opens itself ('cover', 'assign', 'new-emergency').
-export type ActionRoute = '/due' | '/plan' | '/review' | '/settings' | '/fund/[id]' | 'cover' | 'assign' | 'new-emergency';
+// Screens, or a sheet Home opens itself ('resolve', 'assign', 'new-emergency').
+export type ActionRoute = '/due' | '/plan' | '/review' | '/settings' | '/fund/[id]' | 'resolve' | 'assign' | 'new-emergency';
 
 export interface NextAction {
   // Stable per situation ('due', 'sinking-<fundId>', 'review-2026-09'…): snoozes are keyed by it.
@@ -43,7 +43,7 @@ export interface NextAction {
 }
 
 // Due items and spent fund money can't be snoozed: they make the numbers wrong until handled.
-export const NON_DISMISSIBLE_ACTION_IDS = ['due', 'cover'];
+export const NON_DISMISSIBLE_ACTION_IDS = ['due', 'needsCover', 'resolve'];
 export const SNOOZE_MS = 24 * 60 * 60 * 1000;
 // Prices and backups older than this many days get a nudge.
 export const STALE_DAYS = 7;
@@ -110,11 +110,13 @@ function amountToShow(parts: CurrencyAmount[], totalEGP: number): { amount: numb
 }
 
 // Every applicable action, snoozed ones included, sorted by priority. Rules, in order:
-//  1 due 'confirm' items          2 fund money spent (unassigned < 0)   3 overspent plan lines
+//  1 due 'confirm' items          2 automatic items needing a cover / unresolved reservations   3 overspent plan lines
 //  4 last month not reviewed       5 no plan this month                  6 no / thin emergency fund
 //  7 sinking fund due ≤ 14 days    8 fund behind this month              9 money without a job
 // 10 gold / FX prices ≥ 7 days old 11 last backup ≥ 7 days old (or never)
-export function allActions(state: State, now: Date = new Date()): NextAction[] {
+// `blockedAuto`: how many automatic recurring items could not be recorded because they would eat into reserved money
+// (ops.blockedDue; passed in because the operations import this module).
+export function allActions(state: State, now: Date = new Date(), blockedAuto = 0): NextAction[] {
   const today = toDateKey(now);
   const month = toMonthKey(now);
   const rates = state.settings.rates;
@@ -135,16 +137,25 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
     });
   }
 
-  // 2
-  if (unassigned.deficits.length > 0) {
-    const shown = amountToShow(unassigned.deficits, unassigned.deficitEGP);
+  // 2 — nothing can be spent from reserved money without a cover any more, so the old "you spent fund money" action is
+  // gone. What is left: automatic items waiting for a cover, and migrated reservations without an account.
+  if (blockedAuto > 0) {
     add(2, {
-      id: 'cover',
+      id: 'needsCover',
       severity: 'urgent',
-      title: `صرفت ${formatMoney(shown.amount, shown.currency)} من فلوس مخصصة`,
-      subtitle: 'رجّع الفرق من صندوق عشان أرقام الصناديق تفضل حقيقية.',
-      ...shown,
-      cta: { label: 'غطّي الفرق', route: 'cover' },
+      title: `${blockedAuto === 1 ? 'معاملة تلقائية' : `${blockedAuto} معاملات تلقائية`} محتاجة تغطية`,
+      subtitle: 'هتاخد من فلوس صناديق لو أكدتها، فمتسجلتش لوحدها.',
+      cta: { label: 'راجعها', route: '/due' },
+    });
+  }
+  if (state.unresolvedMovements.length > 0) {
+    const groups = new Set(state.unresolvedMovements.map((m) => `${m.fundId}|${m.currency}`)).size;
+    add(2, {
+      id: 'resolve',
+      severity: 'urgent',
+      title: `${groups === 1 ? 'فلوس محجوزة' : `${groups} مبالغ محجوزة`} ومش محدد حسابها`,
+      subtitle: 'اختار الحساب اللي فيه الفلوس دي عشان الأرقام تتظبط.',
+      cta: { label: 'حدّد الحساب', route: 'resolve' },
     });
   }
 
@@ -308,6 +319,6 @@ export function allActions(state: State, now: Date = new Date()): NextAction[] {
 }
 
 // What to show now: allActions without the snoozed ones.
-export function nextActions(state: State, now: Date = new Date()): NextAction[] {
-  return allActions(state, now).filter((a) => !isSnoozed(state, a, now));
+export function nextActions(state: State, now: Date = new Date(), blockedAuto = 0): NextAction[] {
+  return allActions(state, now, blockedAuto).filter((a) => !isSnoozed(state, a, now));
 }

@@ -9,7 +9,7 @@ import { createPersistOptions, createWriteGuard, type HydrationFailure } from '.
 import { applyV8Steps, LATEST_V8_STEP } from './migrateV8';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import * as ops from './operations';
-import type { OpOptions } from './cover';
+import type { CoverSelection, OpOptions } from './cover';
 import { stateSummary, type FundAmount } from './selectors';
 import type {
   Account,
@@ -109,6 +109,9 @@ interface FinanceActions {
   // `currency`: the currency of `amount` (the fund's when omitted).
   allocateToFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode) => void;
   withdrawFromFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode, accountId?: string) => void;
+  reallocate: (input: ops.Reallocation) => void;
+  reReserveCovers: (covers: CoverSelection[], sourceTransactionId: string) => void;
+  resolveUnresolved: (input: ops.Resolution) => void;
 
   addHolding: (input: ops.NewHolding) => void;
   updateHolding: (holding: ops.Editable<Holding>) => void;
@@ -244,6 +247,9 @@ export const useFinanceStore = create<FinanceStore>()(
       paySinkingFund: (payment, options) => set(ops.paySinkingFund(get(), payment, ctx, options)),
       allocateToFund: (fundId, amount, note, currency) =>
         set(ops.allocateToFund(get(), fundId, amount, note, ctx, currency)),
+      reallocate: (input) => set(ops.reallocate(get(), input, ctx)),
+      reReserveCovers: (covers, sourceTransactionId) => set(ops.reReserveCovers(get(), covers, sourceTransactionId, ctx)),
+      resolveUnresolved: (input) => set(ops.resolveUnresolved(get(), input, ctx)),
       withdrawFromFund: (fundId, amount, note, currency, accountId) =>
         set(ops.withdrawFromFund(get(), fundId, amount, note, ctx, currency, accountId)),
 
