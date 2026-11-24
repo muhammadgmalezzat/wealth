@@ -1,7 +1,8 @@
 # Spending from a fund, goals achieved, and the cover-sheet order — design
 
-Status: **proposal, not built.** Builds on data v9 (`CURRENCY_AND_FUNDS_DESIGN.md`: account-backed reservations, INV-5,
-the cover gate; `RECEIVABLES_DESIGN.md`: the refill offer). All numbers here are made up.
+Status: **approved (2026-11-24), not built.** Decisions: §6 (Q1, Q6, Q8 and §3.3, marked **Decided**). Additional
+acceptance criteria: §10 (AC-1 … AC-10). Builds on data v9 (`CURRENCY_AND_FUNDS_DESIGN.md`: account-backed
+reservations, INV-5, the cover gate; `RECEIVABLES_DESIGN.md`: the refill offer). All numbers here are made up.
 
 ---
 
@@ -49,6 +50,11 @@ Here:
   ignores the field.
 
 `CURRENT_VERSION` stays 9, and `hasStateShape` / restore checks are unchanged.
+
+**Condition (AC-9).** The no-migration approach holds only if the compatibility tests in §7 pass: `achievedAt` must
+survive every write path that touches a fund, plus backup export / restore and a simulated rollback round trip. If any
+write path drops it, that path is fixed to spread the record. If that can't be done safely, the design falls back to a
+v9 sub-step (or v10) and comes back for approval before going on.
 
 ---
 
@@ -104,13 +110,19 @@ cover: [{fundId, accountId, amount}]   → 'cover' movements (borrowed to pay so
 The gate accepts any split where spend + cover from funds ≥ the shortfall and ≤ min(expense, Σ reservations on the
 account). Whatever is not taken from funds comes from free money.
 
-### 3.3 Editing and deleting an expense that spent fund money (rule 5)
+### 3.3 Editing and deleting an expense that spent fund money (rule 5) — **Decided**
 
 The link is derived: the fund(s) and amounts are the expense's `spend` movements. No counter is stored.
 
 - **Delete:** its `spend` movements are removed in the same patch (tombstones, entity `reservationMovement`), so the
   money goes back to the fund on the same account. INV-5 can't break, because the balance rises by the expense ≥ the
-  spend. Its `cover` movements keep today's behaviour (the one-tap Q4 offer).
+  spend. **Decided:** this restore is automatic, and it applies to **sinking-fund payments too** (`paySinkingFund`
+  creates the same `spend` movements). A sinking fund's `nextDueDate` is not moved back (a notice says so). If the
+  fund is achieved, it **stays achieved** (AC-5).
+- **Cover vs spend on delete (AC-6):** its `cover` movements keep today's behaviour (the one-tap Q4 «رجّع للصناديق؟»
+  offer, never automatic). Spend means "the purchase was this fund's purpose", so undoing the purchase returns it; cover
+  means "borrowed for something else", so returning it is the user's choice. A mixed expense (spend + cover + free money)
+  reverses each part by its own rule in one patch (AC-7).
 - **Edit** (amount, date, note, category): remove the old spend movements, then re-apply with the same fund(s): new
   spend = min(new amount, the fund's reservation after removal). Then the normal gate.
 - **Edit account:** the fund's reservation is looked up on the new account; if it has none there, the spend becomes 0
@@ -123,8 +135,13 @@ The link is derived: the fund(s) and amounts are the expense's `spend` movements
 | Operation | Rules |
 |---|---|
 | `achieveFund(id, { releaseLeftover })` | goals only (`type 'goal'`, `FUND_NOT_A_GOAL` otherwise); sets `achievedAt = now`. With `releaseLeftover: true` it also releases the fund's remaining reservations, every account, through the existing release path (`release` movements), **in the same patch**. Never released without that flag. Twice = once. |
-| `reopenFund(id)` | clears `achievedAt`. Released money is not taken back (the user reserves again if wanted). |
+| `reopenFund(id)` | clears `achievedAt` (AC-3). Released money is not taken back (the user reserves again if wanted). |
 | reserve / reallocate-in / editFund cash increase on an achieved fund | refused, `FUND_ACHIEVED` «الهدف ده اتحقق؛ رجّعه هدف مفتوح الأول» |
+| leftover of an achieved fund (AC-4) | stays visible (fund detail, «أهداف اتحققت» row, Funds totals) and can be **released** (`withdrawFromFund`, existing) or **reallocated out** to an active fund (`reallocate`, existing; the achieved fund may only be the source). Never moved by itself. |
+
+**Achievement is always explicit (AC-2).** Reaching or passing the target (reservations, spending or both) never sets
+`achievedAt`. At most it shows the dismissible Q8 nudge, and only `achieveFund`, called from the user's
+«تم الهدف 🎉» confirmation, sets it.
 
 "Links the expenses that achieved it" is derived: the fund's `spend` movements and their `sourceTransactionId`s. No
 list is stored, so editing or deleting a purchase updates the achieved summary by itself.
@@ -142,7 +159,14 @@ fundSpent(state, fundId, to?)      Σ |spend| of the fund, each valued in the fu
 fundPurchases(state, fundId)       the expenses its spend movements point at (newest first)
 spendOf(state, txId)               the expense's spend movements (for the edit sheet and the row chip)
 planSpend(state, fundId, accountId, amount)   min(amount, reservation) — what «من صندوق» will take
+fundContributed(state, fundId, month?)   money put in (reserve, adjust in) — the saving metric
+fundReserved(state, fundId)              what is still reserved now (Σ net reservations, all accounts)
 ```
+
+**Three distinct metrics (Q6, decided).** A fund's **contributions** (money put in), **spending** (`spend`), and
+**remaining reservations** (what is still set aside) are separate selectors and are shown separately. They are never
+netted into one "saved" figure. `cover` and `release` are neither contributions nor spending; they are money taken
+back.
 
 MoveMoneySheet's reallocation target list filters out achieved funds explicitly. `reservationsOn` (cover candidates)
 keeps achieved funds' leftovers: it is reserved money, and offering it is correct.
@@ -153,8 +177,14 @@ keeps achieved funds' leftovers: it is reserved money, and offering it is correc
   it measures today.
 - `paySinkingFund`'s spend amounts are identical.
 
-The frozen-oracle report must stay diff 0 (§7). The only behaviour change on existing data is in §3.3: deleting an
-expense now gives its spend back to the fund. Today that only affects deleted sinking payments.
+The frozen-oracle report must stay diff 0 (§7).
+
+**Intended behaviour changes on existing data (decided):**
+1. §3.3: deleting an expense gives its spend back to the fund. Today this only affects deleted sinking payments.
+2. Q6: `spend` no longer lowers a fund's monthly saving pace. Fund status ("behind" / "on track") and the plan's
+   "allocated this month" can therefore change in a month that has a sinking payment, compared with today's v9 (not
+   with the v7 oracle, which has no spend). The step that makes this change lists every number it moves, from a
+   synthetic before/after report.
 
 ---
 
@@ -167,9 +197,9 @@ expense now gives its spend back to the fund. Today that only affects deleted si
 | **Recurring / processDue** | No fund link on rules in this release (Q7). An automatic expense that would touch reserved money stays blocked as today; confirming it opens the new sheet (§5.2) with both choices. `paySinkingFund` unchanged in behaviour. |
 | **Cover gate elsewhere** | Gold purchase, transfer fees, income delete, opening-balance edit: unchanged sheet (cover only). |
 | **Plan** | Achieved funds disappear from contribution suggestions and pickers; existing plan lines for them stay as history (shown, not suggested). |
-| **Next Best Action** | Rules 6–8 skip achieved funds (via `fundsByPriority`). Optional new info action (Q8 below): «وصلت لهدف «تابلت»؟» when a goal's reservations ≥ target or a spend ≥ target. |
+| **Next Best Action** | Rules 6–8 skip achieved funds (via `fundsByPriority`). **Decided (Q8):** a new dismissible action «وصلت لهدف «تابلت»؟» (id `goal-reached-<fundId>`) when an active goal's reservations + spending ≥ target; its button opens the «تم الهدف 🎉» sheet; it never achieves by itself (AC-2). |
 | **Backups / restore** | `achievedAt` travels in the fund record. No shape change. Older v9 backups → active funds. |
-| **Monthly pace** | `countsAsSaving('spend')` is true today, so spending a goal mid-month makes it look "behind". Q6 below. |
+| **Monthly pace** | `countsAsSaving('spend')` is true today, so spending a goal mid-month makes it look "behind". **Decided (Q6):** `spend` is excluded from the saving pace; contributions, spending and remaining reservations are separate metrics (§3.5). |
 
 ---
 
@@ -178,8 +208,11 @@ expense now gives its spend back to the fund. Today that only affects deleted si
 All existing glass components (`FormSheet`, `Chip`/`ChipRow`, `Card subtle`, `ListRow`, `StatusChip`, `InsightCard`),
 RTL, no new colours.
 
-### 5.1 Expense sheet — «من صندوق» (rule 1)
+### 5.1 Expense sheet — «من صندوق» (rule 1, AC-1)
 
+- **The primary entry point for intentional fund spending (AC-1):** shown whenever the expense's account has
+  reservations, **including when free money is enough** and no cover would be asked. The cover sheet (§5.2) is only a
+  second chance for an expense that is bigger than the free money.
 - Shown only for **مصروف**, under the account line, when the selected account has reservations
   (`reservationsOn(state, accountId)`). Hidden otherwise (no empty control).
 - A chip row: «من صندوق:» [بدون] [تابلت · ج.م 6,000] [طوارئ · ج.م 2,000] … Default «بدون» for a new expense; the existing
@@ -199,7 +232,7 @@ Free money is already gone by the time the sheet speaks.
 **New, for a `'cover'` shortfall that carries `expense`:**
 
 - Title «تدفعه منين؟»; header line «المصروف ج.م 6,000 والفلوس الحرة في «كاش» ج.م 4,000 بس.»
-- **Two choice cards, neither preselected.** «تأكيد» stays disabled until one is chosen.
+- **Two choice cards, neither preselected (Q1, decided).** «تأكيد» stays disabled until one is chosen.
   1. **«من صندوق»** — «اصرف من فلوس صندوق كنت محوّش لها.»
      - Fund chips with editable amounts, prefilled only when exactly one fund on the account holds ≥ the expense (that
        fund, the full expense).
@@ -231,7 +264,12 @@ sheet (only «من الفلوس الحرة الأول» semantics make sense the
     **«سيبه في الصندوق»** (no default; rule 3: ask, never auto);
   - without a leftover, one button «تم».
 - Achieved detail: header chip «اتحقق ٢٠ نوفمبر» (ok tone), «الهدف ج.م 6,000 · اتصرف ج.م 6,000», the purchases list
-  (tapping one opens the transaction), the leftover if any (with «رجّع الباقي»), and **«رجّعه هدف مفتوح»**.
+  (tapping one opens the transaction), and **«رجّعه هدف مفتوح»** (AC-3).
+- **Leftover, always visible (AC-4):** «لسه محجوز ج.م 500» per account, with **«رجّع للفلوس الحرة»** (release) and
+  **«انقل لصندوق تاني»** (reallocate to an active fund, existing MoveMoneySheet; achieved funds are not offered as
+  targets).
+- After a linked purchase is deleted (AC-5): «الـ ج.م 6,000 رجعوا للصندوق. الهدف لسه متحقق؛ لو عايز ترجّعه مفتوح دوس
+  «رجّعه هدف مفتوح».» The goal stays achieved.
 
 ### 5.4 Funds tab — «أهداف اتحققت»
 
@@ -254,14 +292,14 @@ sheet (only «من الفلوس الحرة الأول» semantics make sense the
 
 | # | Case | Recommendation |
 |---|---|---|
-| Q1 | No default card in the expense cover sheet (§5.2) | **No default** (explained above). Alternative if it feels heavy in use: preselect «من الفلوس الحرة الأول» (today's numbers). |
+| Q1 | No default card in the expense cover sheet (§5.2) | **Decided: no default card; an explicit selection is required.** |
 | Q2 | Expense smaller than the fund's reservation | spend = expense; the rest stays reserved (and is offered for release on «تم الهدف»). |
 | Q3 | Fund reserved on several accounts | «من صندوق» spends only its part on the expense's account. No automatic move from other accounts; the line says how much came from free money. |
 | Q4 | Fund in another currency than the account (an EGP goal with SAR reserved) | Spend in the account's currency; «اتصرف» shown in the fund currency at each movement's snapshot (`movementValueInFund`). |
-| Q5 | Deleting the purchase after «تم الهدف» | The spend goes back to the fund; the fund stays achieved, and a notice offers «رجّعه هدف مفتوح». Don't reopen by itself. |
-| Q6 | `countsAsSaving('spend')` makes a goal "behind" in the month it is spent | **Decide.** Recommend: exclude `spend` from the saving pace (spending is not un-saving). This changes fund status / plan "allocated" in months with a sinking payment, compared with today's v9 (not with the v7 oracle, which has no spend). Alternative: leave as is in this release. |
+| Q5 | Deleting the purchase after «تم الهدف» | **Decided (AC-5):** the spend goes back to the fund; the fund stays achieved, and a notice offers «رجّعه هدف مفتوح». Never reopens by itself. |
+| Q6 | `countsAsSaving('spend')` makes a goal "behind" in the month it is spent | **Decided: exclude goal spending from the monthly saving pace;** contributions, spending and remaining reservations are distinct metrics (§3.5). Changes are listed per §3.5. |
 | Q7 | Recurring expenses spending from a fund (e.g. a yearly bill from a sinking fund) | Not in this release; `paySinkingFund` covers bills. |
-| Q8 | A nudge «وصلت لهدف «…»؟» when reservations + spent ≥ target | Yes, dismissible, rule 4 priority; never auto-achieves. Can be cut. |
+| Q8 | A nudge «وصلت لهدف «…»؟» when reservations + spent ≥ target | **Decided: included,** dismissible (existing `actionDismissals`), rule 4 priority; never auto-achieves (AC-2). |
 | Q9 | «تم الهدف» for emergency / sinking funds | No: emergency never ends; sinking funds cycle (`paySinkingFund`). |
 | Q10 | Spending from the emergency fund through «من صندوق» | Allowed (that is what it is for); counts as spend, not cover. |
 | Q11 | Spending from an achieved fund's leftover | Allowed (e.g. a case for the tablet); it stays achieved. |
@@ -312,6 +350,32 @@ sheet (only «من الفلوس الحرة الأول» semantics make sense the
 
 **Backup:** round trip with `achievedAt` and spend movements; a pre-release v9 file restores unchanged.
 
+**Acceptance-criteria tests (§10), synthetic data only:**
+- **AC-7, full reversal:** for an expense that is (a) all from a fund, (b) fund + free money, (c) free money + cover
+  from another fund, (d) fund spend + cover + free money, and (e) a sinking-fund payment: deleting it restores every
+  balance and every fund reservation to the state before it (spend automatically; cover after accepting the Q4 offer,
+  or stays taken if declined). Asserted as a deep-equal of balances and per-(fund, account) reservations.
+- **AC-8, INV-12 / INV-13 everywhere:** after each of: edit amount up/down, edit date/category, edit account (with and
+  without the fund there), edit type, delete, a transfer and an exchange that make the fund's reservation follow, a
+  confirmed recurring expense (blocked auto → cover sheet), `paySinkingFund`, achieve / reopen, leftover release /
+  reallocate out, and a refused reserve or reallocate into an achieved fund. Also inside the fuzz, after every step.
+- **AC-9, compatibility gate:** `achievedAt` survives `updateFund`, `editFund`, `addFund`-then-edit, `paySinkingFund`'s
+  fund update, `deleteFund` of *another* fund, reallocate, release, follow, backup export → `openBackup`, `restoreFromBackup`
+  and `replaceWithSeed`. Rollback simulation: run today's v9 write paths (`main` at `1c8f5b8`, the frozen copy of these
+  operations used in tests) on a fund carrying `achievedAt`, then today's code reads it back. If any assertion fails,
+  stop (§1, condition).
+- **AC-10, atomicity:** every new or changed operation (expense with spend, cover-sheet retry with either card, edit,
+  delete, `achieveFund` with / without release, `reopenFund`, leftover release / reallocate) is called with invalid input
+  and with a refused cover; the state must be deep-equal afterwards. Cancelling the cover sheet (no retry) leaves the
+  state unchanged. In the fuzz: every refused operation leaves `JSON.stringify(state)` identical.
+- **AC-2:** a goal whose reservations + spending reach and pass the target is still active; only `achieveFund` sets
+  `achievedAt`; the Q8 action appears and is dismissible.
+- **AC-3 / AC-5:** reopen after keep and after release; deleting a linked purchase of an achieved fund restores the
+  reservation and `achievedAt` is unchanged.
+- **AC-6:** spend movements and cover movements are told apart everywhere: `fundSpent` counts only `spend`;
+  `coversOf` (the Q4 offer) only `cover`; the cover sheet's «من صندوق» card writes `spend`, «من الفلوس الحرة الأول»
+  writes `cover`.
+
 **Browser check (last step):** the tablet scenario end to end; the cover sheet's two cards (no default); «تم الهدف»
 keep / release; the achieved section; reopen; edit / delete of the purchase; 320 px and 360 px.
 
@@ -345,11 +409,32 @@ keep / release; the achieved section; reopen; edit / delete of the purchase; 320
 
 ---
 
-## Decisions needed before step 1
+## 10. Approved decisions and acceptance criteria (2026-11-24)
 
-- **Q1:** no default card in «تدفعه منين؟» (recommended), or preselect «من الفلوس الحرة الأول».
-- **Q6:** exclude `spend` from the monthly saving pace (recommended; changes fund status in months with a sinking payment
-  compared with today), or leave it.
-- **Q8:** the «وصلت لهدف …؟» nudge in this release, or not.
-- **§3.3:** deleting an expense gives its spend back to the fund automatically (recommended; also changes today's
-  behaviour for deleted sinking payments).
+**Decisions**
+
+| | Decision |
+|---|---|
+| Q1 | No default card in «تدفعه منين؟». An explicit selection is required. |
+| Q6 | Goal spending is excluded from the monthly saving pace. Contributions, spending and remaining reservations are distinct metrics. |
+| Q8 | The dismissible achievement nudge «وصلت لهدف «…»؟» is included. |
+| §3.3 | Deleting an expense automatically restores its linked fund spending, including sinking-fund payments. |
+
+**Acceptance criteria** (each is a test in §7 and a line in the step report)
+
+| # | Criterion | Where in this design |
+|---|---|---|
+| AC-1 | Fund selection is available directly on the expense sheet even when free money is sufficient; the cover sheet is not the only entry point for intentional fund spending. | §5.1 |
+| AC-2 | Reaching the target never marks a goal achieved; achievement requires the user's explicit confirmation. | §3.4, §4 (Q8), §6 |
+| AC-3 | Achieved funds can be reopened. | §3.4, §5.3 |
+| AC-4 | Remaining reservations of an achieved fund stay visible and can be released or reallocated. | §3.4, §5.3 |
+| AC-5 | Deleting an expense linked to an achieved fund restores its reservation without reopening the goal. | §3.3, §5.3, Q5 |
+| AC-6 | Intentional fund spending (`spend`) stays distinct from releasing reservations to cover an unrelated expense (`cover`). | §3.2, §3.3, §5.2 |
+| AC-7 | Every expense-linked financial movement is reversed, including mixed fund / free-money expenses. | §3.3, §7 |
+| AC-8 | INV-12 and INV-13 are tested across edits, deletes, account changes, transfers, recurring payments and sinking-fund payments. | §2, §7 |
+| AC-9 | Optional `achievedAt` survives every relevant write path and the rollback round trip; no migration only if these tests pass. | §1 (condition), §7 |
+| AC-10 | Atomicity: cancelling or failing any operation leaves the financial state unchanged. | §3, §7 |
+
+**Workflow (approved):** the owner creates the `funds-goals` branch from `main` and commits this design on its own
+first. Implementation then follows §9 step by step on synthetic fixtures, with the frozen-oracle regression and the full
+test suite each step. No merge into `main` and no OTA until the implementation is reviewed and approved.
