@@ -1,12 +1,18 @@
 # Receivables (late salary, money owed to me) — design
 
-Status: **approved (2026-11-24). Step 1 of §10 is implemented** (schema, the v8 → v9 migration, INV-9…11, backup
-shape and restore checks, tests); steps 2–4 (operations, UI, docs pass + browser check) are not built yet. Decisions:
+Status: **approved (2026-11-24). Steps 1 and 2 of §10 are implemented** (schema, the v8 → v9 migration, INV-9…11, backup
+shape and restore checks; operations and selectors, with tests and fuzz); steps 3–4 (UI, docs pass + browser check)
+are not built yet. Decisions:
 Q1 `writtenOffAt`; Q2 reject cross-currency collection in v1 with the workaround in the sheet; rule 8 chip only (no
 forMonth grouping view); Q9 yes; Q10, Q11 not in v1; Q3–Q8 and Q12–Q16 as recommended. Deviations in step 1:
 `settings.v9Step` is optional in the type (v8 data has none; it is always set after migrating); `receivableCollected`
 (a §3.2 selector) was built in step 1 because the invariants need it; `assertInvariants` keeps INV-5 in
-`invariantViolations` and adds `receivableViolations` beside it (not one merged list). All numbers in this document are
+`invariantViolations` and adds `receivableViolations` beside it (not one merged list). Step 2: `updateTransaction`
+keeps the existing receivable link whatever the form sends (the link belongs to the receivable operations), so a
+plain income can't be linked and a collection can't be unlinked by an edit; `forMonth` on an income without a link is
+refused (`RECEIVABLE_LINK_REQUIRED`, Q7); a forMonth mismatch on a write is `INVALID_MONTH` (field forMonth);
+write-off and reopen are idempotent (`{}` the second time); two extra selectors for step 3, `duplicateSalaryReceivable`
+(Q5) and `receivableRefillSuggestion` (Q8); new code `INVALID_KIND`. Q3–Q8, Q12–Q16 approved as recommended. All numbers in this document are
 made up.
 
 Builds on `CURRENCY_AND_FUNDS_DESIGN.md` (rounding INV-7, native amounts, account-backed funds INV-5, the cover

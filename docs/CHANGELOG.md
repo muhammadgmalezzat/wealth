@@ -8,7 +8,7 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ## Unreleased — branch `receivables` · 1.2.0 · data v9 — receivables («غير محصّل»), in progress
 
-> Not released. Step 1 of 4 (data only, nothing visible yet). **This release also ships the stage-1 restore-safety
+> Not released. Steps 1–2 of 4 (data, operations and selectors; nothing visible yet). **This release also ships the stage-1 restore-safety
 > fixes** (the 2026-11-23 entry below).
 >
 > **Release / rollback (when it ships as an OTA to 1.2.0):** export an **encrypted backup right before updating** (it is
@@ -18,7 +18,7 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 > then **restore the encrypted v8 backup** taken before the update (Settings → البيانات → استعادة نسخة).
 
 *For users*
-- لسه مفيش حاجة ظاهرة: دي أول خطوة (تجهيز البيانات). كل أرقامك زي ما هي بالظبط.
+- لسه مفيش حاجة ظاهرة: تجهيز البيانات والعمليات (تسجيل مستحق، تحصيل جزئي أو كامل، شطب ورجوع، حذف). كل أرقامك زي ما هي بالظبط.
 
 *Technical*
 - Data v9: `Receivable { id, label, kind: salary|other, forMonth?, amount, currency, dueDate?, note?, writtenOffAt?,
@@ -33,6 +33,12 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
   links (`INVALID_FILE`). `replaceAllData` handles the collection (tombstones) and tolerates a seed without it.
 - Tests 447 → 474 (invariants, migration on every oracle fixture with the v8 report unchanged, hydration, backups,
   restore safety).
+- Step 2: operations `addReceivable`, `updateReceivable`, `deleteReceivable`, `writeOffReceivable`, `reopenReceivable`,
+  `collectReceivable` (an income through `addTransactionCore` + `settle`); receivable link rules in
+  `validateIncomeExpense`; `updateTransaction` keeps the link; selectors (collected, remaining, status, overdue, totals
+  per currency, informational value, Q5 duplicate, Q8 refill suggestion); 10 error codes with Arabic text (amounts in the
+  message). The persist hooks moved to `store/persistMigration.ts` (no behaviour change) so the tests run the real code.
+  Tests 474 → 491, incl. "a collection equals the same income typed by hand" and the fuzz over receivable operations.
 
 ---
 

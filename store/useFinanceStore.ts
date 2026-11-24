@@ -6,9 +6,8 @@ import { persist, type StateStorage } from 'zustand/middleware';
 import { newId } from '@/utils/id';
 import { fetchLivePrices, priceSourceOf, shouldAutoFetch } from '@/utils/prices/fetchPrices';
 import { createPersistOptions, createWriteGuard, type HydrationFailure } from './hydration';
-import { applyV8Steps, LATEST_V8_STEP } from './migrateV8';
-import { applyV9Steps, LATEST_V9_STEP } from './migrateV9';
-import { CURRENT_VERSION, migratePersistedState } from './migrations';
+import { CURRENT_VERSION } from './migrations';
+import { completeStoredPayload, migrateStoredPayload, type PersistMigrationSetup } from './persistMigration';
 import * as ops from './operations';
 import type { CoverSelection, OpOptions } from './cover';
 import { stateSummary, type FundAmount } from './selectors';
@@ -28,6 +27,14 @@ const STORAGE_KEY = '@wealth_finance_state';
 const BACKUP_KEY_PREFIX = '@wealth_finance_state_backup_v';
 const IMPORT_BACKUP_KEY = '@wealth_finance_state_backup_before_import';
 const RESTORE_BACKUP_KEY = '@wealth_finance_state_backup_before_restore';
+
+// Where persist's migrate / normalize keep the untouched payload (store/persistMigration.ts).
+const persistMigration: PersistMigrationSetup = {
+  backupKeyPrefix: BACKUP_KEY_PREFIX,
+  setItem: (key, value) => AsyncStorage.setItem(key, value),
+  now: () => new Date().toISOString(),
+  newId,
+};
 
 // Prefer the git-ignored personal seed; fall back to the committed example.
 // Expo's Metro config enables optional dependencies, so a missing file is fine here.
@@ -346,32 +353,14 @@ export const useFinanceStore = create<FinanceStore>()(
       // A payload stored at the current version by an earlier build (data v8 and v9 grow over several builds, as
       // sub-steps) is completed here. The untouched copy is kept first, so a wrong completion can always be undone
       // by hand.
-      normalize: (persisted) => {
-        const settings = (persisted as { settings?: { v8Step?: number; v9Step?: number } }).settings;
-        const v8Done = settings?.v8Step ?? 0;
-        const v9Done = settings?.v9Step ?? 0;
-        if (v8Done >= LATEST_V8_STEP && v9Done >= LATEST_V9_STEP) return persisted;
-        void AsyncStorage.setItem(
-          v8Done < LATEST_V8_STEP ? `${BACKUP_KEY_PREFIX}8_before_step_${v8Done}` : `${BACKUP_KEY_PREFIX}9_before_step_${v9Done}`,
-          JSON.stringify({ state: persisted, version: CURRENT_VERSION })
-        );
-        const migration = { now: new Date().toISOString(), newId };
-        return applyV9Steps(applyV8Steps(persisted, migration), migration);
-      },
+      normalize: (persisted) => completeStoredPayload(persisted, persistMigration),
       // Persist data only — never actions or hydration flags.
       partialize: (s: FinanceStore) => dataOf(s),
       onFailure: (failure) => useHydrationFailure.setState({ failure }),
       migrate: async (persisted, version) => {
-        // Keep the untouched pre-migration payload so a failed or wrong migration never
-        // loses data. It is written before the migrated state can overwrite the main key.
-        await AsyncStorage.setItem(
-          `${BACKUP_KEY_PREFIX}${version}`,
-          JSON.stringify({ state: persisted, version })
-        );
-        const { state: migrated, clampedBy } = migratePersistedState(persisted, version, {
-          now: new Date().toISOString(),
-          newId,
-        });
+        // Keeps the untouched pre-migration payload first (awaited), so a failed or wrong migration never
+        // loses data: it is written before the migrated state can overwrite the main key.
+        const { state: migrated, clampedBy } = await migrateStoredPayload(persisted, version, persistMigration);
         if (__DEV__) {
           console.log(`[wealth] migrated persisted state v${version} → v${CURRENT_VERSION}`, {
             ...stateSummary(migrated),

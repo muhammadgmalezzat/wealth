@@ -46,7 +46,17 @@ export type FinanceErrorCode =
   | 'CATEGORY_KIND_LOCKED'
   | 'DEFAULT_CATEGORY_DELETE'
   | 'PLAN_NOT_FOUND'
-  | 'ACTION_NOT_DISMISSIBLE';
+  | 'ACTION_NOT_DISMISSIBLE'
+  | 'RECEIVABLE_FOR_MONTH_REQUIRED'
+  | 'RECEIVABLE_AMOUNT_BELOW_COLLECTED'
+  | 'RECEIVABLE_CURRENCY_LOCKED'
+  | 'RECEIVABLE_IN_USE'
+  | 'RECEIVABLE_SETTLED'
+  | 'RECEIVABLE_OVER_COLLECTED'
+  | 'RECEIVABLE_WRITTEN_OFF'
+  | 'RECEIVABLE_PAYMENT_NOT_INCOME'
+  | 'RECEIVABLE_LINK_REQUIRED'
+  | 'INVALID_KIND';
 
 export type FinanceEntity =
   | 'account'
@@ -57,7 +67,8 @@ export type FinanceEntity =
   | 'holding'
   | 'liability'
   | 'recurringRule'
-  | 'monthlyPlan';
+  | 'monthlyPlan'
+  | 'receivable';
 
 export type FinanceField =
   | 'amount'
@@ -88,12 +99,17 @@ export type FinanceField =
   | 'purchaseDate'
   | 'endDate'
   | 'interval'
-  | 'dayOfMonth';
+  | 'dayOfMonth'
+  | 'forMonth'
+  | 'dueDate';
 
 export interface FinanceErrorDetails {
   entity?: FinanceEntity;
   field?: FinanceField;
   id?: string;
+  // A limit the message names (e.g. what is left to collect), in `currency`.
+  amount?: number;
+  currency?: string;
 }
 
 export class FinanceValidationError extends Error {
