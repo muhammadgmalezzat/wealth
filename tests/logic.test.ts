@@ -1702,7 +1702,7 @@ describe('backup export / import', () => {
     await assert.rejects(open(file, 'wrong-pass'), (e: unknown) => e instanceof BackupError && e.code === 'WRONG_PASSWORD');
     await assert.rejects(open(file), (e: unknown) => e instanceof BackupError && e.code === 'PASSWORD_REQUIRED');
     assert.equal(JSON.stringify(current), snapshot);
-    assert.equal(errorMessage(new BackupError('WRONG_PASSWORD')), 'كلمة السر غلط');
+    assert.equal(errorMessage(new BackupError('WRONG_PASSWORD')), 'كلمة السر غلط أو الملف تالف');
   });
 
   it('detects tampering with the ciphertext or the header', async () => {
@@ -1782,6 +1782,107 @@ describe('backup export / import', () => {
     const text = 'ج.م 1,250 — صدقة 🤲 abc';
     assert.equal(utf8Decode(utf8Encode(text)), text);
     assert.deepEqual(Array.from(utf8Encode('é')), [0xc3, 0xa9]);
+  });
+});
+
+describe('restore safety (FIN-009): a bad file never touches the current data', () => {
+  const FAST = { ...nodeCrypto, iterations: 1000 };
+  const NOW_EXPORT = new Date('2026-10-20T08:30:00.000Z');
+  const MSG = {
+    wrong: 'كلمة السر غلط أو الملف تالف',
+    invalid: 'الملف ده مش نسخة احتياطية سليمة من حصّالة',
+    newer: 'النسخة الاحتياطية دي من إصدار أحدث من التطبيق؛ حدّث التطبيق الأول',
+    required: 'النسخة الاحتياطية دي محمية بكلمة سر',
+  };
+
+  // The app's order (settings.tsx → RestoreSheet): parse → open (decrypt, validate, migrate) → only then replace.
+  // Any failure leaves `current` as it was and yields the Arabic message the user sees.
+  const tryRestore = async (current: FinanceState, text: string, password?: string) => {
+    try {
+      const opened = await openBackup(parseBackup(text), { password, now: NOW, newId: () => 'unused' });
+      const { ctx } = makeClock(new Date('2026-11-01T00:00:00.000Z'));
+      return { state: apply(current, ops.restoreFromBackup(current, opened.state, ctx)), message: null };
+    } catch (error) {
+      assert.ok(error instanceof BackupError, `expected a BackupError, got ${String(error)}`);
+      return { state: current, message: errorMessage(error) };
+    }
+  };
+  // Synthetic "current data" on this phone; frozen so any write attempt would throw.
+  const deepFreeze = <T,>(value: T): T => {
+    if (value && typeof value === 'object') {
+      for (const v of Object.values(value)) deepFreeze(v);
+      Object.freeze(value);
+    }
+    return value;
+  };
+  const expectRefused = async (text: string, password: string | undefined, message: string) => {
+    const current = deepFreeze(richState());
+    const before = JSON.stringify(current);
+    const result = await tryRestore(current, text, password);
+    assert.equal(result.message, message);
+    assert.equal(result.state, current);
+    assert.equal(JSON.stringify(current), before);
+  };
+  const encrypted = async () => createBackup(emptyState(), { password: 'right-pass', now: NOW_EXPORT, crypto: FAST });
+  const withPayload = (file: BackupFile, patch: Partial<EncryptedPayload>) =>
+    serializeBackup({ ...file, payload: { ...(file.payload as EncryptedPayload), ...patch } });
+
+  it('control: the right password restores', async () => {
+    const result = await tryRestore(richState(), serializeBackup(await encrypted()), 'right-pass');
+    assert.equal(result.message, null);
+    assert.equal(result.state.accounts.length, 0);
+  });
+
+  it('wrong password → clear message, data unchanged', async () => {
+    await expectRefused(serializeBackup(await encrypted()), 'wrong-pass', MSG.wrong);
+    await expectRefused(serializeBackup(await encrypted()), '', MSG.required);
+    await expectRefused(serializeBackup(await encrypted()), undefined, MSG.required);
+  });
+
+  it('corrupted or truncated file → clear message, data unchanged', async () => {
+    const file = await encrypted();
+    const text = serializeBackup(file);
+    const p = file.payload as EncryptedPayload;
+    await expectRefused(text.slice(0, Math.floor(text.length / 2)), 'right-pass', MSG.invalid); // cut mid-file
+    await expectRefused('', 'right-pass', MSG.invalid);
+    await expectRefused(withPayload(file, { ciphertext: p.ciphertext.slice(0, -1) }), 'right-pass', MSG.invalid); // odd hex
+    await expectRefused(withPayload(file, { salt: p.salt.slice(0, -1) }), 'right-pass', MSG.invalid);
+    await expectRefused(withPayload(file, { iterations: 1.5 }), 'right-pass', MSG.invalid);
+    // A damaged file must not start an endless key derivation.
+    await expectRefused(withPayload(file, { iterations: 1e12 }), 'right-pass', MSG.invalid);
+    // Whole bytes missing from the end: GCM can't tell this from a wrong password, and the message says both.
+    await expectRefused(withPayload(file, { ciphertext: p.ciphertext.slice(0, -10) }), 'right-pass', MSG.wrong);
+    const flipped = p.ciphertext.replace(/.$/, (c) => (c === '0' ? '1' : '0'));
+    await expectRefused(withPayload(file, { ciphertext: flipped }), 'right-pass', MSG.wrong);
+  });
+
+  it('a valid envelope with broken data inside → clear message, never a crash', async () => {
+    const plain = await createBackup(emptyState(), { now: NOW_EXPORT, crypto: nodeCrypto });
+    const broken = (payload: unknown) => serializeBackup({ ...plain, payload });
+    await expectRefused(broken({ ...emptyState(), accounts: [null, 5] }), undefined, MSG.invalid);
+    await expectRefused(broken({ accounts: [] }), undefined, MSG.invalid);
+    await expectRefused(broken({ ...emptyState(), transactions: 'x' }), undefined, MSG.invalid);
+    // The same broken data, encrypted with the right password.
+    const sealed = await createBackup({ ...emptyState(), accounts: [null] } as unknown as FinanceState, { password: 'pw', now: NOW_EXPORT, crypto: FAST });
+    await expectRefused(serializeBackup(sealed), 'pw', MSG.invalid);
+  });
+
+  it('a file from a newer schema → refused with a clear message, data unchanged', async () => {
+    const file = await encrypted();
+    await expectRefused(serializeBackup({ ...file, schemaVersion: CURRENT_VERSION + 1 }), 'right-pass', MSG.newer);
+    const plain = await createBackup(emptyState(), { now: NOW_EXPORT, crypto: nodeCrypto });
+    await expectRefused(serializeBackup({ ...plain, schemaVersion: CURRENT_VERSION + 1 }), undefined, MSG.newer);
+  });
+
+  it('an unencrypted file on the encrypted path, and the reverse → clear message, data unchanged', async () => {
+    const plain = await createBackup(emptyState(), { now: NOW_EXPORT, crypto: nodeCrypto });
+    // Says "encrypted" but carries plain data.
+    await expectRefused(serializeBackup({ ...plain, encrypted: true }), 'right-pass', MSG.invalid);
+    // Says "plain" but carries ciphertext.
+    await expectRefused(serializeBackup({ ...(await encrypted()), encrypted: false }), undefined, MSG.invalid);
+    // A genuinely plain file opens without asking for a password; a password typed anyway is ignored.
+    const result = await tryRestore(richState(), serializeBackup(plain), 'typed-anyway');
+    assert.equal(result.message, null);
   });
 });
 

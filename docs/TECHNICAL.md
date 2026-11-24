@@ -1303,9 +1303,19 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 - Encryption: AES-256-GCM (`@noble/ciphers`), key = PBKDF2-SHA256(password, salt, 200 000 iters, 32 B)
   (`pbkdf2Async`, yields to the UI). AAD = `app|schemaVersion|exportedAt|deviceId`, so header
   tampering fails decryption. Salt/nonce from `expo-crypto getRandomBytes`. The password is never stored.
-- `parseBackup` validates the envelope (`INVALID_FILE`, `UNSUPPORTED_VERSION` for > current);
+- `parseBackup` validates the envelope (`INVALID_FILE`, `UNSUPPORTED_VERSION` for > current). An
+  encrypted payload must have whole-byte hex `salt`/`nonce`/`ciphertext` and an integer
+  `iterations` in 1…10 000 000, so a damaged file can't start an endless key derivation.
   `openBackup` decrypts (`WRONG_PASSWORD` on GCM failure, `PASSWORD_REQUIRED`), sanity-checks the
-  shape, then runs the **migration chain** from `schemaVersion` (v0–v6 exports work).
+  shape, then runs the **migration chain** from `schemaVersion` (v0–v6 exports work). After
+  migrating it checks the structure (`hasStateShape`: settings is a record, every collection is a
+  list of records) and computes the preview's net worth. Any failure in migration, structure or
+  that computation is `INVALID_FILE`. GCM can't tell a wrong password from a damaged ciphertext,
+  so `WRONG_PASSWORD` reads «كلمة السر غلط أو الملف تالف».
+- Restore safety (FIN-009): every check above runs before anything is written. App state changes
+  only in `restoreBackup`, after the preview and the user's confirmation. `handlePickBackup` and
+  `RestoreSheet` catch every error and show `errorMessage` (Arabic). Tests:
+  "restore safety (FIN-009)" in `tests/logic.test.ts` (synthetic data only).
 - Restore: preview (counts, net worth, export date) → confirm → snapshot to
   `…_backup_before_restore` → `restoreFromBackup`: data from the backup, but this device keeps
   `deviceId`, `appLockEnabled`, `lastBackupAt`; tombstones are added for entities that disappear

@@ -109,7 +109,8 @@ const BACKUP_MESSAGES: Record<BackupErrorCode, string> = {
   INVALID_FILE: 'الملف ده مش نسخة احتياطية سليمة من حصّالة',
   UNSUPPORTED_VERSION: 'النسخة الاحتياطية دي من إصدار أحدث من التطبيق؛ حدّث التطبيق الأول',
   PASSWORD_REQUIRED: 'النسخة الاحتياطية دي محمية بكلمة سر',
-  WRONG_PASSWORD: 'كلمة السر غلط',
+  // AES-GCM can't tell a wrong password from a damaged file, so the message names both.
+  WRONG_PASSWORD: 'كلمة السر غلط أو الملف تالف',
 };
 
 export function errorMessage(error: unknown): string {

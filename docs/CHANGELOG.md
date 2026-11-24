@@ -6,6 +6,23 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## 2026-11-23 · 1.2.0 · data v8 — post-release cleanup: backup restore safety
+
+*For users*
+- كلمة السر الغلط بقت بتقول «كلمة السر غلط أو الملف تالف» (التشفير مش بيقدر يفرّق بين الاتنين).
+- ملف نسخة بايظ أو ناقص أو متعدّل بقى بيطلّع «الملف ده مش نسخة احتياطية سليمة من حصّالة» بدل «حدث خطأ غير متوقع». وملف بايظ مبقاش ممكن يعلّق شاشة فك التشفير. بياناتك الحالية مش بتتلمس في أي حالة من دول.
+
+*Technical*
+- `store/backup.ts`: a stricter encrypted-payload check (whole-byte hex, integer `iterations` ≤ 10 000 000). In
+  `openBackup`, migration, a structure check (`hasStateShape`) and the preview's net worth are all guarded, and any
+  failure becomes `INVALID_FILE`. `WRONG_PASSWORD` message updated in `utils/errorMessages.ts`.
+- Tests 441 → 447: "restore safety (FIN-009)" covers a wrong or missing password, corrupted or truncated files, broken
+  data inside a valid envelope, a newer schema, and plain vs encrypted mix-ups. Each case asserts the exact Arabic
+  message and that the (frozen) current state is unchanged.
+- Repo hygiene: the local real-data backup under `.local/` was deleted. Git history has no backup or seed files.
+
+---
+
 ## Unreleased (2026-11-08) — branch `currency-v8` · data v8 · Phases B–D: currency engine, ledger, account-backed funds
 
 > Not released. `main` stays on data v7 until this branch is merged. One v7 → v8 migration (eight sub-steps), run on the
