@@ -21,6 +21,8 @@ import { diffReports, reportV8 } from './legacy/report.v8';
 import * as planning from '@/store/planning';
 import { COUNTRY_REGISTRY, countryCodes, countryName, isKnownCountry } from '@/constants/countries';
 import { applyV8Steps, LATEST_V8_STEP, V8_STEPS } from '@/store/migrateV8';
+import { applyV9Steps, LATEST_V9_STEP, V9_STEPS } from '@/store/migrateV9';
+import { completeStoredPayload, migrateStoredPayload, type PersistMigrationSetup } from '@/store/persistMigration';
 import { CURRENCY_REGISTRY, decimalsOf, isKnownCurrency, UnknownCurrencyError } from '@/constants/currencyRegistry';
 import * as legacyCurrency from '@/store/legacy/currency.v7';
 import { roundMoney, roundTo, splitMoney, splitTo, sumTo } from '@/utils/money';
@@ -65,7 +67,7 @@ import {
 } from '@/store/migrations';
 import * as nba from '@/store/nextActions';
 import * as reviewLogic from '@/store/review';
-import { assertInvariants, invariantViolations } from '@/store/invariants';
+import { assertInvariants, InvariantError, invariantViolations, receivableViolations } from '@/store/invariants';
 import { coversOf, followPreview, mergeOptions, NeedsCoverError, proposedOptions, type OpOptions } from '@/store/cover';
 import { runActionWith, type CoverRequest } from '@/utils/runActionCore';
 import * as analyticsUi from '@/components/analytics/analyticsUi';
@@ -105,11 +107,12 @@ import {
   unassignedEGP,
   unassignedEGPWithFundCash,
 } from '@/store/selectors';
-import type { FinanceState, Fund, RecurringRule, ReservationKind, ReservationMovement, Transaction } from '@/store/types';
+import type { FinanceState, Fund, Receivable, RecurringRule, ReservationKind, ReservationMovement, Transaction } from '@/store/types';
 import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
 import { currencyNameAr } from '@/constants/currencies';
-import { formatCurrency, formatDayLabel, formatPercent, moreThingsPhrase, timeAgoPhrase } from '@/utils/formatters';
+import { formatCurrency, formatDayLabel, formatMonthLabel, formatPercent, moreThingsPhrase, timeAgoPhrase } from '@/utils/formatters';
+import * as recvUi from '@/components/assets/receivablesUi';
 import { parseAmount } from '@/utils/parseAmount';
 import * as priceCalc from '@/utils/prices/calc';
 import * as prices from '@/utils/prices/fetchPrices';
@@ -179,11 +182,13 @@ function emptyState(): FinanceState {
     netWorthSnapshots: [],
     actionDismissals: [],
     monthlyReviews: [],
+    receivables: [],
     rateSnapshots: [S125],
     settings: {
       rates: RATES,
       enabledCurrencies: ['EGP', 'SAR', 'USD'],
       v8Step: LATEST_V8_STEP,
+      v9Step: LATEST_V9_STEP,
       reportingCurrency: 'EGP',
       planCurrency: 'SAR',
       goldPrice24kEGP: 6000,
@@ -203,10 +208,36 @@ function emptyStateV7() {
     rateSnapshots: _snapshots,
     reservationMovements: _reservations,
     unresolvedMovements: _unresolved,
-    settings: { rates: _rates, enabledCurrencies: _enabled, v8Step: _step, ...settings },
+    receivables: _receivables,
+    settings: { rates: _rates, enabledCurrencies: _enabled, v8Step: _step, v9Step: _v9, ...settings },
     ...rest
   } = emptyState();
   return { ...rest, fundMovements: [], settings: { ...settings, exchangeRates: RATES_V7 } };
+}
+
+// A receivable (v9): a late salary owed in EGP, made-up numbers.
+function receivable(id: string, overrides: Partial<Receivable> = {}): Receivable {
+  return { id, label: 'الشركة', kind: 'salary', forMonth: '2026-09', amount: 1000, currency: 'EGP', createdAt: T0, updatedAt: T0, ...overrides };
+}
+
+// An EGP account, one salary receivable of 1,000 and one collection of 400 on it (hand-built: no v9 operations
+// exist yet).
+function receivableWorld(): FinanceState {
+  const collection: Transaction = {
+    id: 't-col',
+    type: 'income',
+    amount: 400,
+    currency: 'EGP',
+    accountId: 'egp',
+    categoryId: 'cat-income-salary',
+    date: '2026-10-05',
+    rateSnapshotId: S125.id,
+    createdAt: T0,
+    updatedAt: T0,
+    receivableId: 'r1',
+    forMonth: '2026-09',
+  };
+  return { ...emptyState(), accounts: [account('egp', 'EGP', 100)], transactions: [collection], receivables: [receivable('r1')] };
 }
 
 const apply = (state: FinanceState, patch: Partial<FinanceState>): FinanceState => ({
@@ -409,6 +440,7 @@ describe('migration', () => {
       accounts: 3,
       holdings: 1,
       funds: 2,
+      receivables: 0,
       netWorthEGP: liquid + goldMarket,
       unassignedEGP: 0,
     });
@@ -1702,7 +1734,7 @@ describe('backup export / import', () => {
     await assert.rejects(open(file, 'wrong-pass'), (e: unknown) => e instanceof BackupError && e.code === 'WRONG_PASSWORD');
     await assert.rejects(open(file), (e: unknown) => e instanceof BackupError && e.code === 'PASSWORD_REQUIRED');
     assert.equal(JSON.stringify(current), snapshot);
-    assert.equal(errorMessage(new BackupError('WRONG_PASSWORD')), 'كلمة السر غلط');
+    assert.equal(errorMessage(new BackupError('WRONG_PASSWORD')), 'كلمة السر غلط أو الملف تالف');
   });
 
   it('detects tampering with the ciphertext or the header', async () => {
@@ -1782,6 +1814,128 @@ describe('backup export / import', () => {
     const text = 'ج.م 1,250 — صدقة 🤲 abc';
     assert.equal(utf8Decode(utf8Encode(text)), text);
     assert.deepEqual(Array.from(utf8Encode('é')), [0xc3, 0xa9]);
+  });
+});
+
+describe('restore safety (FIN-009): a bad file never touches the current data', () => {
+  const FAST = { ...nodeCrypto, iterations: 1000 };
+  const NOW_EXPORT = new Date('2026-10-20T08:30:00.000Z');
+  const MSG = {
+    wrong: 'كلمة السر غلط أو الملف تالف',
+    invalid: 'الملف ده مش نسخة احتياطية سليمة من حصّالة',
+    newer: 'النسخة الاحتياطية دي من إصدار أحدث من التطبيق؛ حدّث التطبيق الأول',
+    required: 'النسخة الاحتياطية دي محمية بكلمة سر',
+  };
+
+  // The app's order (settings.tsx → RestoreSheet): parse → open (decrypt, validate, migrate) → only then replace.
+  // Any failure leaves `current` as it was and yields the Arabic message the user sees.
+  const tryRestore = async (current: FinanceState, text: string, password?: string) => {
+    try {
+      const opened = await openBackup(parseBackup(text), { password, now: NOW, newId: () => 'unused' });
+      const { ctx } = makeClock(new Date('2026-11-01T00:00:00.000Z'));
+      return { state: apply(current, ops.restoreFromBackup(current, opened.state, ctx)), message: null };
+    } catch (error) {
+      assert.ok(error instanceof BackupError, `expected a BackupError, got ${String(error)}`);
+      return { state: current, message: errorMessage(error) };
+    }
+  };
+  // Synthetic "current data" on this phone; frozen so any write attempt would throw.
+  const deepFreeze = <T,>(value: T): T => {
+    if (value && typeof value === 'object') {
+      for (const v of Object.values(value)) deepFreeze(v);
+      Object.freeze(value);
+    }
+    return value;
+  };
+  const expectRefused = async (text: string, password: string | undefined, message: string) => {
+    const current = deepFreeze(richState());
+    const before = JSON.stringify(current);
+    const result = await tryRestore(current, text, password);
+    assert.equal(result.message, message);
+    assert.equal(result.state, current);
+    assert.equal(JSON.stringify(current), before);
+  };
+  const encrypted = async () => createBackup(emptyState(), { password: 'right-pass', now: NOW_EXPORT, crypto: FAST });
+  const withPayload = (file: BackupFile, patch: Partial<EncryptedPayload>) =>
+    serializeBackup({ ...file, payload: { ...(file.payload as EncryptedPayload), ...patch } });
+
+  it('control: the right password restores', async () => {
+    const result = await tryRestore(richState(), serializeBackup(await encrypted()), 'right-pass');
+    assert.equal(result.message, null);
+    assert.equal(result.state.accounts.length, 0);
+  });
+
+  it('wrong password → clear message, data unchanged', async () => {
+    await expectRefused(serializeBackup(await encrypted()), 'wrong-pass', MSG.wrong);
+    await expectRefused(serializeBackup(await encrypted()), '', MSG.required);
+    await expectRefused(serializeBackup(await encrypted()), undefined, MSG.required);
+  });
+
+  it('corrupted or truncated file → clear message, data unchanged', async () => {
+    const file = await encrypted();
+    const text = serializeBackup(file);
+    const p = file.payload as EncryptedPayload;
+    await expectRefused(text.slice(0, Math.floor(text.length / 2)), 'right-pass', MSG.invalid); // cut mid-file
+    await expectRefused('', 'right-pass', MSG.invalid);
+    await expectRefused(withPayload(file, { ciphertext: p.ciphertext.slice(0, -1) }), 'right-pass', MSG.invalid); // odd hex
+    await expectRefused(withPayload(file, { salt: p.salt.slice(0, -1) }), 'right-pass', MSG.invalid);
+    await expectRefused(withPayload(file, { iterations: 1.5 }), 'right-pass', MSG.invalid);
+    // A damaged file must not start an endless key derivation.
+    await expectRefused(withPayload(file, { iterations: 1e12 }), 'right-pass', MSG.invalid);
+    // Whole bytes missing from the end: GCM can't tell this from a wrong password, and the message says both.
+    await expectRefused(withPayload(file, { ciphertext: p.ciphertext.slice(0, -10) }), 'right-pass', MSG.wrong);
+    const flipped = p.ciphertext.replace(/.$/, (c) => (c === '0' ? '1' : '0'));
+    await expectRefused(withPayload(file, { ciphertext: flipped }), 'right-pass', MSG.wrong);
+  });
+
+  it('a valid envelope with broken data inside → clear message, never a crash', async () => {
+    const plain = await createBackup(emptyState(), { now: NOW_EXPORT, crypto: nodeCrypto });
+    const broken = (payload: unknown) => serializeBackup({ ...plain, payload });
+    await expectRefused(broken({ ...emptyState(), accounts: [null, 5] }), undefined, MSG.invalid);
+    await expectRefused(broken({ accounts: [] }), undefined, MSG.invalid);
+    await expectRefused(broken({ ...emptyState(), transactions: 'x' }), undefined, MSG.invalid);
+    // The same broken data, encrypted with the right password.
+    const sealed = await createBackup({ ...emptyState(), accounts: [null] } as unknown as FinanceState, { password: 'pw', now: NOW_EXPORT, crypto: FAST });
+    await expectRefused(serializeBackup(sealed), 'pw', MSG.invalid);
+  });
+
+  it('a file from a newer schema → refused with a clear message, data unchanged', async () => {
+    const file = await encrypted();
+    await expectRefused(serializeBackup({ ...file, schemaVersion: CURRENT_VERSION + 1 }), 'right-pass', MSG.newer);
+    const plain = await createBackup(emptyState(), { now: NOW_EXPORT, crypto: nodeCrypto });
+    await expectRefused(serializeBackup({ ...plain, schemaVersion: CURRENT_VERSION + 1 }), undefined, MSG.newer);
+  });
+
+  it('an unencrypted file on the encrypted path, and the reverse → clear message, data unchanged', async () => {
+    const plain = await createBackup(emptyState(), { now: NOW_EXPORT, crypto: nodeCrypto });
+    // Says "encrypted" but carries plain data.
+    await expectRefused(serializeBackup({ ...plain, encrypted: true }), 'right-pass', MSG.invalid);
+    // Says "plain" but carries ciphertext.
+    await expectRefused(serializeBackup({ ...(await encrypted()), encrypted: false }), undefined, MSG.invalid);
+    // A genuinely plain file opens without asking for a password; a password typed anyway is ignored.
+    const result = await tryRestore(richState(), serializeBackup(plain), 'typed-anyway');
+    assert.equal(result.message, null);
+  });
+
+  it('receivables (v9): a broken list or a broken link → clear message, data unchanged; a valid one restores', async () => {
+    const valid = receivableWorld();
+    const plain = await createBackup(valid, { now: NOW_EXPORT, crypto: nodeCrypto });
+    const broken = (patch: Partial<FinanceState>) => serializeBackup({ ...plain, payload: { ...valid, ...patch } });
+    await expectRefused(broken({ receivables: [null] as never }), undefined, MSG.invalid);
+    await expectRefused(broken({ receivables: 'x' as never }), undefined, MSG.invalid);
+    // A collection pointing at a receivable that isn't there (INV-10).
+    await expectRefused(broken({ receivables: [] }), undefined, MSG.invalid);
+    // Collected more than owed (INV-9).
+    await expectRefused(broken({ receivables: [receivable('r1', { amount: 100 })] }), undefined, MSG.invalid);
+    // A collection whose month disagrees with its receivable (INV-11).
+    await expectRefused(broken({ receivables: [receivable('r1', { forMonth: '2026-08' })] }), undefined, MSG.invalid);
+    // The same broken link, encrypted with the right password.
+    const sealed = await createBackup({ ...valid, receivables: [] }, { password: 'pw', now: NOW_EXPORT, crypto: FAST });
+    await expectRefused(serializeBackup(sealed), 'pw', MSG.invalid);
+
+    const ok = await tryRestore(richState(), serializeBackup(plain));
+    assert.equal(ok.message, null);
+    assert.deepEqual(ok.state.receivables, valid.receivables);
   });
 });
 
@@ -2987,7 +3141,7 @@ describe('migration v6 → v7', () => {
   });
 
   it('runs as part of the chain', () => {
-    assert.equal(CURRENT_VERSION, 8);
+    assert.equal(CURRENT_VERSION, 9);
     const { state } = migratePersistedState(v6(), 6, MIGRATION_CTX);
     assert.equal(state.netWorthSnapshots.length, 2);
     // Tracking that starts this month has nothing to backfill.
@@ -5865,8 +6019,8 @@ describe('v7 → v8 sub-steps: any intermediate v8 shape is completed, twice is 
         assert.deepEqual(applyV8Steps(partial, ctx), full, `k=${k}, marker kept`);
         // …and without it (payloads an earlier build stored at version 8).
         assert.deepEqual(applyV8Steps(drop(partial), ctx), full, `k=${k}, marker dropped`);
-        // The same through the entry point the store and backups use.
-        assert.deepEqual(migratePersistedState(partial, 8, ctx).state, full, `k=${k}, migratePersistedState`);
+        // The same through the entry point the store and backups use (which then adds the v9 steps).
+        assert.deepEqual(migratePersistedState(partial, 8, ctx).state, applyV9Steps(full, ctx), `k=${k}, migratePersistedState`);
       }
     });
 
@@ -5874,7 +6028,7 @@ describe('v7 → v8 sub-steps: any intermediate v8 shape is completed, twice is 
       const once = applyV8Steps(make(), ctx);
       assert.deepEqual(applyV8Steps(once, ctx), once);
       assert.deepEqual(applyV8Steps(applyV8Steps(once, ctx), ctx), once);
-      assert.deepEqual(migratePersistedState(make(), 7, ctx).state, once);
+      assert.deepEqual(migratePersistedState(make(), 7, ctx).state, applyV9Steps(once, ctx));
       assert.equal(applyV8Steps(once, ctx), once, 'a current state comes back as the very same object');
     });
 
@@ -6912,7 +7066,7 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
     let asked = 0;
     for (let i = 0; i < steps; i++) {
       const before = JSON.stringify(s);
-      const kind = pick(['expense', 'income', 'transfer', 'exchange', 'gold', 'reserve', 'release', 'delete', 'edit', 'opening']);
+      const kind = pick(['expense', 'income', 'transfer', 'exchange', 'gold', 'reserve', 'release', 'delete', 'edit', 'opening', 'recvAdd', 'recvCollect', 'recvCollect', 'recvEdit', 'recvWriteOff', 'recvReopen', 'recvDelete']);
       const currency = pick(currencies);
       const ids = idsOf(currency);
       const scale = currency === 'SAR' ? 1 : 12.5;
@@ -6958,8 +7112,29 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
       } else if (kind === 'opening') {
         const account = pick(snapshot.accounts.filter((a) => !a.archived));
         run((o) => ops.updateAccount(snapshot, { ...account, openingBalance: roundTo(account.openingBalance * (0.4 + rand()), 2) }, ctx, o));
+      } else if (kind === 'recvAdd') {
+        const salary = rand() < 0.6;
+        run(() => ops.addReceivable(snapshot, { label: pick(['الشركة', 'أحمد']), kind: salary ? 'salary' : 'other', ...(salary || rand() < 0.3 ? { forMonth: pick(['2026-08', '2026-09']) } : {}), amount: amountIn(3000 * scale), currency }, ctx));
+      } else if (kind.startsWith('recv') && snapshot.receivables.length > 0) {
+        const r = pick(snapshot.receivables);
+        const sameCurrency = idsOf(r.currency);
+        // Sometimes the wrong currency, a written-off one, or more than what is left: refused, nothing changes.
+        const account = rand() < 0.15 ? pick(snapshot.accounts).id : pick(sameCurrency.length > 0 ? sameCurrency : snapshot.accounts.map((a) => a.id));
+        if (kind === 'recvCollect') run((o) => ops.collectReceivable(snapshot, { receivableId: r.id, accountId: account, amount: amountIn(r.amount * 0.7), date: '2026-10-16' }, ctx, o));
+        else if (kind === 'recvEdit') run(() => ops.updateReceivable(snapshot, { ...r, amount: amountIn(r.amount * 1.2), ...(r.kind === 'salary' && rand() < 0.5 ? { forMonth: pick(['2026-07', '2026-09']) } : {}) }, ctx));
+        else if (kind === 'recvWriteOff') run(() => ops.writeOffReceivable(snapshot, r.id, ctx));
+        else if (kind === 'recvReopen') run(() => ops.reopenReceivable(snapshot, r.id, ctx));
+        else if (kind === 'recvDelete') run(() => ops.deleteReceivable(snapshot, r.id, ctx));
+        // Receivable bookkeeping (everything but a collection) never touches money.
+        if (kind !== 'recvCollect') {
+          for (const a of s.accounts) assert.equal(sel.accountBalance(s, a.id), sel.accountBalance(snapshot, a.id), `${kind} moved a balance`);
+          assert.equal(s.reservationMovements, snapshot.reservationMovements, `${kind} touched reservations`);
+        }
       }
       assert.deepEqual(invariantViolations(s), [], `after step ${i} (${kind})`);
+      assert.deepEqual(receivableViolations(s), [], `INV-9…11 after step ${i} (${kind})`);
+      // Receivables are not money: the money figures are the same without them.
+      assert.equal(netWorth(s), netWorth({ ...s, receivables: [] }));
       for (const c of currencies) {
         const cash = sel.liquidByCurrency(s)[c];
         const reserved = roundTo(s.accounts.filter((a) => a.currency === c).reduce((sum, a) => sum + sel.accountReserved(s, a.id), 0), 2);
@@ -6992,12 +7167,15 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
     assert.ok(applied > 120, `applied ${applied}`);
     assert.ok(asked > 20, `asked ${asked}`);
     assert.ok(state.accounts.every((a) => sel.accountBalance(state, a.id) >= -0.005));
+    // The receivable paths ran too: receivables exist and some were collected.
+    assert.ok(state.receivables.length > 0, 'receivables added');
+    assert.ok(state.transactions.some((t) => t.type === 'income' && t.receivableId !== undefined), 'some collected');
   });
 
   it('starting from the local seed (migrated, accounts strict), with funds reserved on its accounts', () => {
     const local = localSeedV7();
     if (!local) return;
-    let s = applyV8Steps(local, MIGRATION_CTX);
+    let s = migratePersistedState(local, 7, MIGRATION_CTX).state;
     assert.ok(s.accounts.every((a) => !a.allowNegative));
     s = { ...s, funds: [fund({ id: 'FA', priority: 1, targetAmount: 90000 }), fund({ id: 'FB', priority: 2, currency: 'SAR', targetAmount: 9000 })] };
     // Reserve some of what the accounts hold, by the default rules.
@@ -7129,5 +7307,658 @@ describe('step 3: one cover sheet, reallocate, the Q4 offer, the transfer notice
     assert.throws(() => ops.resolveUnresolved(s, { fundId: 'F2', currency: 'SAR', accountId: 'A3' }, makeCtx()), { code: 'RESERVE_EXCEEDS_AVAILABLE' });
     assert.throws(() => ops.resolveUnresolved(s, { fundId: 'F2', currency: 'EGP', accountId: 'A1' }, makeCtx()), { code: 'NOT_FOUND' });
     assert.throws(() => ops.resolveUnresolved(s, { fundId: 'F2', currency: 'SAR', accountId: 'A1' }, makeCtx()), { code: 'CURRENCY_MISMATCH' });
+  });
+});
+
+// --- Receivables, step 1: data v9 (schema, migration, invariants, backup shape) ---------------------------------------
+
+describe('receivables (v9): invariants INV-9…11', () => {
+  const codes = (s: FinanceState) => receivableViolations(s).map((v) => v.code);
+  const withCollection = (patch: Record<string, unknown>): FinanceState => {
+    const s = receivableWorld();
+    return { ...s, transactions: [{ ...s.transactions[0], ...patch } as Transaction] };
+  };
+
+  it('a consistent state has none, and assertInvariants passes', () => {
+    assert.deepEqual(codes(receivableWorld()), []);
+    assertInvariants(receivableWorld());
+    // Collected exactly the amount is fine (settled), and so is nothing collected.
+    assert.deepEqual(codes(withCollection({ amount: 1000 })), []);
+    assert.deepEqual(codes({ ...receivableWorld(), transactions: [] }), []);
+    // Data from before v9 has no receivables at all.
+    const { receivables: _r, ...v8 } = emptyState();
+    assert.deepEqual(receivableViolations(v8), []);
+  });
+
+  it('INV-9: collected more than owed', () => {
+    assert.deepEqual(codes(withCollection({ amount: 1000.01 })), ['OVER_COLLECTED']);
+    // Float noise is not a violation.
+    assert.deepEqual(codes(withCollection({ amount: 1000.004 })), []);
+  });
+
+  it('INV-10: unknown receivable, not an income, other currency', () => {
+    assert.deepEqual(codes(withCollection({ receivableId: 'nope' })), ['UNKNOWN_RECEIVABLE']);
+    assert.deepEqual(codes(withCollection({ type: 'expense' })), ['NOT_INCOME']);
+    assert.deepEqual(codes(withCollection({ currency: 'SAR' })), ['CURRENCY_MISMATCH']);
+  });
+
+  it('INV-11: salary month required and valid; a collection carries its receivable month', () => {
+    const s = receivableWorld();
+    assert.deepEqual(codes({ ...s, receivables: [receivable('r1', { forMonth: undefined })] }), ['FOR_MONTH_INVALID', 'FOR_MONTH_MISMATCH']);
+    assert.deepEqual(codes({ ...s, receivables: [receivable('r1', { forMonth: '2026-13' })] }), ['FOR_MONTH_INVALID', 'FOR_MONTH_MISMATCH']);
+    assert.deepEqual(codes(withCollection({ forMonth: '2026-08' })), ['FOR_MONTH_MISMATCH']);
+    // 'other' may have no month (then its collections carry none), or a valid one.
+    const other = { ...s, receivables: [receivable('r1', { kind: 'other', forMonth: undefined })] };
+    assert.deepEqual(codes({ ...other, transactions: [{ ...s.transactions[0], forMonth: undefined } as Transaction] }), []);
+    assert.deepEqual(codes({ ...s, receivables: [receivable('r1', { kind: 'other', forMonth: 'soon' })] }), ['FOR_MONTH_INVALID', 'FOR_MONTH_MISMATCH']);
+  });
+
+  it('assertInvariants reports receivable violations with their ids', () => {
+    assert.throws(
+      () => assertInvariants(withCollection({ amount: 2000 })),
+      (e: unknown) => e instanceof InvariantError && /OVER_COLLECTED\(r1=2000\)/.test(e.message)
+    );
+  });
+
+  it('the money selectors do not read receivables (net worth, liquid, unassigned, month summary)', () => {
+    const s = richState();
+    const owed = { ...s, receivables: [receivable('r1'), receivable('r2', { currency: 'SAR', amount: 5000, kind: 'other', forMonth: undefined })] };
+    assert.equal(netWorth(owed), netWorth(s));
+    assert.equal(sel.liquidTotal(owed), sel.liquidTotal(s));
+    assert.deepEqual(sel.unassignedByCurrency(owed), sel.unassignedByCurrency(s));
+    assert.deepEqual(sel.monthSummary(owed, '2026-10'), sel.monthSummary(s, '2026-10'));
+  });
+});
+
+describe('receivables (v9): the v8 → v9 migration', () => {
+  const ctx = MIGRATION_CTX;
+  const sources: [string, () => ReturnType<typeof richV7>][] = [['rich', richV7], ['example seed', exampleSeedV7]];
+  const local = localSeedV7();
+  if (local) sources.push(['local seed', () => localSeedV7()!]);
+  // A v9 state without what v9 added: what the v8 build had.
+  const asV8 = (s: FinanceState) => {
+    const {
+      receivables: _r,
+      settings: { v9Step: _s, ...settings },
+      ...rest
+    } = s;
+    return { ...rest, settings };
+  };
+  // A v9 payload as an earlier v9 build could have stored it: without the marker.
+  const unmarked = (s: FinanceState) => {
+    const { v9Step: _s, ...settings } = s.settings;
+    return { ...s, settings };
+  };
+
+  it('has one step, receivables', () => {
+    assert.deepEqual(V9_STEPS.map((s) => s.name), ['receivables']);
+    assert.equal(LATEST_V9_STEP, 1);
+  });
+
+  for (const [name, make] of sources) {
+    it(`${name}: v8 → v9 adds an empty receivables list and the marker, and changes nothing else`, () => {
+      const v8 = applyV8Steps(make(), ctx);
+      const v9 = migratePersistedState(v8, 8, ctx).state;
+      assert.deepEqual(v9.receivables, []);
+      assert.equal(v9.settings.v9Step, LATEST_V9_STEP);
+      assert.deepEqual(asV8(v9), v8);
+    });
+
+    it(`${name}: every v8 number is unchanged in v9 (oracle report, diff 0), with or without receivables`, () => {
+      const v8 = applyV8Steps(make(), ctx);
+      const v9 = migratePersistedState(make(), 7, ctx).state;
+      assert.deepEqual(diffReports(reportV8(v8, ORACLE_NOW), reportV8(v9, ORACLE_NOW), 0), []);
+      const owed = { ...v9, receivables: [receivable('r1'), receivable('r2', { currency: 'SAR', kind: 'other', forMonth: undefined })] };
+      assert.deepEqual(diffReports(reportV8(v8, ORACLE_NOW), reportV8(owed, ORACLE_NOW), 0), []);
+    });
+
+    it(`${name}: migrating twice is migrating once; a current state is the same object`, () => {
+      const v9 = migratePersistedState(make(), 7, ctx).state;
+      assert.equal(applyV9Steps(v9, ctx), v9);
+      assert.equal(migratePersistedState(v9, 9, ctx).state, v9);
+      assert.deepEqual(migratePersistedState(unmarked(v9), 9, ctx).state, v9);
+    });
+  }
+
+  it('older chains end at v9: v1 → v9 and v7 → v9', () => {
+    for (const s of [migratePersistedState(LEGACY_V1, 1, ctx).state, migratePersistedState(richV7(), 7, ctx).state]) {
+      assert.deepEqual(s.receivables, []);
+      assert.equal(s.settings.v9Step, LATEST_V9_STEP);
+      assert.equal(s.settings.v8Step, LATEST_V8_STEP);
+    }
+  });
+
+  it('keeps valid receivables and their collections from a payload that lacks the marker', () => {
+    const migrated = migratePersistedState(unmarked(receivableWorld()), 9, ctx).state;
+    assert.deepEqual(migrated, receivableWorld());
+  });
+
+  it('fails closed on data it cannot trust (the store then refuses it untouched)', () => {
+    const v8 = applyV8Steps(richV7(), ctx);
+    assert.throws(() => migratePersistedState({ ...v8, receivables: 'x' }, 8, ctx));
+    assert.throws(() => migratePersistedState({ ...v8, receivables: [null] }, 8, ctx));
+    const world = unmarked(receivableWorld());
+    assert.throws(() => migratePersistedState({ ...world, receivables: [] }, 9, ctx), InvariantError); // dangling link
+    assert.throws(() => migratePersistedState({ ...world, receivables: [receivable('r1', { amount: 100 })] }, 9, ctx), InvariantError);
+    assert.throws(() => migratePersistedState({ ...world, receivables: [receivable('r1', { forMonth: undefined })] }, 9, ctx), InvariantError);
+  });
+
+  describe('hydration (real zustand persist, fake storage)', () => {
+    const KEY = '@test_v9';
+    const PREFIX = '@test_v9_backup_v';
+    // The app's own hooks (store/persistMigration.ts, as useFinanceStore wires them): `migrate` keeps the untouched
+    // payload under `<prefix><version>` first, `normalize` completes a current-version payload.
+    function hydrate(storedState: unknown, version: number) {
+      const data = new Map<string, string>([[KEY, JSON.stringify({ state: storedState, version })]]);
+      const writes: string[] = [];
+      const guard = createWriteGuard();
+      const failures: HydrationFailure[] = [];
+      const base: StateStorage = {
+        getItem: async (n) => data.get(n) ?? null,
+        setItem: async (n, v) => {
+          writes.push(n);
+          data.set(n, v);
+        },
+        removeItem: async (n) => {
+          data.delete(n);
+        },
+      };
+      const setup: PersistMigrationSetup = {
+        backupKeyPrefix: PREFIX,
+        setItem: async (k, v) => {
+          await base.setItem(k, v);
+        },
+        now: () => ctx.now,
+        newId: ctx.newId,
+      };
+      const options = createPersistOptions<FinanceState, FinanceState>({
+        name: KEY,
+        version: CURRENT_VERSION,
+        baseStorage: base,
+        guard,
+        skipHydration: true,
+        log: () => {},
+        migrate: async (p, v) => (await migrateStoredPayload(p, v, setup)).state,
+        normalize: (p) => completeStoredPayload(p, setup) as FinanceState,
+        partialize: (s) => s,
+        onSuccess: () => {},
+        onFailure: (f) => failures.push(f),
+      });
+      const store = create<FinanceState>()(persist(() => ({}) as FinanceState, options));
+      return { store, data, writes, failures, raw: data.get(KEY)! };
+    }
+
+    it('a v8 payload: the untouched copy is written before anything else, then the state is v9', async () => {
+      const v8 = applyV8Steps(richV7(), ctx);
+      const h = hydrate(v8, 8);
+      await h.store.persist.rehydrate();
+      assert.equal(h.failures.length, 0);
+      assert.equal(h.writes[0], `${PREFIX}8`);
+      assert.deepEqual(JSON.parse(h.data.get(`${PREFIX}8`)!).state, JSON.parse(JSON.stringify(v8)));
+      assert.deepEqual(h.store.getState().receivables, []);
+      assert.equal(h.store.getState().settings.v9Step, LATEST_V9_STEP);
+    });
+
+    it('a v9 payload from an earlier v9 build is completed, after its untouched copy is kept', async () => {
+      const v9 = migratePersistedState(richV7(), 7, ctx).state;
+      const { v9Step: _s, ...settings } = v9.settings;
+      const stale = { ...v9, settings };
+      const h = hydrate(stale, 9);
+      await h.store.persist.rehydrate();
+      assert.equal(h.failures.length, 0);
+      assert.deepEqual(JSON.parse(h.data.get(`${PREFIX}9_before_step_0`)!).state, JSON.parse(JSON.stringify(stale)));
+      assert.equal(h.store.getState().settings.v9Step, LATEST_V9_STEP);
+      // A complete payload is the same object: nothing is copied.
+      assert.equal(completeStoredPayload(v9, { backupKeyPrefix: PREFIX, setItem: () => assert.fail('no copy'), now: () => ctx.now, newId: ctx.newId }), v9);
+    });
+
+    it('a v9 payload whose completion finds a broken link fails closed: the stored payload is not touched', async () => {
+      const h = hydrate({ ...unmarked(receivableWorld()), receivables: [] }, 9);
+      await h.store.persist.rehydrate();
+      assert.equal(h.failures[0]?.kind, 'migration_failed');
+      // Only the untouched copy (written before the completion runs); never the main key.
+      assert.deepEqual(h.writes, [`${PREFIX}9_before_step_0`]);
+      assert.equal(h.data.get(KEY), h.raw);
+    });
+
+    it('a payload newer than v9 is refused before anything runs', async () => {
+      const h = hydrate(receivableWorld(), CURRENT_VERSION + 1);
+      await h.store.persist.rehydrate();
+      assert.equal(h.failures[0]?.kind, 'unsupported_version');
+      assert.deepEqual(h.writes, []);
+    });
+  });
+});
+
+describe('receivables (v9): backups and data replacement', () => {
+  const NOW_EXPORT = new Date('2026-10-20T08:30:00.000Z');
+
+  it('round-trips receivables and their collections, plain and encrypted', async () => {
+    const state = receivableWorld();
+    for (const password of [undefined, 'pw-123']) {
+      const file = await createBackup(state, { password, now: NOW_EXPORT, crypto: { ...nodeCrypto, iterations: 1000 } });
+      assert.equal(file.schemaVersion, 9);
+      const opened = await openBackup(parseBackup(serializeBackup(file)), { password, now: NOW, newId: () => 'unused' });
+      assert.deepEqual(opened.state, state);
+    }
+  });
+
+  it('a v8 backup file restores with an empty receivables list and nothing else changed', async () => {
+    const {
+      receivables: _r,
+      settings: { v9Step: _s, ...settings },
+      ...v8
+    } = richState();
+    const file: BackupFile = {
+      app: 'wealth',
+      schemaVersion: 8,
+      exportedAt: NOW_EXPORT.toISOString(),
+      deviceId: 'old',
+      encrypted: false,
+      payload: { ...v8, settings },
+    };
+    const opened = await openBackup(parseBackup(serializeBackup(file)), { now: NOW, newId: () => 'unused' });
+    assert.deepEqual(opened.state, richState());
+  });
+
+  it('restore replaces receivables and logs the ones that disappear', () => {
+    const { ctx } = makeClock();
+    const current = receivableWorld();
+    const after = apply(current, ops.restoreFromBackup(current, { ...emptyState(), receivables: [receivable('r2')] }, ctx));
+    assert.deepEqual(after.receivables.map((r) => r.id), ['r2']);
+    assert.ok(after.tombstones.some((t) => t.entity === 'receivable' && t.id === 'r1'));
+  });
+
+  it('a seed written for an older shape (no receivables) replaces the data without failing', () => {
+    const { ctx } = makeClock();
+    const { receivables: _r, ...oldSeed } = emptyState();
+    const after = apply(receivableWorld(), ops.replaceWithSeed(receivableWorld(), oldSeed as FinanceState, ctx));
+    assert.deepEqual(after.receivables, []);
+    assert.ok(after.tombstones.some((t) => t.entity === 'receivable' && t.id === 'r1'));
+  });
+});
+
+// --- Receivables, step 2: operations and selectors --------------------------------------------------------------------
+
+describe('receivables (v9): operations', () => {
+  // Made-up numbers: an EGP account holding 5,000 (strict), a second EGP account, a SAR account, one EGP fund.
+  const world = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [strictAccount('E1', 'EGP', 5000), strictAccount('E2', 'EGP', 100), strictAccount('S1', 'SAR', 1000, 'SA')],
+    funds: [fund({ id: 'F1', priority: 1, targetAmount: 10000 })],
+  });
+  const salary = { label: 'الشركة', kind: 'salary' as const, forMonth: '2026-09', amount: 1000, currency: 'EGP' };
+  // `world` plus one salary receivable (id-1) of 1,000 EGP, and whatever `steps` do next.
+  function owed(...steps: ((s: FinanceState, ctx: ops.OpContext) => Partial<FinanceState>)[]) {
+    const ctx = makeCtx();
+    let s = apply(world(), ops.addReceivable(world(), salary, ctx));
+    for (const step of steps) s = apply(s, step(s, ctx));
+    return { s, ctx, r: () => s.receivables[0] };
+  }
+  const collect = (amount: number, accountId = 'E1', date = '2026-10-16') => (s: FinanceState, ctx: ops.OpContext) =>
+    ops.collectReceivable(s, { receivableId: s.receivables[0].id, accountId, amount, date }, ctx);
+  const collections = (s: FinanceState) => sel.receivableCollections(s, s.receivables[0].id);
+
+  it('addReceivable: validates, trims, rounds to the currency, starts open; touches nothing else', () => {
+    const ctx = makeCtx();
+    const w = world();
+    const patch = ops.addReceivable(w, { ...salary, label: '  الشركة ', amount: 999.996, note: '   ' }, ctx);
+    assert.deepEqual(Object.keys(patch), ['receivables']);
+    const r = patch.receivables![0];
+    assert.deepEqual(
+      { label: r.label, amount: r.amount, forMonth: r.forMonth, note: r.note, createdAt: r.createdAt, updatedAt: r.updatedAt },
+      { label: 'الشركة', amount: 1000, forMonth: '2026-09', note: undefined, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() }
+    );
+    assert.equal('note' in r, false);
+    assert.equal(sel.receivableStatus(w, r), 'open');
+    const bad: [Partial<ops.NewReceivable>, string][] = [
+      [{ forMonth: undefined }, 'RECEIVABLE_FOR_MONTH_REQUIRED'],
+      [{ forMonth: '2026-9' }, 'INVALID_MONTH'],
+      [{ currency: 'XXX' }, 'UNKNOWN_CURRENCY'],
+      [{ amount: 0 }, 'NOT_POSITIVE'],
+      [{ label: '  ' }, 'NAME_REQUIRED'],
+      [{ kind: 'loan' as never }, 'INVALID_KIND'],
+      [{ dueDate: '2026-02-30x' }, 'INVALID_DATE'],
+    ];
+    for (const [patchIn, code] of bad) assert.throws(() => ops.addReceivable(w, { ...salary, ...patchIn }, ctx), { code }, code);
+    // 'other' needs no month.
+    assert.doesNotThrow(() => ops.addReceivable(w, { label: 'أحمد', kind: 'other', amount: 50, currency: 'SAR' }, ctx));
+  });
+
+  it('collectReceivable: partial, then the rest; an income on the receipt date, tagged, in the salary category', () => {
+    const { s: half } = owed(collect(400));
+    const tx = collections(half)[0];
+    assert.deepEqual(
+      { type: tx.type, amount: tx.amount, currency: tx.currency, accountId: tx.accountId, categoryId: tx.categoryId, date: tx.date, receivableId: tx.receivableId, forMonth: tx.forMonth },
+      { type: 'income', amount: 400, currency: 'EGP', accountId: 'E1', categoryId: 'cat-income-salary', date: '2026-10-16', receivableId: half.receivables[0].id, forMonth: '2026-09' }
+    );
+    assert.equal(sel.accountBalance(half, 'E1'), 5400);
+    assert.equal(sel.receivableCollected(half, half.receivables[0]), 400);
+    assert.equal(sel.receivableRemaining(half, half.receivables[0]), 600);
+    assert.equal(sel.receivableStatus(half, half.receivables[0]), 'partial');
+    const { s: all } = owed(collect(400), collect(600, 'E2', '2026-10-20'));
+    assert.equal(sel.receivableStatus(all, all.receivables[0]), 'settled');
+    assert.deepEqual(collections(all).map((t) => t.date), ['2026-10-20', '2026-10-16']);
+    // 'other' without a month: «دخل آخر», no forMonth on the income.
+    const ctx = makeCtx();
+    const w = apply(world(), ops.addReceivable(world(), { label: 'أحمد', kind: 'other', amount: 50, currency: 'SAR' }, ctx));
+    const other = apply(w, ops.collectReceivable(w, { receivableId: w.receivables[0].id, accountId: 'S1', amount: 50, date: '2026-10-16' }, ctx));
+    const otherTx = collections(other)[0];
+    assert.equal(otherTx.categoryId, 'cat-income-other');
+    assert.equal('forMonth' in otherTx, false);
+  });
+
+  it('collectReceivable refuses more than what is left (Q3), another currency (Q2) and a written-off receivable (Q4); nothing changes', () => {
+    const { s, ctx } = owed(collect(400));
+    const before = JSON.stringify(s);
+    const id = s.receivables[0].id;
+    assert.throws(() => ops.collectReceivable(s, { receivableId: id, accountId: 'E1', amount: 600.01, date: '2026-10-17' }, ctx), (e: unknown) => {
+      assert.ok(e instanceof ops.FinanceValidationError && e.code === 'RECEIVABLE_OVER_COLLECTED');
+      assert.equal(errorMessage(e), 'ده أكتر من الباقي (ج.م 600)؛ لو اتدفع زيادة سجّل الزيادة كدخل منفصل');
+      return true;
+    });
+    assert.throws(() => ops.collectReceivable(s, { receivableId: id, accountId: 'S1', amount: 10, date: '2026-10-17' }, ctx), { code: 'CURRENCY_MISMATCH' });
+    const off = apply(s, ops.writeOffReceivable(s, id, ctx));
+    assert.throws(() => ops.collectReceivable(off, { receivableId: id, accountId: 'E1', amount: 10, date: '2026-10-17' }, ctx), { code: 'RECEIVABLE_WRITTEN_OFF' });
+    // The same rules hold for an income added or edited directly.
+    assert.throws(() => ops.addTransaction(s, { type: 'income', amount: 700, currency: 'EGP', accountId: 'E1', categoryId: 'cat-income-salary', date: '2026-10-17', receivableId: id, forMonth: '2026-09' }, ctx), { code: 'RECEIVABLE_OVER_COLLECTED' });
+    assert.throws(() => ops.addTransaction(s, { type: 'income', amount: 7, currency: 'EGP', accountId: 'E1', categoryId: 'cat-income-salary', date: '2026-10-17', receivableId: id, forMonth: '2026-08' }, ctx), { code: 'INVALID_MONTH' });
+    assert.throws(() => ops.addTransaction(s, { type: 'expense', amount: 7, currency: 'EGP', accountId: 'E1', categoryId: 'cat-essentials-bills', date: '2026-10-17', receivableId: id } as never, ctx), { code: 'RECEIVABLE_PAYMENT_NOT_INCOME' });
+    assert.throws(() => ops.addTransaction(s, { type: 'income', amount: 7, currency: 'EGP', accountId: 'E1', categoryId: 'cat-income-salary', date: '2026-10-17', forMonth: '2026-09' }, ctx), { code: 'RECEIVABLE_LINK_REQUIRED' });
+    assert.throws(() => ops.addTransaction(s, { type: 'income', amount: 7, currency: 'EGP', accountId: 'E1', categoryId: 'cat-income-salary', date: '2026-10-17', receivableId: 'nope' }, ctx), { code: 'NOT_FOUND' });
+    assert.equal(JSON.stringify(s), before);
+  });
+
+  it('a collection has exactly the effect of the same income typed by hand (every v8 report number, diff 0)', () => {
+    const base = apply(world(), ops.addReceivable(world(), salary, makeCtx()));
+    const viaCollect = apply(base, ops.collectReceivable(base, { receivableId: base.receivables[0].id, accountId: 'E1', amount: 400, date: '2026-10-16' }, makeCtx()));
+    const byHand = apply(base, ops.addTransaction(base, { type: 'income', amount: 400, currency: 'EGP', accountId: 'E1', categoryId: 'cat-income-salary', date: '2026-10-16' }, makeCtx()));
+    assert.deepEqual(diffReports(reportV8(byHand, ORACLE_NOW), reportV8(viaCollect, ORACLE_NOW), 0), []);
+    assert.equal(netWorth(viaCollect), netWorth(byHand));
+    assert.deepEqual(sel.monthSummary(viaCollect, '2026-10'), sel.monthSummary(byHand, '2026-10'));
+    assert.deepEqual(sel.unassignedByCurrency(viaCollect), sel.unassignedByCurrency(byHand));
+    assert.equal(planning.safeToSpend(viaCollect, '2026-10'), planning.safeToSpend(byHand, '2026-10'));
+  });
+
+  it('collected and status follow edits and deletes of a collection (derived, single source of truth)', () => {
+    const { s, ctx } = owed(collect(400), collect(300));
+    const [newest] = collections(s);
+    const r = () => s.receivables[0];
+    const up = apply(s, ops.updateTransaction(s, { ...newest, amount: 600 }, ctx));
+    assert.equal(sel.receivableCollected(up, r()), 1000);
+    assert.equal(sel.receivableStatus(up, r()), 'settled');
+    assert.throws(() => ops.updateTransaction(s, { ...newest, amount: 600.01 }, ctx), { code: 'RECEIVABLE_OVER_COLLECTED' });
+    const down = apply(s, ops.updateTransaction(s, { ...newest, amount: 100 }, ctx));
+    assert.equal(sel.receivableCollected(down, r()), 500);
+    const gone = apply(s, ops.deleteTransaction(s, newest.id, ctx));
+    assert.equal(sel.receivableStatus(gone, r()), 'partial');
+    const none = apply(gone, ops.deleteTransaction(gone, collections(gone)[0].id, ctx));
+    assert.equal(sel.receivableStatus(none, r()), 'open');
+    // The date is free (cash basis).
+    const moved = apply(s, ops.updateTransaction(s, { ...newest, date: '2026-11-02' }, ctx));
+    assert.equal(sel.receivableCollected(moved, r()), 700);
+  });
+
+  it('an edit keeps the link: it can not become an expense, move to another currency, or drop / gain a receivable', () => {
+    const { s, ctx } = owed(collect(400));
+    const tx = collections(s)[0];
+    assert.throws(() => ops.updateTransaction(s, { ...tx, type: 'expense', categoryId: 'cat-essentials-bills' }, ctx), { code: 'RECEIVABLE_PAYMENT_NOT_INCOME' });
+    assert.throws(() => ops.updateTransaction(s, { ...tx, accountId: 'S1', currency: 'SAR' }, ctx), { code: 'CURRENCY_MISMATCH' });
+    // A form that leaves the link out (or changes it) keeps the original.
+    const { receivableId: _r, forMonth: _f, ...plain } = tx;
+    const kept = apply(s, ops.updateTransaction(s, { ...plain, amount: 450 }, ctx));
+    assert.equal(collections(kept)[0].receivableId, tx.receivableId);
+    assert.equal(collections(kept)[0].forMonth, '2026-09');
+    // Moving to another EGP account is fine.
+    const otherAccount = apply(s, ops.updateTransaction(s, { ...tx, accountId: 'E2' }, ctx));
+    assert.equal(sel.receivableCollected(otherAccount, s.receivables[0]), 400);
+    // A plain income can't be linked by editing it.
+    const withPlain = apply(s, ops.addTransaction(s, { type: 'income', amount: 5, currency: 'EGP', accountId: 'E1', categoryId: 'cat-income-other', date: '2026-10-17' }, ctx));
+    const plainTx = withPlain.transactions.find((t) => t.type === 'income' && t.amount === 5)!;
+    const stillPlain = apply(withPlain, ops.updateTransaction(withPlain, { ...plainTx, receivableId: tx.receivableId, forMonth: '2026-09' } as never, ctx));
+    assert.equal(stillPlain.transactions.find((t) => t.id === plainTx.id)!.type === 'income' && 'receivableId' in stillPlain.transactions.find((t) => t.id === plainTx.id)!, false);
+  });
+
+  it('updateReceivable: amount ≥ collected, currency locked once collected (Q13: free before), a new month re-stamps the collections', () => {
+    const { s, ctx } = owed(collect(400));
+    const r = s.receivables[0];
+    assert.throws(() => ops.updateReceivable(s, { ...r, amount: 399 }, ctx), (e: unknown) => {
+      assert.ok(e instanceof ops.FinanceValidationError && e.code === 'RECEIVABLE_AMOUNT_BELOW_COLLECTED');
+      assert.equal(errorMessage(e), 'المبلغ مينفعش يبقى أقل من اللي اتحصّل (ج.م 400)');
+      return true;
+    });
+    assert.doesNotThrow(() => ops.updateReceivable(s, { ...r, amount: 400 }, ctx));
+    assert.throws(() => ops.updateReceivable(s, { ...r, currency: 'SAR' }, ctx), { code: 'RECEIVABLE_CURRENCY_LOCKED' });
+    const { s: fresh } = owed();
+    assert.equal(apply(fresh, ops.updateReceivable(fresh, { ...fresh.receivables[0], currency: 'SAR' }, makeCtx())).receivables[0].currency, 'SAR');
+    // forMonth → its collections follow in the same patch (INV-11), nothing else about them changes.
+    const moved = apply(s, ops.updateReceivable(s, { ...r, forMonth: '2026-08', label: 'الشركة الجديدة' }, ctx));
+    assert.equal(moved.receivables[0].forMonth, '2026-08');
+    assert.equal(collections(moved)[0].forMonth, '2026-08');
+    assert.equal(collections(moved)[0].amount, 400);
+    assert.deepEqual(receivableViolations(moved), []);
+    // salary → other keeps the month; other → salary needs one; 'other' may drop it (its collections drop it too).
+    const asOther = apply(s, ops.updateReceivable(s, { ...r, kind: 'other' }, ctx));
+    assert.equal(asOther.receivables[0].forMonth, '2026-09');
+    const noMonth = apply(asOther, ops.updateReceivable(asOther, { ...asOther.receivables[0], forMonth: undefined }, ctx));
+    assert.equal('forMonth' in collections(noMonth)[0], false);
+    assert.deepEqual(receivableViolations(noMonth), []);
+    assert.throws(() => ops.updateReceivable(noMonth, { ...noMonth.receivables[0], kind: 'salary' }, ctx), { code: 'RECEIVABLE_FOR_MONTH_REQUIRED' });
+    // The write-off state is not editable here.
+    const off = apply(s, ops.writeOffReceivable(s, r.id, ctx));
+    assert.ok(apply(off, ops.updateReceivable(off, { ...r, note: 'x' }, ctx)).receivables[0].writtenOffAt);
+  });
+
+  it('deleteReceivable: only without collections (rule 6); a tombstone is logged', () => {
+    const { s, ctx } = owed(collect(400));
+    assert.throws(() => ops.deleteReceivable(s, s.receivables[0].id, ctx), { code: 'RECEIVABLE_IN_USE' });
+    const { s: fresh } = owed();
+    const id = fresh.receivables[0].id;
+    const after = apply(fresh, ops.deleteReceivable(fresh, id, makeCtx()));
+    assert.deepEqual(after.receivables, []);
+    assert.ok(after.tombstones.some((t) => t.entity === 'receivable' && t.id === id));
+  });
+
+  it('write-off has zero ledger effect and is reversible; a settled receivable can not be written off', () => {
+    const { s, ctx } = owed(collect(400));
+    const id = s.receivables[0].id;
+    const off = apply(s, ops.writeOffReceivable(s, id, ctx));
+    assert.equal(sel.receivableStatus(off, off.receivables[0]), 'written_off');
+    assert.equal(off.receivables[0].writtenOffAt, NOW.toISOString());
+    for (const key of ['transactions', 'reservationMovements', 'accounts', 'funds'] as const) assert.equal(off[key], s[key], key);
+    assert.equal(sel.receivableCollected(off, off.receivables[0]), 400);
+    assert.deepEqual(ops.writeOffReceivable(off, id, ctx), {}, 'twice = once');
+    const back = apply(off, ops.reopenReceivable(off, id, ctx));
+    assert.equal(sel.receivableStatus(back, back.receivables[0]), 'partial');
+    assert.equal('writtenOffAt' in back.receivables[0], false);
+    assert.deepEqual(ops.reopenReceivable(back, id, ctx), {});
+    const { s: all } = owed(collect(1000));
+    assert.throws(() => ops.writeOffReceivable(all, all.receivables[0].id, makeCtx()), { code: 'RECEIVABLE_SETTLED' });
+  });
+
+  it('deleting a collection whose money is now reserved goes through the cover gate: the cover flow, never an error', () => {
+    // Collect 1,000 into E2 (100 → 1,100), reserve all of it, then delete the collection.
+    const { s: collected, ctx } = owed(collect(1000, 'E2'));
+    let s = apply(collected, ops.allocateToFund(collected, 'F1', 1100, undefined, ctx, 'EGP', 'E2'));
+    const id = collections(s)[0].id;
+    const messages: string[] = [];
+    const requests: CoverRequest[] = [];
+    const handlers = { showMessage: (_t: string, m: string) => messages.push(m), errorMessage, openCover: (r: CoverRequest) => requests.push(r) };
+    assert.equal(runActionWith(handlers, 'تعذّر الحذف', (o) => { s = apply(s, ops.deleteTransaction(s, id, ctx, o)); }), false);
+    assert.deepEqual(messages, []);
+    assert.equal(requests.length, 1);
+    assert.ok(requests[0].retry(proposedOptions(requests[0].error)));
+    assert.deepEqual(invariantViolations(s), []);
+    assert.equal(sel.receivableStatus(s, s.receivables[0]), 'open');
+  });
+});
+
+describe('receivables (v9): selectors', () => {
+  const world = (): FinanceState => {
+    const ctx = makeCtx();
+    let s: FinanceState = { ...emptyState(), accounts: [account('E1', 'EGP', 5000), account('S1', 'SAR', 1000, 'SA')], funds: [fund({ id: 'F1', priority: 1, targetAmount: 10000, monthlyContribution: 2000 })] };
+    const add = (input: ops.NewReceivable) => (s = apply(s, ops.addReceivable(s, input, ctx)));
+    add({ label: 'الشركة', kind: 'salary', forMonth: '2026-09', amount: 1000, currency: 'EGP', dueDate: '2026-10-05' }); // id-1, partial below
+    add({ label: 'الشركة', kind: 'salary', forMonth: '2026-08', amount: 200, currency: 'EGP' }); // id-2, settled below
+    add({ label: 'أحمد', kind: 'other', amount: 300, currency: 'SAR', dueDate: '2026-12-01' }); // id-3, open
+    add({ label: 'سامي', kind: 'other', amount: 50, currency: 'SAR' }); // id-4, written off below
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-1', accountId: 'E1', amount: 400, date: '2026-10-10' }, ctx));
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-2', accountId: 'E1', amount: 200, date: '2026-10-11' }, ctx));
+    s = apply(s, ops.writeOffReceivable(s, 'id-4', ctx));
+    return s;
+  };
+  const byId = (s: FinanceState, id: string) => s.receivables.find((r) => r.id === id)!;
+
+  it('statuses, and «غير محصّل» per currency counts only open and partial', () => {
+    const s = world();
+    assert.deepEqual(['id-1', 'id-2', 'id-3', 'id-4'].map((id) => sel.receivableStatus(s, byId(s, id))), ['partial', 'settled', 'open', 'written_off']);
+    assert.deepEqual(sel.openReceivablesByCurrency(s), { EGP: 600, SAR: 300 });
+  });
+
+  it('the informational total uses today’s rates and changes no money figure', () => {
+    const s = world();
+    assert.equal(sel.openReceivablesValue(s, 'EGP'), 600 + 300 * 12.5);
+    assert.equal(sel.openReceivablesValue(withSar(s, 13), 'EGP'), 600 + 300 * 13);
+    assert.equal(sel.openReceivablesValue(s, 'SAR'), roundTo(600 / 12.5 + 300, 2));
+    assert.equal(netWorth({ ...s, receivables: [] }), netWorth(s));
+  });
+
+  it('overdue: still owed and past its due date', () => {
+    const s = world();
+    assert.equal(sel.receivableOverdue(s, byId(s, 'id-1'), '2026-10-06'), true);
+    assert.equal(sel.receivableOverdue(s, byId(s, 'id-1'), '2026-10-05'), false);
+    assert.equal(sel.receivableOverdue(s, byId(s, 'id-3'), '2026-11-01'), false);
+    assert.equal(sel.receivableOverdue(s, byId(s, 'id-2'), '2027-01-01'), false, 'settled');
+  });
+
+  it('Q5: a duplicate salary (same debtor and month) is found, to warn; never for "other"', () => {
+    const s = world();
+    assert.equal(sel.duplicateSalaryReceivable(s, { label: ' الشركة ', kind: 'salary', forMonth: '2026-09' })?.id, 'id-1');
+    assert.equal(sel.duplicateSalaryReceivable(s, { label: 'الشركة', kind: 'salary', forMonth: '2026-09' }, 'id-1'), undefined);
+    assert.equal(sel.duplicateSalaryReceivable(s, { label: 'الشركة', kind: 'salary', forMonth: '2026-07' }), undefined);
+    assert.equal(sel.duplicateSalaryReceivable(s, { label: 'أحمد', kind: 'other' }), undefined);
+  });
+
+  it('Q8: the refill suggestion never exceeds the collection nor the account’s available money, and is empty when funds are full', () => {
+    const s = world();
+    const now = new Date('2026-10-16T12:00:00');
+    const full = sel.receivableRefillSuggestion(s, 'E1', 400, now);
+    assert.ok(full.length > 0);
+    assert.ok(full.reduce((sum, x) => sum + x.amount, 0) <= 400 + 1e-9);
+    assert.ok(full.every((x) => x.currency === 'EGP'));
+    // Available on the account caps it.
+    const reserved = apply(s, ops.allocateToFund(s, 'F1', 5500, undefined, makeCtx(), 'EGP', 'E1'));
+    assert.ok(sel.receivableRefillSuggestion(reserved, 'E1', 400, now).reduce((sum, x) => sum + x.amount, 0) <= sel.accountAvailable(reserved, 'E1') + 1e-9);
+    // A fund at its target gets nothing → no offer.
+    const atTarget = { ...s, funds: [fund({ id: 'F1', priority: 1, targetAmount: 1, monthlyContribution: 2000 })], reservationMovements: [resv('m', 'F1', 'E1', 1)] };
+    assert.deepEqual(sel.receivableRefillSuggestion(atTarget, 'E1', 400, now), []);
+    assert.deepEqual(sel.receivableRefillSuggestion(s, 'nope', 400, now), []);
+  });
+
+  it('every new error code has Arabic text', () => {
+    const arabic = /[؀-ۿ]/;
+    for (const code of ['RECEIVABLE_FOR_MONTH_REQUIRED', 'RECEIVABLE_AMOUNT_BELOW_COLLECTED', 'RECEIVABLE_CURRENCY_LOCKED', 'RECEIVABLE_IN_USE', 'RECEIVABLE_SETTLED', 'RECEIVABLE_OVER_COLLECTED', 'RECEIVABLE_WRITTEN_OFF', 'RECEIVABLE_PAYMENT_NOT_INCOME', 'RECEIVABLE_LINK_REQUIRED', 'INVALID_KIND'] as const) {
+      assert.match(errorMessage(new FinanceValidationError(code)), arabic, code);
+    }
+    assert.equal(errorMessage(new FinanceValidationError('NOT_FOUND', { entity: 'receivable' })), 'المبلغ ده غير موجود');
+  });
+});
+
+// --- Receivables, step 3: UI helpers and the Home suggestion ----------------------------------------------------------
+
+describe('receivables (v9): UI helpers and the Q9 Home suggestion', () => {
+  // Made-up numbers: an EGP and a SAR account, a fund below target, three receivables.
+  const NOW_Q9 = new Date(2026, 9, 20, 12); // 20 Oct 2026
+  const world = (): FinanceState => {
+    const ctx = makeCtx();
+    let s: FinanceState = {
+      ...emptyState(),
+      accounts: [account('E1', 'EGP', 5000), account('S1', 'SAR', 1000, 'SA')],
+      funds: [fund({ id: 'F1', priority: 1, targetAmount: 10000, monthlyContribution: 2000 })],
+    };
+    const add = (input: ops.NewReceivable) => (s = apply(s, ops.addReceivable(s, input, ctx)));
+    add({ label: 'الشركة', kind: 'salary', forMonth: '2026-09', amount: 1000, currency: 'EGP', dueDate: '2026-10-05' }); // id-1 overdue
+    add({ label: 'أحمد', kind: 'other', amount: 300, currency: 'SAR', dueDate: '2026-12-01' }); // id-2 not yet due
+    add({ label: 'سامي', kind: 'other', amount: 50, currency: 'SAR', dueDate: '2026-10-01' }); // id-3 overdue
+    return s;
+  };
+  const q9 = (s: FinanceState, now = NOW_Q9) => nba.nextActions(s, now).filter((a) => a.id.startsWith('receivable-'));
+
+  it('Q9: one dismissible action per overdue receivable, opening its collect sheet', () => {
+    const actions = q9(world());
+    assert.deepEqual(actions.map((a) => a.id), ['receivable-id-1', 'receivable-id-3']);
+    const [salary, other] = actions;
+    assert.equal(salary.title, `مرتب ${formatMonthLabel('2026-09')} لسه ماوصلش`);
+    assert.match(other.title, /عند سامي لسه ماوصلوش/);
+    assert.deepEqual(salary.cta, { label: 'سجّل التحصيل', route: 'collect', params: { id: 'id-1' } });
+    assert.equal(salary.dismissible, true);
+    assert.deepEqual([salary.amount, salary.currency], [1000, 'EGP']);
+  });
+
+  it('Q9: gone once settled or written off; partial still counts (with what is left); not before the due date', () => {
+    const ctx = makeCtx();
+    let s = world();
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-1', accountId: 'E1', amount: 400, date: '2026-10-18' }, ctx));
+    assert.equal(q9(s).find((a) => a.id === 'receivable-id-1')?.amount, 600);
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-1', accountId: 'E1', amount: 600, date: '2026-10-19' }, ctx));
+    s = apply(s, ops.writeOffReceivable(s, 'id-3', ctx));
+    assert.deepEqual(q9(s), []);
+    assert.deepEqual(q9(world(), new Date(2026, 8, 30, 12)), [], 'nothing overdue yet');
+  });
+
+  it('Q9: "بعدين" snoozes it through the existing actionDismissals (24 h), per receivable', () => {
+    const s = world();
+    const later = apply(s, ops.dismissAction(s, 'receivable-id-1', { newId: () => 'x', now: () => NOW_Q9 }));
+    assert.deepEqual(q9(later).map((a) => a.id), ['receivable-id-3']);
+    assert.deepEqual(q9(later, new Date(NOW_Q9.getTime() + 25 * 3600_000)).map((a) => a.id), ['receivable-id-1', 'receivable-id-3']);
+  });
+
+  it('chips and subtitles say the status in words', () => {
+    const ctx = makeCtx();
+    let s = world();
+    const chip = (id: string) => recvUi.receivableChip(s, s.receivables.find((r) => r.id === id)!, '2026-10-20');
+    assert.deepEqual(chip('id-1'), { label: 'متأخر', tone: 'attention' });
+    assert.deepEqual(chip('id-2'), { label: 'مستنيه', tone: 'neutral' });
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-2', accountId: 'S1', amount: 100, date: '2026-10-18' }, ctx));
+    assert.deepEqual(chip('id-2'), { label: 'اتحصّل جزء', tone: 'neutral' });
+    assert.match(recvUi.receivableSubtitle(s.receivables[1]), /^حاجة تانية · ميعاده [^\n]*$/);
+    assert.match(recvUi.receivableProgress(s, s.receivables[1])!, /^اتحصّل .*100.* من .*300/);
+    assert.equal(recvUi.receivableProgress(s, s.receivables[0]), null, 'nothing collected');
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-2', accountId: 'S1', amount: 200, date: '2026-10-19' }, ctx));
+    assert.deepEqual(chip('id-2'), { label: 'اتحصّل', tone: 'ok' });
+    s = apply(s, ops.writeOffReceivable(s, 'id-3', ctx));
+    assert.deepEqual(chip('id-3'), { label: 'اتشطب', tone: 'neutral' });
+    assert.equal(recvUi.forMonthLabel('2026-09'), `عن شهر ${formatMonthLabel('2026-09')}`);
+    assert.equal(recvUi.receivableProgress(s, s.receivables[1]), null, 'settled: no progress line');
+    assert.ok(recvUi.receivableSubtitle(s.receivables[0]).startsWith(`مرتب · عن شهر ${formatMonthLabel('2026-09')} · ميعاده`));
+    // Still owed first (by due date), then the closed ones.
+    const { open, closed } = recvUi.splitReceivables(s);
+    assert.deepEqual(open.map((r) => r.id), ['id-1']);
+    assert.deepEqual(closed.map((r) => r.id).sort(), ['id-2', 'id-3']);
+  });
+
+  it('collect sheet: the account helper names the currency; Q3 blocks more than what is left and explains the workaround', () => {
+    const s = world();
+    const r = s.receivables[0];
+    assert.equal(recvUi.collectAccountsHelper('SAR'), 'الحسابات المعروضة: حسابات بالريال فقط');
+    assert.equal(recvUi.collectAccountsHelper('EGP'), 'الحسابات المعروضة: حسابات بالجنيه فقط');
+    assert.match(recvUi.CROSS_CURRENCY_NOTE, /اشطب الفلوس دي هنا وسجّل الدخل عادي/);
+    assert.match(recvUi.noAccountNote('USD'), /^مفيش حساب بالدولار/);
+    const over = recvUi.collectHint(s, r, 1000.01);
+    assert.equal(over.blocked, true);
+    assert.match(over.hint.text, /أكتر من الباقي .*سجّل الزيادة كدخل منفصل/);
+    assert.deepEqual([recvUi.collectHint(s, r, 1000).blocked, recvUi.collectHint(s, r, null).blocked], [false, false]);
+    assert.match(recvUi.collectHint(s, r, 400).hint.text, /هيفضل باقي .*600/);
+  });
+
+  it('new-receivable defaults: last month, the currency of the last salary’s account; Q8 offer only with something to propose', () => {
+    const s = world();
+    assert.deepEqual(recvUi.receivableDefaults(s, NOW_Q9), { forMonth: '2026-09', currency: 'EGP' });
+    const paidInSar = apply(s, ops.addTransaction(s, { type: 'income', amount: 10, currency: 'SAR', accountId: 'S1', categoryId: 'cat-income-salary', date: '2026-10-01' }, makeCtx()));
+    assert.equal(recvUi.receivableDefaults(paidInSar, NOW_Q9).currency, 'SAR');
+    assert.equal(recvUi.shouldOfferRefill([]), false);
+    assert.equal(recvUi.shouldOfferRefill([{ fundId: 'F1', amount: 0.001, currency: 'EGP' }]), false);
+    assert.equal(recvUi.shouldOfferRefill(sel.receivableRefillSuggestion(s, 'E1', 400, NOW_Q9)), true);
+    assert.equal(recvUi.amountText(1234.5), '1234.5');
   });
 });

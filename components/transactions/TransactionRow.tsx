@@ -11,6 +11,8 @@ import { space } from '@/constants/theme';
 import type { CurrencyCode, FinanceState, Transaction } from '@/store/types';
 import { projectAmount } from '@/utils/currency';
 
+import { forMonthLabel } from '@/components/assets/receivablesUi';
+
 import { transferTitle } from './transactionUi';
 
 type IconName = ComponentProps<typeof MaterialIcons>['name'];
@@ -95,6 +97,8 @@ export function TransactionRow({ tx, state, onPress, showDate = false }: Transac
     .filter(Boolean)
     .join(' · ');
   const chips = [
+    // A receivable's collection: the month it was owed for (cash basis: it counts on its own date).
+    tx.type === 'income' && tx.forMonth ? forMonthLabel(tx.forMonth) : null,
     tx.type === 'expense' && tx.oneTime ? 'لمرة واحدة' : null,
     tx.recurringRuleId ? 'متكرر' : null,
     d.archivedCategory ? 'مؤرشف' : null,

@@ -3,7 +3,10 @@ import { useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { ACCOUNT_TYPE_ICONS, groupAccounts, holdingTitle, signedDifference } from '@/components/assets/assetsUi';
+import { CollectSheet } from '@/components/assets/CollectSheet';
 import { EditAccountSheet } from '@/components/assets/EditAccountSheet';
+import { ReceivableSheet } from '@/components/assets/ReceivableSheet';
+import { receivableChip, receivableProgress, receivableSubtitle, splitReceivables } from '@/components/assets/receivablesUi';
 import { HoldingSheet } from '@/components/assets/HoldingSheet';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
 import { AmountInput } from '@/components/ui/AmountInput';
@@ -33,13 +36,17 @@ import {
   liabilitiesTotal,
   liabilityRemaining,
   liquidTotal,
+  openReceivablesByCurrency,
+  openReceivablesValue,
+  receivableRemaining,
   totalAssets,
 } from '@/store/selectors';
 import { countryName } from '@/constants/countries';
 import { COUNTRY_OPTIONS, DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
-import type { Account, CountryCode, CurrencyCode, GoldKarat, Holding } from '@/store/types';
+import type { Account, CountryCode, CurrencyCode, GoldKarat, Holding, Receivable } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { showMessage } from '@/utils/dialogs';
+import { toDateKey } from '@/utils/dates';
 import { currencySymbol } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
@@ -85,6 +92,11 @@ export default function AssetsScreen() {
   const [holdingId, setHoldingId] = useState<string | null>(null);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [buyingGold, setBuyingGold] = useState(false);
+  // Receivables: the add / edit sheet ('add' or an id), the collect sheet, a collection opened from the edit sheet.
+  const [receivableSheet, setReceivableSheet] = useState<string | null>(null);
+  const [collectingId, setCollectingId] = useState<string | null>(null);
+  const [collectionTxId, setCollectionTxId] = useState<string | null>(null);
+  const [closedOpen, setClosedOpen] = useState(false);
 
   if (!state.hasHydrated) return <LoadingView />;
 
@@ -95,6 +107,12 @@ export default function AssetsScreen() {
   const otherHoldings = holdings.filter((h) => h.type !== 'gold');
   const reporting = state.settings.reportingCurrency;
   const totals = goldTotals(state, reporting);
+  const owed = splitReceivables(state);
+  const owedByCurrency = Object.entries(openReceivablesByCurrency(state));
+  const today = toDateKey(new Date());
+  const editingReceivable = receivableSheet && receivableSheet !== 'add' ? state.receivables.find((r) => r.id === receivableSheet) : undefined;
+  const collecting = state.receivables.find((r) => r.id === collectingId);
+  const collectionTx = state.transactions.find((t) => t.id === collectionTxId);
   const fundOf = (holdingIdToFind: string) => state.funds.find((f) => f.linkedHoldingIds.includes(holdingIdToFind))?.name;
 
   // Helpers
@@ -197,6 +215,35 @@ export default function AssetsScreen() {
           ) : undefined
         }
         onPress={() => setHoldingId(holding.id)}
+      />
+    );
+  };
+
+  const receivableRow = (r: Receivable) => {
+    const chip = receivableChip(state, r, today);
+    const closed = !!r.writtenOffAt || chip.label === 'اتحصّل';
+    const progress = receivableProgress(state, r);
+    return (
+      <ListRow
+        key={r.id}
+        title={r.label}
+        titleColor={closed ? 'textMuted' : undefined}
+        subtitle={receivableSubtitle(r)}
+        subtitleLines={2}
+        icon={r.kind === 'salary' ? 'work-outline' : 'person-outline'}
+        trailing={<Money amount={closed ? r.amount : receivableRemaining(state, r)} currency={r.currency} align="left" />}
+        accessory={
+          <View style={styles.owedMeta}>
+            <StatusChip label={chip.label} tone={chip.tone} />
+            {progress && (
+              <AppText variant="caption" color="textSecondary" style={styles.tabular}>
+                {progress}
+              </AppText>
+            )}
+          </View>
+        }
+        onPress={() => setReceivableSheet(r.id)}
+        accessibilityLabel={`${r.label}، ${chip.label}، ${formatMoney(receivableRemaining(state, r), r.currency)}`}
       />
     );
   };
@@ -322,6 +369,74 @@ export default function AssetsScreen() {
         </View>
       )}
 
+      {/* ── Receivables: money owed to me. Not money: never in the totals above ── */}
+      <View>
+        <SectionHeader title="فلوس ليّا" actionLabel="+ إضافة" onAction={() => setReceivableSheet('add')} />
+        <View style={styles.owedLabel}>
+          <StatusChip label="غير محصّل" tone="attention" icon="schedule" />
+          <AppText variant="caption" color="textSecondary" style={styles.owedCaption}>
+            فلوس ليك عند حد ولسه ماوصلتش. مش محسوبة في الأصول ولا صافي الثروة ولا فلوسك.
+          </AppText>
+        </View>
+        {owed.open.length === 0 && owed.closed.length === 0 ? (
+          <AppText variant="secondary" color="textSecondary">
+            مفيش فلوس ليك عند حد دلوقتي. لو مرتبك اتأخر سجّله هنا عشان متنساهوش.
+          </AppText>
+        ) : (
+          <View style={styles.groups}>
+            {owedByCurrency.length > 0 && (
+              <Card variant="subtle" style={styles.owedTotals}>
+                <View style={styles.owedAmounts}>
+                  {owedByCurrency.map(([currency, amount]) => (
+                    <Money key={currency} amount={amount} currency={currency} size="md" align="right" />
+                  ))}
+                </View>
+                {(owedByCurrency.length > 1 || owedByCurrency[0][0] !== reporting) && (
+                  <AppText variant="caption" color="textSecondary" style={styles.tabular}>
+                    ≈ {formatMoney(openReceivablesValue(state, reporting), reporting)} بأسعار النهارده (للمعلومية بس)
+                  </AppText>
+                )}
+              </Card>
+            )}
+            {owed.open.length > 0 && <ListGroup>{owed.open.map(receivableRow)}</ListGroup>}
+            {owed.closed.length > 0 && (
+              <View style={styles.group}>
+                <Pressable
+                  onPress={() => setClosedOpen((v) => !v)}
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: closedOpen }}
+                  style={({ pressed }) => [styles.toggle, pressed && { opacity: opacity.pressed }]}>
+                  <AppText variant="caption" color="textSecondary">
+                    المقفولة ({owed.closed.length})
+                  </AppText>
+                  <MaterialIcons name={closedOpen ? 'expand-less' : 'expand-more'} size={20} color={colors.textSecondary} />
+                </Pressable>
+                {closedOpen && <ListGroup>{owed.closed.map(receivableRow)}</ListGroup>}
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+
+      {receivableSheet === 'add' && <ReceivableSheet onClose={() => setReceivableSheet(null)} />}
+      {editingReceivable && (
+        <ReceivableSheet
+          key={editingReceivable.id}
+          receivable={editingReceivable}
+          onClose={() => setReceivableSheet(null)}
+          onCollect={(r) => {
+            setReceivableSheet(null);
+            setCollectingId(r.id);
+          }}
+          onOpenTransaction={(id) => {
+            setReceivableSheet(null);
+            setCollectionTxId(id);
+          }}
+        />
+      )}
+      {collecting && <CollectSheet key={collecting.id} receivable={collecting} onClose={() => setCollectingId(null)} />}
+      {collectionTx && <TransactionSheet key={collectionTx.id} transaction={collectionTx} onClose={() => setCollectionTxId(null)} />}
+
       {editingAccount && (
         <EditAccountSheet key={editingAccount.id} account={editingAccount} onClose={() => setEditingAccountId(null)} />
       )}
@@ -407,5 +522,11 @@ const styles = StyleSheet.create({
   group: { gap: space.xs },
   toggle: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs, minHeight: 36 },
   holdingMeta: { gap: space.xs, marginTop: space.xxs },
+  // RTL: the status chip on the right, the "collected X of Y" line beside it, wrapping on small phones.
+  owedMeta: { flexDirection: 'row-reverse', flexWrap: 'wrap', alignItems: 'center', gap: space.sm, marginTop: space.xxs },
   tabular: { fontVariant: ['tabular-nums'] },
+  owedLabel: { flexDirection: 'row-reverse', alignItems: 'flex-start', gap: space.sm, marginBottom: space.sm },
+  owedCaption: { flex: 1 },
+  owedTotals: { gap: space.xs },
+  owedAmounts: { flexDirection: 'row-reverse', flexWrap: 'wrap', gap: space.lg },
 });

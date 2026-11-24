@@ -6,8 +6,8 @@ import { persist, type StateStorage } from 'zustand/middleware';
 import { newId } from '@/utils/id';
 import { fetchLivePrices, priceSourceOf, shouldAutoFetch } from '@/utils/prices/fetchPrices';
 import { createPersistOptions, createWriteGuard, type HydrationFailure } from './hydration';
-import { applyV8Steps, LATEST_V8_STEP } from './migrateV8';
-import { CURRENT_VERSION, migratePersistedState } from './migrations';
+import { CURRENT_VERSION } from './migrations';
+import { completeStoredPayload, migrateStoredPayload, type PersistMigrationSetup } from './persistMigration';
 import * as ops from './operations';
 import type { CoverSelection, OpOptions } from './cover';
 import { stateSummary, type FundAmount } from './selectors';
@@ -27,6 +27,14 @@ const STORAGE_KEY = '@wealth_finance_state';
 const BACKUP_KEY_PREFIX = '@wealth_finance_state_backup_v';
 const IMPORT_BACKUP_KEY = '@wealth_finance_state_backup_before_import';
 const RESTORE_BACKUP_KEY = '@wealth_finance_state_backup_before_restore';
+
+// Where persist's migrate / normalize keep the untouched payload (store/persistMigration.ts).
+const persistMigration: PersistMigrationSetup = {
+  backupKeyPrefix: BACKUP_KEY_PREFIX,
+  setItem: (key, value) => AsyncStorage.setItem(key, value),
+  now: () => new Date().toISOString(),
+  newId,
+};
 
 // Prefer the git-ignored personal seed; fall back to the committed example.
 // Expo's Metro config enables optional dependencies, so a missing file is fine here.
@@ -67,6 +75,7 @@ export function dataOf(s: FinanceState): FinanceState {
     netWorthSnapshots: s.netWorthSnapshots,
     actionDismissals: s.actionDismissals,
     monthlyReviews: s.monthlyReviews,
+    receivables: s.receivables,
     settings: s.settings,
     tombstones: s.tombstones,
   };
@@ -120,6 +129,14 @@ interface FinanceActions {
   addLiability: (input: ops.NewLiability) => void;
   updateLiability: (liability: ops.Editable<Liability>) => void;
   deleteLiability: (id: string) => void;
+
+  // Receivables (data v9): money owed to the user. Only collecting touches an account (an income, through the gate).
+  addReceivable: (input: ops.NewReceivable) => void;
+  updateReceivable: (edit: ops.ReceivableEdit) => void;
+  deleteReceivable: (id: string) => void;
+  writeOffReceivable: (id: string) => void;
+  reopenReceivable: (id: string) => void;
+  collectReceivable: (input: ops.ReceivableCollection, options?: OpOptions) => void;
 
   // `linkTransactionId`: the transaction a rule is being made from ("خليها متكررة").
   addRecurringRule: (input: ops.NewRecurringRule, linkTransactionId?: string) => void;
@@ -261,6 +278,13 @@ export const useFinanceStore = create<FinanceStore>()(
       updateLiability: (liability) => set(ops.updateLiability(get(), liability, ctx)),
       deleteLiability: (id) => set(ops.deleteLiability(get(), id, ctx)),
 
+      addReceivable: (input) => set(ops.addReceivable(get(), input, ctx)),
+      updateReceivable: (edit) => set(ops.updateReceivable(get(), edit, ctx)),
+      deleteReceivable: (id) => set(ops.deleteReceivable(get(), id, ctx)),
+      writeOffReceivable: (id) => set(ops.writeOffReceivable(get(), id, ctx)),
+      reopenReceivable: (id) => set(ops.reopenReceivable(get(), id, ctx)),
+      collectReceivable: (input, options) => set(ops.collectReceivable(get(), input, ctx, options)),
+
       addRecurringRule: (input, linkTransactionId) => set(ops.addRecurringRule(get(), input, ctx, linkTransactionId)),
       updateRecurringRule: (rule) => set(ops.updateRecurringRule(get(), rule, ctx)),
       deleteRecurringRule: (id) => set(ops.deleteRecurringRule(get(), id, ctx)),
@@ -341,31 +365,17 @@ export const useFinanceStore = create<FinanceStore>()(
       // so nothing reads storage, migrates, or calls setState; `hasHydrated` stays false and the
       // server renders the loading state, matching the client's first render.
       skipHydration: isServer,
-      // A payload stored at version 8 by an earlier build (data v8 grew over several builds) is completed here.
-      // The untouched copy is kept first, so a wrong completion can always be undone by hand.
-      normalize: (persisted) => {
-        const done = (persisted as { settings?: { v8Step?: number } }).settings?.v8Step ?? 0;
-        if (done >= LATEST_V8_STEP) return persisted;
-        void AsyncStorage.setItem(
-          `${BACKUP_KEY_PREFIX}8_before_step_${done}`,
-          JSON.stringify({ state: persisted, version: CURRENT_VERSION })
-        );
-        return applyV8Steps(persisted, { now: new Date().toISOString(), newId });
-      },
+      // A payload stored at the current version by an earlier build (data v8 and v9 grow over several builds, as
+      // sub-steps) is completed here. The untouched copy is kept first, so a wrong completion can always be undone
+      // by hand.
+      normalize: (persisted) => completeStoredPayload(persisted, persistMigration),
       // Persist data only — never actions or hydration flags.
       partialize: (s: FinanceStore) => dataOf(s),
       onFailure: (failure) => useHydrationFailure.setState({ failure }),
       migrate: async (persisted, version) => {
-        // Keep the untouched pre-migration payload so a failed or wrong migration never
-        // loses data. It is written before the migrated state can overwrite the main key.
-        await AsyncStorage.setItem(
-          `${BACKUP_KEY_PREFIX}${version}`,
-          JSON.stringify({ state: persisted, version })
-        );
-        const { state: migrated, clampedBy } = migratePersistedState(persisted, version, {
-          now: new Date().toISOString(),
-          newId,
-        });
+        // Keeps the untouched pre-migration payload first (awaited), so a failed or wrong migration never
+        // loses data: it is written before the migrated state can overwrite the main key.
+        const { state: migrated, clampedBy } = await migrateStoredPayload(persisted, version, persistMigration);
         if (__DEV__) {
           console.log(`[wealth] migrated persisted state v${version} → v${CURRENT_VERSION}`, {
             ...stateSummary(migrated),

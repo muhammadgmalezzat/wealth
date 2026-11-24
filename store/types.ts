@@ -77,6 +77,10 @@ export interface IncomeExpenseTransaction extends TransactionBase {
   // Only on the VIRTUAL expense rows that selectors make from the fees of a transfer or exchange (never
   // stored): the id of that transfer or exchange.
   feeOfId?: string;
+  // Income only: this income collects (part of) that receivable (INV-10), in its currency…
+  receivableId?: string;
+  // …and carries its forMonth ('YYYY-MM'), kept equal to the receivable's (INV-11).
+  forMonth?: string;
 }
 
 // A charge of a transfer or exchange (bank, wallet or exchange-house fee). It leaves `accountId` (the source or
@@ -250,7 +254,31 @@ export interface Liability extends Synced {
   country: CountryCode;
 }
 
-export type RecurringKind = 'income' | 'expense' | 'transfer' | 'exchange';
+export type ReceivableKind = 'salary' | 'other';
+// Derived (selectors), never stored, except that 'written_off' is `writtenOffAt` being present.
+export type ReceivableStatus = 'open' | 'partial' | 'settled' | 'written_off';
+
+// Money owed to the user (a late salary, a loan to a friend). NOT money: no account, no balance, never in net
+// worth, funds or spending (docs/architecture/RECEIVABLES_DESIGN.md). Collecting it records an income tagged
+// `receivableId`; what was collected, what is left and the status are derived from those incomes.
+export interface Receivable extends Synced {
+  id: string;
+  // The debtor, e.g. the employer.
+  label: string;
+  kind: ReceivableKind;
+  // 'YYYY-MM': required for a salary, optional otherwise (INV-11).
+  forMonth?: string;
+  // > 0, in `currency` (native; never converted, INV-7 rounded).
+  amount: number;
+  currency: CurrencyCode;
+  dueDate?: string;
+  note?: string;
+  // ISO; present = written off (closed with no ledger effect). Reopening clears it.
+  writtenOffAt?: string;
+  createdAt: string;
+}
+
+export type RecurringKind ='income' | 'expense' | 'transfer' | 'exchange';
 export type RecurringFrequency = 'weekly' | 'monthly' | 'yearly';
 
 // A scheduled income, expense, transfer or exchange. Occurrences are computed from startDate,
@@ -395,6 +423,8 @@ export interface Settings {
   // How many of the v7 → v8 migration's sub-steps this data has had (store/migrateV8.ts). A payload stored
   // at version 8 by an earlier build has fewer (or none) and is completed on hydration.
   v8Step: number;
+  // Same for the v8 → v9 migration (store/migrateV9.ts). Missing on v8 data (= 0).
+  v9Step?: number;
   goldPrice24kEGP: number;
   // Market price of 21k, stored separately (it isn't exactly 24k × 21/24). 18k derives from 24k.
   goldPrice21kEGP: number;
@@ -446,7 +476,8 @@ export type SyncEntity =
   | 'monthlyPlan'
   | 'netWorthSnapshot'
   | 'actionDismissal'
-  | 'monthlyReview';
+  | 'monthlyReview'
+  | 'receivable';
 
 // Log of deletions for a future server sync. Deleted data is really removed from its
 // collection; selectors never look at tombstones.
@@ -473,6 +504,8 @@ export interface FinanceState {
   netWorthSnapshots: NetWorthSnapshot[];
   actionDismissals: ActionDismissal[];
   monthlyReviews: MonthlyReview[];
+  // Money owed to the user; read by the receivable selectors only (data v9).
+  receivables: Receivable[];
   settings: Settings;
   tombstones: Tombstone[];
 }

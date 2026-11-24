@@ -20,6 +20,8 @@ import type {
   IncomeExpenseTransaction,
   Liability,
   NetWorthBreakdown,
+  Receivable,
+  ReceivableStatus,
   SinkingFrequency,
   Transaction,
 } from './types';
@@ -1019,6 +1021,101 @@ export function suggestedEmergencyTarget(
   return roundIn((sumIn(recorded, 'EGP') / recorded.length) * months, 'EGP');
 }
 
+// --- Receivables --------------------------------------------------------------
+
+// What has been collected on a receivable: the incomes tagged with it, summed in its currency (INV-7). Derived,
+// never stored. Money selectors above never read receivables (they are not money).
+export function receivableCollected(
+  state: Pick<State, 'transactions'>,
+  receivable: Pick<Receivable, 'id' | 'currency'>
+): number {
+  return sumIn(
+    state.transactions
+      .filter((tx): tx is IncomeExpenseTransaction => isIncomeExpense(tx) && tx.receivableId === receivable.id)
+      .map((tx) => tx.amount),
+    receivable.currency
+  );
+}
+
+// The incomes that collected it, newest first.
+export function receivableCollections(state: Pick<State, 'transactions'>, receivableId: string): IncomeExpenseTransaction[] {
+  return state.transactions
+    .filter((tx): tx is IncomeExpenseTransaction => isIncomeExpense(tx) && tx.receivableId === receivableId)
+    .sort(compareNewestFirst);
+}
+
+// What is still owed, in its currency; never below 0. A written-off receivable still has a remaining (what was
+// given up), but no status other than written_off and no place in the totals.
+export function receivableRemaining(state: Pick<State, 'transactions'>, receivable: Receivable): number {
+  return roundIn(Math.max(0, receivable.amount - receivableCollected(state, receivable)), receivable.currency);
+}
+
+export function receivableStatus(state: Pick<State, 'transactions'>, receivable: Receivable): ReceivableStatus {
+  if (receivable.writtenOffAt) return 'written_off';
+  if (receivableRemaining(state, receivable) <= MONEY_EPSILON) return 'settled';
+  return receivableCollected(state, receivable) > MONEY_EPSILON ? 'partial' : 'open';
+}
+
+const isOpenReceivable = (state: Pick<State, 'transactions'>, r: Receivable) => {
+  const status = receivableStatus(state, r);
+  return status === 'open' || status === 'partial';
+};
+
+// Still owed (open or partial) and past its due date. `today` is 'YYYY-MM-DD'.
+export function receivableOverdue(state: Pick<State, 'transactions'>, receivable: Receivable, today: string): boolean {
+  return isOpenReceivable(state, receivable) && !!receivable.dueDate && receivable.dueDate < today;
+}
+
+// «غير محصّل»: what is still owed per currency, open and partial receivables only. Never money: no selector above
+// adds it to anything.
+export function openReceivablesByCurrency(state: Pick<State, 'transactions' | 'receivables'>): Record<CurrencyCode, number> {
+  const out: Record<CurrencyCode, number> = {};
+  for (const r of state.receivables) {
+    if (!isOpenReceivable(state, r)) continue;
+    out[r.currency] = addIn(out[r.currency] ?? 0, receivableRemaining(state, r), r.currency);
+  }
+  return out;
+}
+
+// The same total in one currency at TODAY's rates: informational only ("للمعلومية"), never stored or added to money.
+export function openReceivablesValue(
+  state: Pick<State, 'transactions' | 'receivables' | 'settings'>,
+  to: CurrencyCode = reportingCurrency(state)
+): number {
+  return sumIn(
+    Object.entries(openReceivablesByCurrency(state)).map(([currency, amount]) => valueNow(state, amount, currency, to)),
+    to
+  );
+}
+
+// Another salary receivable for the same debtor and month (Q5: a warning, never a block).
+export function duplicateSalaryReceivable(
+  state: Pick<State, 'receivables'>,
+  input: Pick<Receivable, 'label' | 'kind' | 'forMonth'>,
+  exceptId?: string
+): Receivable | undefined {
+  if (input.kind !== 'salary' || !input.forMonth) return undefined;
+  const label = input.label.trim();
+  return state.receivables.find(
+    (r) => r.id !== exceptId && r.kind === 'salary' && r.forMonth === input.forMonth && r.label.trim() === label
+  );
+}
+
+// Q8, the refill offer after a collection: what to propose reserving from the account it arrived in, never more than
+// this collection nor the account's available money, split across funds below target by priority (each capped by its
+// suggested monthly amount, like «وزّع أموالك»). Empty → no offer.
+export function receivableRefillSuggestion(
+  state: State,
+  accountId: string,
+  collected: number,
+  now: Date = new Date()
+): FundAmount[] {
+  const account = state.accounts.find((a) => a.id === accountId);
+  if (!account) return [];
+  const cap = Math.min(collected, Math.max(0, accountAvailable(state, accountId)));
+  return suggestAllocationIn(state, account.currency, cap, now);
+}
+
 // --- Diagnostics ------------------------------------------------------------
 
 export function stateSummary(state: State) {
@@ -1026,6 +1123,7 @@ export function stateSummary(state: State) {
     accounts: state.accounts.length,
     holdings: state.holdings.length,
     funds: state.funds.length,
+    receivables: state.receivables?.length ?? 0,
     netWorthEGP: Math.round(netWorth(state, 'EGP') * 100) / 100,
     unassignedEGP: Math.round(unassignedEGP(state) * 100) / 100,
   };

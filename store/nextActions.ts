@@ -11,6 +11,8 @@ import {
   fundMonthShortfall,
   fundsByPriority,
   fundStatus,
+  receivableOverdue,
+  receivableRemaining,
   suggestedEmergencyTarget,
   unassignedSummary,
   type CurrencyAmount,
@@ -26,7 +28,8 @@ type State = FinanceState;
 export type ActionSeverity = 'urgent' | 'warning' | 'opportunity' | 'info';
 
 // Screens, or a sheet Home opens itself ('resolve', 'assign', 'new-emergency').
-export type ActionRoute = '/due' | '/plan' | '/review' | '/settings' | '/fund/[id]' | 'resolve' | 'assign' | 'new-emergency';
+// 'collect' opens the collect sheet of the receivable in params.id.
+export type ActionRoute = '/due' | '/plan' | '/review' | '/settings' | '/fund/[id]' | 'resolve' | 'assign' | 'new-emergency' | 'collect';
 
 export interface NextAction {
   // Stable per situation ('due', 'sinking-<fundId>', 'review-2026-09'…): snoozes are keyed by it.
@@ -111,7 +114,8 @@ function amountToShow(parts: CurrencyAmount[], totalEGP: number): { amount: numb
 
 // Every applicable action, snoozed ones included, sorted by priority. Rules, in order:
 //  1 due 'confirm' items          2 automatic items needing a cover / unresolved reservations   3 overspent plan lines
-//  4 last month not reviewed       5 no plan this month                  6 no / thin emergency fund
+//  4 last month not reviewed; an overdue receivable (one each, dismissible)
+//  5 no plan this month                  6 no / thin emergency fund
 //  7 sinking fund due ≤ 14 days    8 fund behind this month              9 money without a job
 // 10 gold / FX prices ≥ 7 days old 11 last backup ≥ 7 days old (or never)
 // `blockedAuto`: how many automatic recurring items could not be recorded because they would eat into reserved money
@@ -185,6 +189,24 @@ export function allActions(state: State, now: Date = new Date(), blockedAuto = 0
       title: `راجع شهر ${formatMonthLabel(reviewMonth)}`,
       subtitle: 'شوف دخلك ومصروفك وقارنهم بالخطة في دقيقتين.',
       cta: { label: 'ابدأ المراجعة', route: '/review', params: { month: reviewMonth } },
+    });
+  }
+
+  // 4 — Q9: money owed past its due date (open or partial). A reminder, not a problem in the numbers: dismissible.
+  for (const r of state.receivables ?? []) {
+    if (!receivableOverdue(state, r, today)) continue;
+    const remaining = receivableRemaining(state, r);
+    add(4, {
+      id: `receivable-${r.id}`,
+      severity: 'warning',
+      title:
+        r.kind === 'salary' && r.forMonth
+          ? `مرتب ${formatMonthLabel(r.forMonth)} لسه ماوصلش`
+          : `${formatMoney(remaining, r.currency)} عند ${r.label} لسه ماوصلوش`,
+      subtitle: `باقي ${formatMoney(remaining, r.currency)} عند ${r.label}، وميعاده عدّى. وصل؟ سجّله.`,
+      amount: remaining,
+      currency: r.currency,
+      cta: { label: 'سجّل التحصيل', route: 'collect', params: { id: r.id } },
     });
   }
 

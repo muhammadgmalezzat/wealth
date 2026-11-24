@@ -28,6 +28,8 @@ import { confirmAction, showMessage } from '@/utils/dialogs';
 import { parseAmount } from '@/utils/parseAmount';
 import { runAction } from '@/utils/runAction';
 
+import { forMonthLabel } from '@/components/assets/receivablesUi';
+
 import { AccountPicker } from './AccountPicker';
 import { ExchangeFields } from './ExchangeFields';
 import { FeeFields, type FeeDraft } from './FeeFields';
@@ -76,7 +78,15 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
         ? [transaction.fromAccountId, transaction.toAccountId]
         : [transaction.accountId]
   );
-  const accounts = state.accounts.filter((a) => !a.archived || involvedIds.has(a.id));
+  // A receivable's collection (data v9): stays an income, in the receivable's currency; the link itself is kept by the
+  // store whatever the form sends.
+  const collectionOf =
+    transaction?.type === 'income' && transaction.receivableId
+      ? state.receivables.find((r) => r.id === transaction.receivableId)
+      : undefined;
+  const accounts = state.accounts.filter(
+    (a) => (!a.archived || involvedIds.has(a.id)) && (!collectionOf || a.currency === collectionOf.currency)
+  );
   const accountById = (id: string) => accounts.find((a) => a.id === id);
   const validAccount = (id: string | undefined) => (id && accountById(id) ? id : undefined);
   const validCategory = (id: string | undefined, kind: FlowType) =>
@@ -324,7 +334,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   // "خليها متكررة": a monthly rule prefilled from the saved transaction (not yet linked to one).
   const [ruleOpen, setRuleOpen] = useState(false);
   const recurringPrefill: Partial<NewRecurringRule> | null =
-    !transaction || transaction.recurringRuleId || transaction.type === 'asset_purchase'
+    !transaction || transaction.recurringRuleId || transaction.type === 'asset_purchase' || collectionOf
       ? null
       : {
           ...(transaction.type === 'transfer'
@@ -365,7 +375,9 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       message:
         transaction.type === 'asset_purchase'
           ? 'هيتحذف الذهب المرتبط بالمعاملة كمان، والفلوس هترجع للحساب.'
-          : 'هل تريد حذف هذه المعاملة؟',
+          : collectionOf
+            ? `هل تريد حذف هذه المعاملة؟ فلوسك عند «${collectionOf.label}» هترجع مفتوحة بالمبلغ ده.`
+            : 'هل تريد حذف هذه المعاملة؟',
       confirmText: 'حذف',
       cancelText: 'إلغاء',
       onConfirm: () => {
@@ -397,7 +409,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       : [];
   // A gold purchase can't become another type (and vice versa) once saved.
   const typeOptions: { label: string; value: TxType }[] =
-    transaction?.type === 'asset_purchase'
+    transaction?.type === 'asset_purchase' || collectionOf
       ? []
       : [
           { label: 'مصروف', value: 'expense' },
@@ -435,6 +447,18 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       onSave={handleSave}>
       {typeOptions.length > 0 ? (
         <Segment<TxType> options={typeOptions} value={type} onChange={changeType} />
+      ) : collectionOf ? (
+        <View style={styles.lockedType}>
+          <View style={styles.collectionChips}>
+            <StatusChip label={`تحصيل: ${collectionOf.label}`} tone="ok" icon="south-west" />
+            {transaction?.type === 'income' && transaction.forMonth && (
+              <StatusChip label={forMonthLabel(transaction.forMonth)} tone="neutral" icon="event-note" />
+            )}
+          </View>
+          <AppText variant="caption" color="textSecondary">
+            دي تحصيل لفلوس ليّا، نوعها وعملتها مش بيتغيّروا.
+          </AppText>
+        </View>
       ) : (
         <View style={styles.lockedType}>
           <StatusChip label="شراء ذهب" tone="gold" icon="diamond" />
@@ -624,6 +648,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
 const styles = StyleSheet.create({
   follow: { gap: space.xs, marginTop: space.sm },
   lockedType: { gap: space.xs, alignItems: 'flex-end' },
+  collectionChips: { flexDirection: 'row-reverse', flexWrap: 'wrap', gap: space.xs },
   hint: { marginTop: space.sm },
   date: { marginTop: space.lg, gap: space.sm },
   note: { minHeight: 72, textAlignVertical: 'top' },

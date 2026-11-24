@@ -1,4 +1,5 @@
 import { BackupError, type BackupErrorCode } from '@/store/backup';
+import { formatCurrency } from '@/utils/formatters';
 import {
   FinanceValidationError,
   type FinanceEntity,
@@ -18,6 +19,7 @@ const ENTITY_LABELS: Record<FinanceEntity, string> = {
   liability: 'الالتزام',
   recurringRule: 'المعاملة المتكررة',
   monthlyPlan: 'الخطة',
+  receivable: 'المبلغ ده',
 };
 
 const FIELD_LABELS: Record<FinanceField, string> = {
@@ -50,11 +52,15 @@ const FIELD_LABELS: Record<FinanceField, string> = {
   endDate: 'تاريخ النهاية',
   interval: 'التكرار كل',
   dayOfMonth: 'يوم الشهر',
+  forMonth: 'الشهر',
+  dueDate: 'ميعاد الاستحقاق',
 };
 
 type Details = FinanceValidationError['details'];
 
 const field = (d: Details) => (d.field ? FIELD_LABELS[d.field] : 'القيمة');
+// " (ج.م 600)" when the error names an amount, else nothing.
+const amountNote = (d: Details) => (d.amount !== undefined && d.currency ? ` (${formatCurrency(d.amount, d.currency)})` : '');
 const entity = (d: Details) => (d.entity ? ENTITY_LABELS[d.entity] : 'العنصر');
 
 const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
@@ -96,6 +102,16 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   DUPLICATE_ENTRY: (d) => `${entity(d)} موجود في الخطة بالفعل`,
   PLAN_EXISTS: () => 'فيه خطة للشهر ده بالفعل',
   ACTION_NOT_DISMISSIBLE: () => 'الخطوة دي مهمة ومينفعش تتأجل',
+  RECEIVABLE_FOR_MONTH_REQUIRED: () => 'اختار الشهر اللي المرتب ده عنه',
+  RECEIVABLE_AMOUNT_BELOW_COLLECTED: (d) => `المبلغ مينفعش يبقى أقل من اللي اتحصّل${amountNote(d)}`,
+  RECEIVABLE_CURRENCY_LOCKED: () => 'فيه تحصيلات، العملة مش هتتغيّر',
+  RECEIVABLE_IN_USE: () => 'فيه تحصيلات على الفلوس دي؛ تقدر تشطبها بس',
+  RECEIVABLE_SETTLED: () => 'اتحصّل كله، مفيش حاجة تتشطب',
+  RECEIVABLE_OVER_COLLECTED: (d) => `ده أكتر من الباقي${amountNote(d)}؛ لو اتدفع زيادة سجّل الزيادة كدخل منفصل`,
+  RECEIVABLE_WRITTEN_OFF: () => 'الفلوس دي متشطبة؛ رجّعها مفتوحة الأول',
+  RECEIVABLE_PAYMENT_NOT_INCOME: () => 'دي تحصيل لفلوس ليّا، لازم تفضل دخل',
+  RECEIVABLE_LINK_REQUIRED: () => '«عن شهر» بيتسجّل مع تحصيل فلوس ليّا بس',
+  INVALID_KIND: () => 'النوع غير صالح',
   OCCURRENCE_NOT_DUE: () => 'المستحق ده اتسجل أو اتخطى بالفعل',
   CATEGORY_NAME_TAKEN: () => 'فيه بند بنفس الاسم بالفعل',
   CATEGORY_KIND_LOCKED: () => 'مينفعش تغيّر بند من مصروف لدخل أو العكس',
@@ -109,7 +125,8 @@ const BACKUP_MESSAGES: Record<BackupErrorCode, string> = {
   INVALID_FILE: 'الملف ده مش نسخة احتياطية سليمة من حصّالة',
   UNSUPPORTED_VERSION: 'النسخة الاحتياطية دي من إصدار أحدث من التطبيق؛ حدّث التطبيق الأول',
   PASSWORD_REQUIRED: 'النسخة الاحتياطية دي محمية بكلمة سر',
-  WRONG_PASSWORD: 'كلمة السر غلط',
+  // AES-GCM can't tell a wrong password from a damaged file, so the message names both.
+  WRONG_PASSWORD: 'كلمة السر غلط أو الملف تالف',
 };
 
 export function errorMessage(error: unknown): string {

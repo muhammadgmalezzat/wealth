@@ -3,6 +3,7 @@ import { router } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
+import { CollectSheet } from '@/components/assets/CollectSheet';
 import { homeFunds } from '@/components/dashboard/homeInsights';
 import { MonthlySnapshot } from '@/components/dashboard/MonthlySnapshot';
 import { NetWorthCard } from '@/components/dashboard/NetWorthCard';
@@ -44,6 +45,8 @@ export default function HomeScreen() {
   const state = useFinanceStore();
   const [txSheet, setTxSheet] = useState<TxSheetTarget>(null);
   const [fundSheet, setFundSheet] = useState<'assign' | 'resolve' | 'emergency' | null>(null);
+  // Q9: the overdue-receivable action opens its collect sheet here.
+  const [collectingId, setCollectingId] = useState<string | null>(null);
 
   if (!state.hasHydrated) return <LoadingView />;
 
@@ -62,12 +65,14 @@ export default function HomeScreen() {
   const funds = homeFunds(state, now);
   const recentTx = recentTransactions(state, 5);
   const editingTx = txSheet && txSheet !== 'add' ? state.transactions.find((t) => t.id === txSheet.id) : undefined;
+  const collecting = state.receivables.find((r) => r.id === collectingId);
   // The top action already says what the unassigned panel would say.
   const hideUnassigned = top?.id === 'assign';
 
   const run = ({ cta }: NextAction) => {
     const { route, params = {} } = cta;
     if (route === 'resolve' || route === 'assign') setFundSheet(route);
+    else if (route === 'collect') setCollectingId(params.id ?? null);
     else if (route === 'new-emergency') setFundSheet('emergency');
     else if (route === '/fund/[id]') router.push({ pathname: '/fund/[id]', params: { id: params.id ?? '', ...params } });
     else if (route === '/review') router.push({ pathname: '/review', params });
@@ -152,6 +157,7 @@ export default function HomeScreen() {
       {fundSheet === 'assign' && <AssignSheet onClose={() => setFundSheet(null)} />}
       {fundSheet === 'resolve' && <ResolveSheet onClose={() => setFundSheet(null)} />}
       {fundSheet === 'emergency' && <FundSheet initialType="emergency" onClose={() => setFundSheet(null)} />}
+      {collecting && <CollectSheet key={collecting.id} receivable={collecting} onClose={() => setCollectingId(null)} />}
     </Screen>
   );
 }

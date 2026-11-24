@@ -3,6 +3,7 @@ import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
+import { assertReceivableInvariants } from './invariants';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import { netWorth } from './selectors';
 import type { FinanceState } from './types';
@@ -185,13 +186,19 @@ export function parseBackup(text: string): BackupFile {
   };
 }
 
+// A damaged file must not ask for an endless key derivation (we write 200k).
+const MAX_ITERATIONS = 10_000_000;
+
 function isEncryptedPayload(value: unknown): value is EncryptedPayload {
   return (
     isObject(value) &&
     value.kdf === 'pbkdf2-sha256' &&
     typeof value.iterations === 'number' &&
+    Number.isInteger(value.iterations) &&
     value.iterations > 0 &&
-    ['salt', 'nonce', 'ciphertext'].every((k) => typeof value[k] === 'string' && /^[0-9a-f]+$/i.test(value[k] as string))
+    value.iterations <= MAX_ITERATIONS &&
+    // Whole bytes only: an odd-length (truncated) hex string is a damaged file.
+    ['salt', 'nonce', 'ciphertext'].every((k) => typeof value[k] === 'string' && /^(?:[0-9a-f]{2})+$/i.test(value[k] as string))
   );
 }
 
@@ -236,11 +243,50 @@ export async function openBackup(file: BackupFile, options: OpenOptions): Promis
   const looksLikeData = file.schemaVersion <= 1 ? Array.isArray(data.assets) : Array.isArray(data.accounts);
   if (!looksLikeData) throw new BackupError('INVALID_FILE');
 
-  const { state } = migratePersistedState(data, file.schemaVersion, {
-    now: options.now.toISOString(),
-    newId: options.newId,
-  });
+  let state: FinanceState;
+  try {
+    ({ state } = migratePersistedState(data, file.schemaVersion, {
+      now: options.now.toISOString(),
+      newId: options.newId,
+    }));
+    if (!hasStateShape(state)) throw new BackupError('INVALID_FILE');
+    // Receivable links (INV-9…11): only a hand-edited or damaged file can break them.
+    assertReceivableInvariants(state);
+    // What the preview shows next; a file that can't produce it must fail here, not in the sheet.
+    netWorth(state);
+  } catch {
+    // Right envelope, broken data inside (e.g. a hand-edited or half-written file).
+    throw new BackupError('INVALID_FILE');
+  }
   return { state, schemaVersion: file.schemaVersion, exportedAt: file.exportedAt, deviceId: file.deviceId };
+}
+
+const STATE_COLLECTIONS = [
+  'rateSnapshots',
+  'accounts',
+  'categories',
+  'transactions',
+  'funds',
+  'reservationMovements',
+  'unresolvedMovements',
+  'holdings',
+  'liabilities',
+  'recurringRules',
+  'monthlyPlans',
+  'netWorthSnapshots',
+  'actionDismissals',
+  'monthlyReviews',
+  'receivables',
+  'tombstones',
+] as const satisfies readonly (keyof FinanceState)[];
+
+// Structure only (every collection a list of records, settings a record); values are the operations' business.
+function hasStateShape(state: unknown): boolean {
+  if (!isObject(state) || !isObject(state.settings)) return false;
+  return STATE_COLLECTIONS.every((key) => {
+    const list = state[key];
+    return Array.isArray(list) && list.every(isObject);
+  });
 }
 
 export interface BackupPreview {

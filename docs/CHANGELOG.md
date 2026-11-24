@@ -6,10 +6,86 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased (2026-11-08) — branch `currency-v8` · data v8 · Phases B–D: currency engine, ledger, account-backed funds
+## Unreleased (ready to ship) — branch `stage-1` · 1.2.0 (OTA, no new build) · data v9 — «فلوس ليّا» (money owed to me)
 
-> Not released. `main` stays on data v7 until this branch is merged. One v7 → v8 migration (eight sub-steps), run on the
-> first launch of a build that contains it; a copy of your data is kept first (`@wealth_finance_state_backup_v7`).
+> **This release ships two things:** data **v9** (receivables, below) **and the stage-1 restore-safety fixes** (the
+> 2026-11-23 entry below, merged but never shipped). Both go out in ONE `eas update` to the 1.2.0 build; no native
+> change, so no new build and no version bump.
+>
+> **Before updating:** export an **encrypted backup** from Settings → البيانات → تصدير نسخة, right before the update. It
+> is a v8 file. The first launch then migrates the data to v9 (only an empty «فلوس ليّا» list is added; every number stays
+> the same) and keeps the untouched v8 payload as `@wealth_finance_state_backup_v8`.
+>
+> **Rollback path:** clear the app's data, then restore the encrypted v8 backup taken right before the update
+> (Settings → البيانات → استعادة نسخة). Publishing the old v8 code again does **not** undo the migration by itself: v8 code
+> refuses v9 data (fail-closed: an error screen, nothing overwritten) instead of silently dropping receivables. So if
+> the v8 code is republished, the same two steps apply after it: clear app data, restore the v8 backup. If the v9 code
+> stays, those two steps bring the data back to exactly what it was before the update (the backup migrates again).
+
+*For users*
+- جديد في **الأصول**: قسم **فلوس ليّا** (عليه «غير محصّل») للفلوس اللي ليك عند حد ولسه ماوصلتش (مرتب متأخر، فلوس سلّفتها). مش داخلة في الأصول ولا صافي الثروة ولا الصناديق ولا «تقدر تصرف بأمان»؛ بتشوف الإجمالي بكل عملة، وقيمته التقريبية بعملة العرض للمعلومية بس.
+- **سجّل تحصيل** (كله أو جزء) في حساب بنفس العملة وبيوم ما وصل: بيتسجّل دخل عادي وعليه «عن شهر …». لو اتدفع زيادة أو بعملة تانية، الشاشة بتقولك تعمل إيه.
+- بعد التحصيل، لو صناديقك ناقصة بتفتحلك **كمّل الصناديق** باقتراح من نفس الحساب تقدر تعدّله أو تلغيه. مفيش حاجة بتتحجز لوحدها.
+- **اشطبها** لو مش هتوصل (من غير أي فلوس)، و**رجّعها مفتوحة** لو غيّرت رأيك. الحذف بس لو مفيش تحصيلات.
+- الرئيسية بتفكّرك لما مرتب يتأخر عن ميعاده («مرتب … لسه ماوصلش» ← **سجّل التحصيل**)، وتقدر تأجّلها يوم بـ «بعدين».
+- **كمان في الإصدار ده (من ٢٣ نوفمبر):** كلمة سر غلط أو ملف نسخة بايظ بقوا بيطلّعوا رسالة واضحة، وبياناتك الحالية مش بتتلمس.
+
+*Technical*
+- Data v9: `Receivable { id, label, kind: salary|other, forMonth?, amount, currency, dueDate?, note?, writtenOffAt?,
+  createdAt, updatedAt }` (status derived; only the write-off stored), `receivables` collection, tombstone entity
+  `receivable`, optional `receivableId` / `forMonth` on income transactions, `settings.v9Step`.
+- `store/migrateV9.ts`: ordered idempotent sub-steps like v8 (step 1 `receivables`), fail-closed;
+  `CURRENT_VERSION = 9`; `migratePersistedState` ends every chain with `applyV9Steps`; the store's `normalize` completes
+  v9 payloads (copy under `…_backup_v9_before_step_N` first); `migrate` keeps `…_backup_v8` as before.
+- INV-9…11 in `store/invariants.ts` (`receivableViolations`, `assertReceivableInvariants`; `assertInvariants` checks
+  INV-5 and INV-9…11); `receivableCollected` selector.
+- Backups: `dataOf` exports receivables; `hasStateShape` requires the list; `openBackup` refuses broken receivable
+  links (`INVALID_FILE`). `replaceAllData` handles the collection (tombstones) and tolerates a seed without it.
+- Tests 447 → 474 (invariants, migration on every oracle fixture with the v8 report unchanged, hydration, backups,
+  restore safety).
+- Step 2: operations `addReceivable`, `updateReceivable`, `deleteReceivable`, `writeOffReceivable`, `reopenReceivable`,
+  `collectReceivable` (an income through `addTransactionCore` + `settle`); receivable link rules in
+  `validateIncomeExpense`; `updateTransaction` keeps the link; selectors (collected, remaining, status, overdue, totals
+  per currency, informational value, Q5 duplicate, Q8 refill suggestion); 10 error codes with Arabic text (amounts in the
+  message). The persist hooks moved to `store/persistMigration.ts` (no behaviour change) so the tests run the real code.
+  Tests 474 → 491, incl. "a collection equals the same income typed by hand" and the fuzz over receivable operations.
+- Step 3: store actions; Assets «فلوس ليّا» section (first titled «مستحقات», renamed in step 4); `ReceivableSheet`, `CollectSheet` (same-currency accounts, Q2 / Q3 notes,
+  then the Q8 refill through `AssignSheet`'s new prefill props); collection chips and type / currency lock in
+  `TransactionRow` / `TransactionSheet`; Next Best Action `receivable-<id>` (rule 4, dismissible) → Home opens `CollectSheet`;
+  pure helpers in `components/assets/receivablesUi.ts`. Tests 491 → 497. Web export builds.
+- Step 4: user-facing rename to «فلوس ليّا» (section, sheets, buttons, error messages; «المستحقات» only for due recurring
+  items). Browser check on synthetic data (12-step QA list, 360 px and 320 px): fixed a crash opening the add sheet
+  (`ReceivableSheet` under the React Compiler: optional-prop reads compiled into unconditional ones) and a cut-off
+  «اتحصّل X من Y» on small phones (moved beside the status chip, `receivableProgress`). Dry run v8 → v9 on the synthetic
+  fixtures: oracle report diff 0, everything but the new list and marker deep-equal. Tests 497.
+
+---
+
+## 2026-11-23 · 1.2.0 · data v8 — post-release cleanup: backup restore safety
+
+> On `stage-1`, **not shipped yet**: these restore-safety fixes ship in the same OTA as data v9 («فلوس ليّا», entry above).
+
+*For users*
+- كلمة السر الغلط بقت بتقول «كلمة السر غلط أو الملف تالف» (التشفير مش بيقدر يفرّق بين الاتنين).
+- ملف نسخة بايظ أو ناقص أو متعدّل بقى بيطلّع «الملف ده مش نسخة احتياطية سليمة من حصّالة» بدل «حدث خطأ غير متوقع». وملف بايظ مبقاش ممكن يعلّق شاشة فك التشفير. بياناتك الحالية مش بتتلمس في أي حالة من دول.
+
+*Technical*
+- `store/backup.ts`: a stricter encrypted-payload check (whole-byte hex, integer `iterations` ≤ 10 000 000). In
+  `openBackup`, migration, a structure check (`hasStateShape`) and the preview's net worth are all guarded, and any
+  failure becomes `INVALID_FILE`. `WRONG_PASSWORD` message updated in `utils/errorMessages.ts`.
+- Tests 441 → 447: "restore safety (FIN-009)" covers a wrong or missing password, corrupted or truncated files, broken
+  data inside a valid envelope, a newer schema, and plain vs encrypted mix-ups. Each case asserts the exact Arabic
+  message and that the (frozen) current state is unchanged.
+- Repo hygiene: the local real-data backup under `.local/` was deleted. Git history has no backup or seed files.
+
+---
+
+## 1.2.0 · data v8 · released 2026-11-08 (OTA)
+
+Phases B–D: currency engine, ledger, account-backed funds (branch `currency-v8`, merged into `main`).
+
+> Shipped as an `eas update` to the 1.2.0 build. One v7 → v8 migration (eight sub-steps) runs on the first launch after
+> the update; a copy of your data is kept first (`@wealth_finance_state_backup_v7`).
 
 **ملخص بالمصري (B + C + D)**
 

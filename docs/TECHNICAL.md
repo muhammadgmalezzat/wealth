@@ -163,13 +163,15 @@ store/                      ALL business logic lives here (pure, no React)
   review.ts                 Monthly review numbers
   analytics.ts              Analytics tab numbers (periods, Sankey, trend, breakdown, net worth series, money map, runway, funds, insights, drill-down)
   errors.ts                 FinanceValidationError + typed codes
-  migrations.ts             v0 → v7 chain (frozen, via migrateToV7) + migratePersistedState; CURRENT_VERSION = 8
+  migrations.ts             v0 → v7 chain (frozen, via migrateToV7) + migratePersistedState; CURRENT_VERSION = 9
   migrateV8.ts              v7 → v8 as ordered idempotent sub-steps (V8_STEPS, applyV8Steps, settings.v8Step; 7 = the ledger, 8 = reservations)
+  migrateV9.ts              v8 → v9 the same way (V9_STEPS, applyV9Steps, settings.v9Step; 1 = receivables)
   cover.ts                  Cover gate types and rules: OpOptions, NeedsCoverError, shortfalls, followPreview, planReserve / planRelease, coversOf
-  invariants.ts             INV-5 as code: invariantViolations / assertInvariants
+  invariants.ts             INV-5 and INV-9…11 as code: invariantViolations, receivableViolations / assertInvariants, assertReceivableInvariants
   rateSnapshots.ts          snapshotForNow / ratePatch: the rate snapshot a write uses
   legacy/                   FROZEN v7 code (types, currency, selectors, planning, recurring, snapshots, analytics): the test oracle only
   hydration.ts              Fail-closed hydration: persist options, write guard, refusal of unreadable / newer data
+  persistMigration.ts       What persist does with stored data: migrateStoredPayload (untouched copy first, then the chain) and completeStoredPayload (normalize: finish v8 / v9 sub-steps); used by the store and by the tests
   backup.ts                 Backup file format, AES-GCM/PBKDF2, open/validate/preview
   defaultCategories.ts      20 default categories (stable ids), FIXED_CATEGORY_IDS
   useFinanceStore.ts        Zustand store + persist config (the only RN-aware store file)
@@ -196,7 +198,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencyRegistry.ts, countries.ts, currencies.ts (names, v7-shaped DEFAULT_RATES for the seeds), market.ts
-tests/logic.test.ts         441 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         497 tests over store/*, utils/* and the pure UI helpers
 tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
@@ -547,6 +549,7 @@ priority order); `nextActions` drops snoozed ones. Each action:
 | 2 | `resolve` | `unresolvedMovements` not empty | urgent | فلوس محجوزة ومش محدد حسابها | حدّد الحساب → ResolveSheet |
 | 3 | `overspent` | this month's plan has `overspentLines` | warning | عدّيت ميزانية: {names} | افتح الخطة → /plan |
 | 4 | `review-YYYY-MM` | `pendingReviewMonth`: last month had transactions (≥ trackingStartDate) and no `monthlyReviews` entry | opportunity | راجع شهر {month} | ابدأ المراجعة → /review?month= |
+| 4 | `receivable-<id>` | `receivableOverdue`: a receivable still open or partial whose `dueDate` < today (one action each, dismissible through `actionDismissals`) | warning | مرتب {month} لسه ماوصلش / {remaining} عند {label} لسه ماوصلوش | سجّل التحصيل → `collect` (Home opens `CollectSheet`) |
 | 5 | `plan-YYYY-MM` | no plan this month | warning | اعمل خطة الشهر | اعمل الخطة → /plan |
 | 6 | `emergency` | no active emergency fund → create; or emergency cash (EGP) < 1 month of essentials (`suggestedEmergencyTarget(3)/3`, needs history) → allocate | opportunity | ابدأ صندوق الطوارئ | أنشئ الصندوق → FundSheet / خصص الآن → fund |
 | 7 | `sinking-<id>` | sinking fund with `nextDueDate − today ≤ 14` days (overdue included) and `target − fundCurrent > 0` | warning | فاضل {X} على {fund} | خصص الآن → /fund/[id]?allocate=1 |
@@ -744,6 +747,36 @@ snapshots from before out again with them (they were estimates anyway); recorded
 breakdown are left alone. New: `netWorthBreakdown(state)`, `NetWorthFigures.breakdown`.
 
 ### Assets, Categories, Settings, Backup, Lock (Calm Wealth phase 6)
+- **Receivables (data v9) — section «فلوس ليّا» at the end of Assets** (header action «+ إضافة»; «المستحقات» stays reserved for due recurring items) (`app/assets.tsx`): a «غير محصّل» chip and a caption
+  saying it is not in the assets, net worth or money; the open + partial totals per currency (`openReceivablesByCurrency`)
+  and, when that is not a single reporting-currency amount, «≈ … بأسعار النهارده (للمعلومية بس)» (`openReceivablesValue`).
+  Rows (`components/assets/receivablesUi.ts`: `splitReceivables`, `receivableChip`, `receivableSubtitle`, `receivableProgress`):
+  title the debtor (one line, ellipsis), subtitle «مرتب · عن شهر … · ميعاده …» (two lines), trailing the remaining, and
+  beside the chip (مستنيه / متأخر / اتحصّل جزء; overdue wins over partial) «اتحصّل X من Y» while partly collected — not in the
+  subtitle, where a 360 px phone cut it off;
+  settled («اتحصّل») and written-off («اتشطب») rows sit in a collapsed «المقفولة (n)». Empty: one caption line, the
+  header's «+ إضافة» stays. The hero totals never include receivables.
+- `ReceivableSheet` (add / edit): kind Segment مرتب | حاجة تانية, «من مين؟», «عن شهر» (`MonthSwitcher`, default last month,
+  salary only), amount + currency (default: the last salary income's account currency; locked with a caption once
+  collected), optional due date (`FutureDateField`, «بدون ميعاد»), note; the Q5 warning (`duplicateSalaryReceivable`). Edit
+  mode adds a summary card, the collections (`TransactionRow`, tapping opens `TransactionSheet` from the screen) and the
+  actions سجّل تحصيل · اشطبها (confirm) / رجّعها مفتوحة · احذفها (only without collections; otherwise the caption
+  «فيه تحصيلات، تقدر تشطبه بس»).
+- `CollectSheet` (from the row's edit sheet or Home's Q9 action): «عن شهر» chip, amount prefilled with the remaining
+  (`collectHint`: «الباقي» / «هيفضل باقي» / Q3 «ده أكتر من الباقي… سجّل الزيادة كدخل منفصل», which disables save),
+  `AccountPicker` over non-archived accounts **in the receivable's currency** with «الحسابات المعروضة: حسابات بال<currency> فقط»
+  and the Q2 note (no account: the note + save disabled), receipt date (`PastDateField`), income category (default «راتب»
+  / «دخل آخر»), note. Saves through `runAction` → `collectReceivable` (so a `NeedsCoverError` would open the cover sheet).
+  Then, if `receivableRefillSuggestion` is not empty (`shouldOfferRefill`), the sheet turns into `AssignSheet` «كمّل الصناديق»
+  (new optional props `initialCurrency`, `initialAccountId`, `prefill`, `title`, `intro`): editable, إلغاء skips it.
+- `TransactionSheet` on a collection: no type Segment (chips «تحصيل: <label>» + «عن شهر …» and the caption «دي تحصيل لمستحق،
+  نوعها وعملتها مش بيتغيّروا»), the account picker only in the receivable's currency, no «خلّيها معاملة متكررة», and the delete
+  confirmation adds «المستحق … هيرجع مفتوح بالمبلغ ده». `TransactionRow` shows the «عن شهر …» chip on any income with `forMonth`.
+- React Compiler note (`ReceivableSheet`): the add mode has no receivable, and `receivable?.id` in a call argument or
+  `receivable!.id` inside a callback was compiled into an unconditional `receivable.id` (memo dependency) and crashed the
+  sheet on web. The sheet reads the optional prop once into `editing` / `editingId` and its callbacks only capture those.
+- Store actions `addReceivable`, `updateReceivable`, `deleteReceivable`, `writeOffReceivable`, `reopenReceivable`,
+  `collectReceivable(input, options?)` (`useFinanceStore`), called through `runAction`.
 
 - Assets / Categories / Settings: see the route table. Balances first; value differences are
   secondary text with a sign, never green/red, no percent or arrows.
@@ -954,18 +987,20 @@ Every synced entity has `updatedAt` (set only by operations).
 - **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), updatedAt }`
 - **ReservationMovement** `{ id, fundId, accountId, amount (signed, in the ACCOUNT's currency), kind: reserve|release|reallocate|follow_transfer|follow_exchange|spend|cover|adjust, groupId?, sourceTransactionId?, date, note?, rateSnapshotId, updatedAt }` — money of one account set aside for one fund; `reservation(fund, account)` = Σ amount, never stored. `reallocate` / `follow_*` come in pairs sharing a `groupId` (a follow group's id is the transaction id, or `<id>:…`); `cover` and `spend` carry the `sourceTransactionId` that caused them.
 - **UnresolvedMovement** `{ id, fundId, amount, currency, date, note?, rateSnapshotId, reason: ambiguous|insufficient|negative|no_account, updatedAt }` — migration-only quarantine: counts toward its fund's total, never against an account's available money, until the user resolves it (an account is chosen: it becomes an `adjust` reservation).
+- **Receivable** (v9) `{ id, label, kind: salary|other, forMonth? ('YYYY-MM', required for salary), amount (> 0, in `currency`, native), currency, dueDate?, note?, writtenOffAt? (ISO; present = written off, cleared on reopen), createdAt, updatedAt }` — money owed to the user, **not money**: no account, never read by a money selector (net worth, liquid, balances, funds, unassigned, safe-to-spend, analytics, snapshots). Collected / remaining / status (`open | partial | settled | written_off`) are derived from the incomes that carry its id (`receivableCollected`); only the write-off is stored. Operations and selectors: §9 "Receivables"; UI: §5 Assets «فلوس ليّا» (`docs/architecture/RECEIVABLES_DESIGN.md`).
+- **IncomeExpenseTransaction** (v9) may carry `receivableId?` + `forMonth?` (income only): it collects that receivable, and copies its month (INV-10, INV-11).
 - **Account** also has `allowNegative?` (a genuine overdraft account: its balance may go below zero without asking; it holds no reservations).
 - **Holding** (union): `gold { weightGrams, karat: 18|21|24 }` or `currency { currency, quantity }`; common `id, name, purchaseCost: Money` (what it cost, in the currency it was paid in; never changes with rates), `purchaseRateSnapshotId` (the rates of the purchase, to show the cost in another currency as it was then), `purchaseDate?, country, note?, updatedAt`
 - **Liability** `{ id, name, principal, currency, country, monthlyPayment?, startDate, notes?, updatedAt }` (no interest)
 - **RecurringRule** `{ id, name, kind: income|expense|transfer|exchange, amount (the amount sent), currency (= account currency), accountId, categoryId? (income/expense), toAccountId? (transfer / exchange), toAmount? (exchange: the amount received each time, required), frequency: weekly|monthly|yearly, interval ≥ 1, dayOfMonth? 1–31 (clamped to month end), startDate, endDate?, nextDate ('' when nothing is left), mode: auto|confirm, variableAmount, active, skippedDates[], note?, createdAt, updatedAt }`
 - **MonthlyPlan** `{ id = plan-YYYY-MM, month, currency, expectedIncome, lines: PlanLine[], fundContributions: PlannedContribution[], createdAt, updatedAt }`
   - `PlanLine { categoryId, limit, kind: fixed|flexible }`, `PlannedContribution { fundId, amount }` (plan currency)
-- **Settings** `{ rates: CurrentRates { base: 'USD', perUsd, updatedAt, source }, enabledCurrencies, reportingCurrency, planCurrency, v8Step, goldPrice24kEGP, goldPrice21kEGP, goldPriceUpdatedAt, trackingStartDate, deviceId, lastBackupAt?, appLockEnabled?, dueNotificationsEnabled?, lastUsed?, priceSource? ('auto' | 'manual', missing = manual; a fresh install is set to 'auto' on first launch), localPremiumPct? (missing = 0), lastPriceFetchAt?, lastPriceFetchError? ('network' | 'fx' | 'gold'), fxSource? ('open.er-api' | 'exchangerate.fun'), lastGoldUsdPerOunce? }`
+- **Settings** `{ rates: CurrentRates { base: 'USD', perUsd, updatedAt, source }, enabledCurrencies, reportingCurrency, planCurrency, v8Step, v9Step? (missing on v8 data = 0), goldPrice24kEGP, goldPrice21kEGP, goldPriceUpdatedAt, trackingStartDate, deviceId, lastBackupAt?, appLockEnabled?, dueNotificationsEnabled?, lastUsed?, priceSource? ('auto' | 'manual', missing = manual; a fresh install is set to 'auto' on first launch), localPremiumPct? (missing = 0), lastPriceFetchAt?, lastPriceFetchError? ('network' | 'fx' | 'gold'), fxSource? ('open.er-api' | 'exchangerate.fun'), lastGoldUsdPerOunce? }`
 - **NetWorthSnapshot** `{ id = nw-YYYY-MM, month, netWorthEGP, liquidEGP, holdingsEGP, breakdown? { [country]: { cashEGP, goldEGP, currenciesEGP, liabilitiesEGP } }, rateSnapshotId, takenAt, estimated?, updatedAt }` — one per month, always valued in **EGP** at the rates of its `rateSnapshotId` (any other currency is a projection through those rates); the current month follows the live figures, `estimated` marks months filled in afterwards.
 - **ActionDismissal** (v7) `{ id = actionId, actionId, until (ISO), updatedAt }` — a snoozed Next Best Action.
 - **MonthlyReview** (v7) `{ id = review-YYYY-MM, month, completedAt, updatedAt }` — a finished review.
-- **Tombstone** `{ entity: SyncEntity, id, deletedAt }` — deletion log for a future sync. `SyncEntity` also covers `netWorthSnapshot`, `actionDismissal`, `monthlyReview` (v7).
-- **FinanceState** `{ accounts, categories, transactions, funds, reservationMovements, unresolvedMovements, holdings, liabilities, recurringRules, monthlyPlans, netWorthSnapshots, actionDismissals, monthlyReviews, rateSnapshots, settings, tombstones }`
+- **Tombstone** `{ entity: SyncEntity, id, deletedAt }` — deletion log for a future sync. `SyncEntity` also covers `netWorthSnapshot`, `actionDismissal`, `monthlyReview` (v7) and `receivable` (v9).
+- **FinanceState** `{ accounts, categories, transactions, funds, reservationMovements, unresolvedMovements, holdings, liabilities, recurringRules, monthlyPlans, netWorthSnapshots, actionDismissals, monthlyReviews, receivables, rateSnapshots, settings, tombstones }`
 
 ```mermaid
 erDiagram
@@ -1014,7 +1049,7 @@ erDiagram
   `.catch`, the old `onRehydrateStorage` callback ignored the error and called `setState`, and zustand
   persisted the seed over the real data at launch (reproduced in a scratch script). The pre-migration copy
   `@wealth_finance_state_backup_v<N>` is still written before each migration (not for refused newer data).
-- **A version-8 payload from an earlier build.** Data v8 was built over several commits, so a device can hold a payload stored at version 8 that lacks later parts (`settings.v8Step` says how far it got). `createPersistOptions` takes a `normalize` hook (zustand's `merge`) that runs `applyV8Steps` on every hydration: a complete payload comes back unchanged, an older one is completed, and a step that throws fails closed like a failed migration. Before completing it the store copies the raw payload to `@wealth_finance_state_backup_v8_before_step_{N}`.
+- **A version-8 payload from an earlier build.** Data v8 was built over several commits, so a device can hold a payload stored at version 8 that lacks later parts (`settings.v8Step` says how far it got). `createPersistOptions` takes a `normalize` hook (zustand's `merge`) that runs `applyV8Steps` on every hydration: a complete payload comes back unchanged, an older one is completed, and a step that throws fails closed like a failed migration. Before completing it the store copies the raw payload to `@wealth_finance_state_backup_v8_before_step_{N}`. Data v9 works the same way: `normalize` runs `applyV9Steps(applyV8Steps(…))`, and a version-9 payload with `settings.v9Step` below `LATEST_V9_STEP` is first copied to `@wealth_finance_state_backup_v9_before_step_{N}`. A version-8 payload goes through `migrate` instead, which writes `@wealth_finance_state_backup_v8` before anything else.
 - **SSR guard:** `isServer = Platform.OS === 'web' && typeof window === 'undefined'` → a no-op
   storage and `skipHydration: true`, so nothing touches AsyncStorage during web server rendering.
   (`web.output` is `"single"` today, so there is no server rendering, but the guard stays.)
@@ -1052,6 +1087,7 @@ greater than the stored one. Used by `persist.migrate` **and** by backup restore
 | v6 → v7 | `netWorthSnapshots ??= []`, `actionDismissals ??= []`, `monthlyReviews ??= []`; then every past month from `trackingStartDate`'s month (at most 36) up to the month before `now` that has no snapshot gets an `estimated` one from `netWorthAsOf(month end)` at the current rates/prices, `takenAt = now`. The current month is left to the SnapshotRunner. Existing snapshots are never changed. |
 
 | v7 → v8 | `applyV8Steps`: eight ordered, idempotent sub-steps (below). v0 → v7 are frozen in `migrateToV7` and run first for older data. |
+| v8 → v9 | `applyV9Steps` (`store/migrateV9.ts`, `settings.v9Step`, `LATEST_V9_STEP = 1`): step 1 `receivables` adds `receivables: []` when missing. A list that is not a list of records, or any receivable link that breaks INV-9…11, **throws** (fail-closed: the store refuses the data untouched). No amount, transaction or reservation changes: the v8 oracle report is identical (diff 0). `migratePersistedState` runs `applyV9Steps` after every chain (v0 → v7 → v8, and version 8 / 9 payloads). |
 
 Idempotence rules: v2→v3 … v6→v7 only fill missing values and keep existing ones, so
 running them twice yields the same result (tested). Before migrating, the raw payload is
@@ -1143,6 +1179,29 @@ Recurring operations:
   pending. `setDueNotifications(enabled)` stores the Settings toggle.
 - `TransactionSheet` edits keep `recurringRuleId`/`occurrenceDate` on every type.
 
+Receivables (data v9; none of them touches an account, a balance or a reservation, except `collectReceivable`):
+- `addReceivable({ label, kind, forMonth?, amount, currency, dueDate?, note? })`: label trimmed and required; kind
+  salary|other (`INVALID_KIND`); known currency; amount > 0, rounded to its currency; a salary needs `forMonth`
+  (`RECEIVABLE_FOR_MONTH_REQUIRED`), any `forMonth` is `YYYY-MM` (`INVALID_MONTH`, field `forMonth`); optional due date.
+- `updateReceivable(edit)`: label / note / due date free; amount ≥ collected (`RECEIVABLE_AMOUNT_BELOW_COLLECTED`, names
+  the collected amount); currency locked once collected (`RECEIVABLE_CURRENCY_LOCKED`, free before); a new `forMonth` is
+  copied onto every collection in the same patch (INV-11); `writtenOffAt` and `createdAt` are kept.
+- `deleteReceivable(id)`: only without collections (`RECEIVABLE_IN_USE`); tombstone `receivable`.
+- `writeOffReceivable(id)` sets `writtenOffAt` (no ledger effect; a settled one: `RECEIVABLE_SETTLED`; twice = once);
+  `reopenReceivable(id)` clears it.
+- `collectReceivable({ receivableId, accountId, amount, date, categoryId?, note? }, options?)`: an income built by
+  `addTransactionCore` (same validation, rounding, rate snapshot, `lastUsed`) in the receivable's currency on an account of
+  that currency (`CURRENCY_MISMATCH`, entity receivable), tagged `receivableId` + `forMonth`, category «راتب» for a salary
+  and «دخل آخر» otherwise; refused for a written-off receivable (`RECEIVABLE_WRITTEN_OFF`) and above what is left
+  (`RECEIVABLE_OVER_COLLECTED`, names the remaining). Through `settle` like every write.
+- `validateIncomeExpense` → `validateReceivableLink` (every add / edit of an income or expense): `forMonth` only with a link
+  (`RECEIVABLE_LINK_REQUIRED`); a link only on an income (`RECEIVABLE_PAYMENT_NOT_INCOME`), to an existing receivable in
+  the same currency with the same `forMonth`; a NEW collection on a written-off receivable is refused; INV-9 counting the
+  edited collection in its new version.
+- `updateTransaction` keeps the existing link (or none) whatever the form sends: the link belongs to the receivable
+  operations; a collection can't become an expense / transfer. Editing or deleting a collection lowers a balance, so the
+  cover gate applies as for any income.
+
 Error codes (`store/errors.ts`) → Arabic in `utils/errorMessages.ts` (`errorMessage()`), with
 entity/field labels interpolated (e.g. `NOT_POSITIVE` + field `weightGrams` → "الوزن يجب أن يكون أكبر من صفر"):
 
@@ -1153,7 +1212,10 @@ ACCOUNT_CURRENCY_LOCKED, CATEGORY_IN_USE, LIABILITY_IN_USE, LIABILITY_CURRENCY_L
 WITHDRAW_EXCEEDS_FUND, RESERVE_EXCEEDS_AVAILABLE, NO_ACCOUNT_IN_CURRENCY, ACCOUNT_HAS_RESERVATIONS, FOLLOW_INVALID, HOLDING_ALREADY_LINKED, NOTHING_SELECTED,
 SINKING_SCHEDULE_REQUIRED, NOT_A_SINKING_FUND, HOLDING_HAS_PURCHASE, ASSET_PURCHASE_TYPE_LOCKED,
 DUPLICATE_ENTRY, PLAN_EXISTS, OCCURRENCE_NOT_DUE, CATEGORY_NAME_TAKEN, CATEGORY_KIND_LOCKED,
-DEFAULT_CATEGORY_DELETE, PLAN_NOT_FOUND`. Backup errors (`store/backup.ts → BackupError`):
+DEFAULT_CATEGORY_DELETE, PLAN_NOT_FOUND, RECEIVABLE_FOR_MONTH_REQUIRED, RECEIVABLE_AMOUNT_BELOW_COLLECTED,
+RECEIVABLE_CURRENCY_LOCKED, RECEIVABLE_IN_USE, RECEIVABLE_SETTLED, RECEIVABLE_OVER_COLLECTED, RECEIVABLE_WRITTEN_OFF,
+RECEIVABLE_PAYMENT_NOT_INCOME, RECEIVABLE_LINK_REQUIRED, INVALID_KIND`. `FinanceErrorDetails` may carry `amount` +
+`currency`, which the message shows (e.g. «ده أكتر من الباقي (ج.م 600)…»). Backup errors (`store/backup.ts → BackupError`):
 `INVALID_FILE, UNSUPPORTED_VERSION, PASSWORD_REQUIRED, WRONG_PASSWORD`.
 
 ---
@@ -1227,6 +1289,18 @@ All of these take an optional `to` (default the reporting currency) and round ea
 - `allocateToFund / allocateMany` reserve by `planReserve` (one `reserve` movement per account; `allocateMany` is all-or-nothing, each entry sees the ones before it), `withdrawFromFund / withdrawMany` release by `planRelease`, `editFund` reserves or releases the difference (a decrease through `withdrawalPlan`: the fund's own currency first, then the others at today's rate), `reallocate` moves reserved money between two funds on the same account(s) (a `reallocate` pair per account: nothing leaves the account, so INV-5 cannot break), `deleteFund` frees its money.
 - `suggestAllocation(amountEGP)` (legacy, fund currencies): funds by priority, each gets `min(fundSuggestedMonthly in EGP, left)`, rounded to 0.01. `suggestAllocationIn(currency, amount)`: the same for money in one currency, each fund's suggestion converted at today's rate, entries carry `currency`.
 - `paySinkingFund` (operations): the expense, then a `spend` movement for the part the fund has reserved on the **paying account** (the rest is paid from the account's available money; a bill beyond both needs a cover — D12) → `nextDueDate += cycle months` (`SINKING_CYCLE_MONTHS`: 12/6/3, `addMonthsToDate` clamps to month end).
+
+### Receivables (`store/selectors.ts`, data v9)
+- `receivableCollected` (Σ incomes with its id, in its currency), `receivableCollections` (newest first), `receivableRemaining` (≥ 0), `receivableStatus` (written_off if `writtenOffAt`; settled when remaining ≤ 0.005; partial when something was collected; else open), `receivableOverdue(r, today)`.
+- «غير محصّل»: `openReceivablesByCurrency` (open + partial remaining per currency) and `openReceivablesValue(to)` (the same at **today's** rates; informational, never added to money).
+- `duplicateSalaryReceivable` (Q5 warning: same trimmed label + month), `receivableRefillSuggestion(accountId, collected)` (Q8: `suggestAllocationIn` over min(collected, the account's available) — funds below target only, by priority, each capped by its suggested monthly amount).
+- No money selector reads `receivables` (tested: net worth, liquid, unassigned, month summary, safe-to-spend, the v8 report).
+
+### Receivable invariants (`store/invariants.ts`, data v9)
+- **INV-9:** per receivable, `0 ≤ collected ≤ amount` (+0.005), collected = Σ its incomes in its currency.
+- **INV-10:** a transaction's `receivableId` resolves, the transaction is an income, and it is in the receivable's currency.
+- **INV-11:** a salary receivable has a valid `forMonth` (`YYYY-MM`); a linked income carries its receivable's `forMonth`.
+- `receivableViolations` (codes `OVER_COLLECTED`, `UNKNOWN_RECEIVABLE`, `NOT_INCOME`, `CURRENCY_MISMATCH`, `FOR_MONTH_MISMATCH`, `FOR_MONTH_INVALID`); `assertInvariants` now checks INV-5 **and** INV-9…11. No quarantine: a violation can only come from a hand-edited or damaged payload, so the v9 migration and backup restore refuse it.
 
 ### The cover gate and follow rules (`store/cover.ts`, `store/invariants.ts`)
 - **INV-5:** for every account, each reservation ≥ 0 and everything reserved on it ≤ `max(0, balance)` (`invariantViolations`). Reserved money is consumed only by a **confirmed cover released in the same atomic patch**.
@@ -1303,9 +1377,20 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 - Encryption: AES-256-GCM (`@noble/ciphers`), key = PBKDF2-SHA256(password, salt, 200 000 iters, 32 B)
   (`pbkdf2Async`, yields to the UI). AAD = `app|schemaVersion|exportedAt|deviceId`, so header
   tampering fails decryption. Salt/nonce from `expo-crypto getRandomBytes`. The password is never stored.
-- `parseBackup` validates the envelope (`INVALID_FILE`, `UNSUPPORTED_VERSION` for > current);
+- `parseBackup` validates the envelope (`INVALID_FILE`, `UNSUPPORTED_VERSION` for > current). An
+  encrypted payload must have whole-byte hex `salt`/`nonce`/`ciphertext` and an integer
+  `iterations` in 1…10 000 000, so a damaged file can't start an endless key derivation.
   `openBackup` decrypts (`WRONG_PASSWORD` on GCM failure, `PASSWORD_REQUIRED`), sanity-checks the
-  shape, then runs the **migration chain** from `schemaVersion` (v0–v6 exports work).
+  shape, then runs the **migration chain** from `schemaVersion` (v0–v6 exports work). After
+  migrating it checks the structure (`hasStateShape`: settings is a record, every collection —
+  `receivables` included — is a list of records), the receivable links (INV-9…11) and computes the preview's
+  net worth. Any failure in migration, structure or
+  that computation is `INVALID_FILE`. GCM can't tell a wrong password from a damaged ciphertext,
+  so `WRONG_PASSWORD` reads «كلمة السر غلط أو الملف تالف».
+- Restore safety (FIN-009): every check above runs before anything is written. App state changes
+  only in `restoreBackup`, after the preview and the user's confirmation. `handlePickBackup` and
+  `RestoreSheet` catch every error and show `errorMessage` (Arabic). Tests:
+  "restore safety (FIN-009)" in `tests/logic.test.ts` (synthetic data only).
 - Restore: preview (counts, net worth, export date) → confirm → snapshot to
   `…_backup_before_restore` → `restoreFromBackup`: data from the backup, but this device keeps
   `deviceId`, `appLockEnabled`, `lastBackupAt`; tombstones are added for entities that disappear
@@ -1382,6 +1467,12 @@ rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previ
 series by location and estimated points, money map, runway, fund projections, every insight trigger and the
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
+
+v9 suites (receivables step 3): the Q9 Next Best Action (one per overdue receivable, partial shows what is left, gone when settled / written off / not yet due, snoozed through `dismissAction` for 24 h per receivable) and the UI helpers (status chips, subtitles, open / closed split, the account helper per currency, Q2 / Q3 notes, the amount hint, new-receivable defaults, the Q8 offer rule).
+
+v9 suites (receivables step 2): every operation's rules and Arabic messages, partial → settled, refusals change nothing, **a collection has the same effect as the same income typed by hand** (v8 report diff 0, net worth, month summary, unassigned, safe-to-spend), collected / status follow edits and deletes of collections, the link is kept by edits, forMonth re-stamping, write-off / reopen with zero ledger effect, delete only without collections, the cover gate on deleting a reserved collection, the selectors (totals, informational value, overdue, Q5, Q8); the D4 **fuzz** now also adds / collects / edits / writes off / reopens / deletes receivables and asserts INV-9…11 and "net worth without receivables is the same" after every step, on all three variants.
+
+v9 suites (receivables step 1): INV-9…11 (every violation code, float tolerance, pre-v9 data), money selectors unaffected by receivables, the v8 → v9 migration on every oracle fixture (empty list + marker and nothing else; v8 oracle report diff 0 with and without receivables; twice = once; unmarked v9 payloads complete; v1 / v7 chains end at v9; fail-closed on broken lists and links), hydration through the real `persist` with the app's own hooks from `store/persistMigration.ts` (`backup_v8` written first, an older v9 payload completed after its `9_before_step_0` copy, fail-closed with the main key untouched, newer than v9 refused), backups (round trip plain + encrypted, a v8 file restores with `[]`, restore / seed replacement and tombstones) and restore safety (broken receivables and links → «الملف ده مش نسخة احتياطية سليمة من حصّالة», data unchanged).
 
 v8 suites (Phase D): reservations (account choice, split across accounts, Q13 refusal, release order, all-or-nothing batches, rates never change a reservation, D10 net worth across random reserve / release, deleting a fund), migration step 8 (every fund total per currency equal to v7's, unassigned exactly v7's, the four reasons, priority order, idempotence, the INV-8 cash identity), the cover gate (design examples C1–C4: no prompt within available, cover exact and atomic, transfer follow with the design's numbers, an editable split, exchange conversion at its own rate, income delete / opening-balance edit, assets and fees, processDue guard, account lock / archive, sinking payment), `runAction` (**every** balance-reducing operation ends in the cover flow, never an error message), one question for conversion + overdraft, reallocate, the Q4 offer, the transfer notice, the resolver, the Next Best Actions, and a **fuzz** over every write path run three ways (strict accounts with every question answered yes; strict accounts with the overdraft never agreed to — no balance below zero; and from the local seed) asserting INV-5, INV-8 and that failed operations change nothing.
 

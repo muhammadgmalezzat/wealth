@@ -11,7 +11,7 @@ import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
 import { coversOf, followPreview, NeedsCoverError, planRelease, planReserve, shortfallsBetween, type CoverSelection, type OpOptions, type Shortfall } from './cover';
 import { invariantViolations } from './invariants';
-import { feeCategoryId } from './defaultCategories';
+import { CATEGORY_IDS, feeCategoryId } from './defaultCategories';
 import { snapshotForNow } from './rateSnapshots';
 import { syncSnapshots } from './snapshots';
 import {
@@ -26,6 +26,8 @@ import {
   accountBalance,
   accountReserved,
   fundAllocated,
+  receivableCollected,
+  receivableStatus,
   reservation,
   SINKING_CYCLE_MONTHS,
   withdrawalPlan,
@@ -56,6 +58,7 @@ import type {
   PlanLine,
   PriceSource,
   RateSnapshot,
+  Receivable,
   RecurringRule,
   Settings,
   SinkingFrequency,
@@ -103,6 +106,19 @@ export type NewFund = Omit<Fund, 'id' | 'createdAt' | 'updatedAt' | 'linkedHoldi
 };
 export type NewHolding = DistributiveOmit<Holding, 'id' | 'updatedAt' | 'purchaseRateSnapshotId'>;
 export type NewLiability = Omit<Liability, 'id' | 'updatedAt'>;
+// A receivable as the form gives it: created open; the write-off has its own operations.
+export type NewReceivable = Omit<Receivable, 'id' | 'createdAt' | 'updatedAt' | 'writtenOffAt'>;
+export type ReceivableEdit = Omit<Receivable, 'createdAt' | 'updatedAt' | 'writtenOffAt'>;
+// Collecting (part of) a receivable: an income in its currency, on the date the money actually arrived.
+export interface ReceivableCollection {
+  receivableId: string;
+  accountId: string;
+  amount: number;
+  date: string;
+  // Defaults to «راتب» for a salary and «دخل آخر» otherwise.
+  categoryId?: string;
+  note?: string;
+}
 export type NewRecurringRule = Omit<RecurringRule, 'id' | 'updatedAt' | 'createdAt' | 'nextDate' | 'skippedDates'> & {
   skippedDates?: string[];
 };
@@ -351,6 +367,25 @@ function validateIncomeExpense(state: State, tx: IncomeExpenseTransaction) {
     const liability = requireById(state.liabilities, tx.liabilityId, 'liability');
     if (liability.currency !== tx.currency) fail('CURRENCY_MISMATCH', { entity: 'liability' });
   }
+  validateReceivableLink(state, tx);
+}
+
+// INV-9…11 at the write boundary, for a new or edited income (state = before the write, so an edited collection is
+// counted in its new version instead of its old one).
+function validateReceivableLink(state: State, tx: IncomeExpenseTransaction) {
+  if (tx.receivableId === undefined) {
+    if (tx.forMonth !== undefined) fail('RECEIVABLE_LINK_REQUIRED');
+    return;
+  }
+  if (tx.type !== 'income') fail('RECEIVABLE_PAYMENT_NOT_INCOME');
+  const receivable = requireById(state.receivables, tx.receivableId, 'receivable');
+  if (tx.currency !== receivable.currency) fail('CURRENCY_MISMATCH', { entity: 'receivable' });
+  if (tx.forMonth !== receivable.forMonth) fail('INVALID_MONTH', { field: 'forMonth' });
+  const isNew = !state.transactions.some((t) => t.id === tx.id);
+  if (isNew && receivable.writtenOffAt) fail('RECEIVABLE_WRITTEN_OFF', { id: receivable.id });
+  const others = receivableCollected({ transactions: state.transactions.filter((t) => t.id !== tx.id) }, receivable);
+  const left = roundMoney(receivable.amount - others, receivable.currency);
+  if (tx.amount > left + 0.005) fail('RECEIVABLE_OVER_COLLECTED', { id: receivable.id, amount: Math.max(0, left), currency: receivable.currency });
 }
 
 export { feeCategoryId };
@@ -711,16 +746,29 @@ export function updateTransaction(state: State, raw: Editable<Transaction>, ctx:
   );
 }
 
+const receivableLinkOf = (tx: Transaction): { receivableId?: string; forMonth?: string } =>
+  isIncomeExpense(tx) && tx.receivableId !== undefined
+    ? { receivableId: tx.receivableId, ...(tx.forMonth !== undefined ? { forMonth: tx.forMonth } : {}) }
+    : {};
+
 function updateTransactionCore(state: State, raw: Editable<Transaction>, ctx: OpContext): Patch {
   const tx = roundTransaction(state, raw);
   const existing = requireById(state.transactions, tx.id, 'transaction');
   if ((existing.type === 'asset_purchase') !== (tx.type === 'asset_purchase')) {
     fail('ASSET_PURCHASE_TYPE_LOCKED', { id: tx.id });
   }
+  // The receivable link belongs to collectReceivable / updateReceivable: an edit keeps the existing one (or none),
+  // whatever the form sends, and a collection stays an income.
+  const link = receivableLinkOf(existing);
+  if (link.receivableId !== undefined && tx.type !== 'income') fail('RECEIVABLE_PAYMENT_NOT_INCOME');
   const currency = transactionCurrency(state, tx);
   const keepRates = !currency || currency === transactionCurrency(state, existing);
   const use = keepRates ? undefined : snapshotForNow(state, ctx.now());
-  const { rateSnapshotId: _edited, ...edited } = tx;
+  const { rateSnapshotId: _edited, receivableId: _link, forMonth: _month, ...rest } = tx as Editable<Transaction> & {
+    receivableId?: string;
+    forMonth?: string;
+  };
+  const edited = { ...rest, ...link };
   const updated = stamp(
     {
       ...edited,
@@ -1468,6 +1516,128 @@ export function deleteLiability(state: State, id: string, ctx: OpContext): Patch
   };
 }
 
+// --- Receivables (data v9, docs/architecture/RECEIVABLES_DESIGN.md) ---------
+//
+// Money owed to the user. Not money: these operations never touch an account, a reservation or a balance, except
+// collectReceivable, which records an ordinary income (and so goes through the same rules and gate as one).
+
+const RECEIVABLE_KINDS: Receivable['kind'][] = ['salary', 'other'];
+
+const hasCollections = (state: State, receivableId: string) =>
+  state.transactions.some((tx) => isIncomeExpense(tx) && tx.receivableId === receivableId);
+
+// Trimmed label, amount rounded to its currency (INV-7), empty optional text dropped.
+function cleanReceivable<T extends NewReceivable>(raw: T): T {
+  const { note, dueDate, forMonth, ...rest } = raw;
+  return {
+    ...rest,
+    label: raw.label?.trim(),
+    amount: money(raw.amount, raw.currency),
+    ...(forMonth ? { forMonth } : {}),
+    ...(dueDate ? { dueDate } : {}),
+    ...(note?.trim() ? { note: note.trim() } : {}),
+  } as T;
+}
+
+function validateReceivable(r: NewReceivable) {
+  assertName(r.label, 'receivable');
+  if (!RECEIVABLE_KINDS.includes(r.kind)) fail('INVALID_KIND');
+  if (!isKnownCurrency(r.currency)) fail('UNKNOWN_CURRENCY');
+  assertPositive(r.amount, 'amount');
+  if (r.kind === 'salary' && !r.forMonth) fail('RECEIVABLE_FOR_MONTH_REQUIRED');
+  if (r.forMonth !== undefined && !isMonthKey(r.forMonth)) fail('INVALID_MONTH', { field: 'forMonth' });
+  if (r.dueDate !== undefined) assertDate(r.dueDate, 'dueDate');
+}
+
+export function addReceivable(state: State, raw: NewReceivable, ctx: OpContext): Patch {
+  const input = cleanReceivable(raw);
+  validateReceivable(input);
+  const receivable: Receivable = stamp({ ...input, id: ctx.newId(), createdAt: ctx.now().toISOString() }, ctx);
+  return { receivables: [...state.receivables, receivable] };
+}
+
+// Label, note and due date are free. The amount may not go below what was collected (INV-9); the currency is locked
+// once something was collected (Q13: free before); a new forMonth is copied onto its collections in the same patch
+// (INV-11). The write-off state is kept (writeOffReceivable / reopenReceivable change it). No ledger effect.
+export function updateReceivable(state: State, raw: ReceivableEdit, ctx: OpContext): Patch {
+  const existing = requireById(state.receivables, raw.id, 'receivable');
+  const input = cleanReceivable(raw);
+  validateReceivable(input);
+  const collected = receivableCollected(state, existing);
+  const collectedSome = hasCollections(state, existing.id);
+  if (collectedSome && input.currency !== existing.currency) fail('RECEIVABLE_CURRENCY_LOCKED', { id: existing.id });
+  if (input.amount < collected - 0.005) {
+    fail('RECEIVABLE_AMOUNT_BELOW_COLLECTED', { id: existing.id, amount: collected, currency: existing.currency });
+  }
+  const updated: Receivable = stamp(
+    {
+      ...input,
+      createdAt: existing.createdAt,
+      ...(existing.writtenOffAt ? { writtenOffAt: existing.writtenOffAt } : {}),
+    },
+    ctx
+  );
+  const patch: Patch = { receivables: replaceById(state.receivables, updated, 'receivable') };
+  if (collectedSome && updated.forMonth !== existing.forMonth) {
+    patch.transactions = state.transactions.map((tx) => {
+      if (!isIncomeExpense(tx) || tx.receivableId !== existing.id) return tx;
+      const { forMonth: _old, ...rest } = tx;
+      return stamp({ ...rest, ...(updated.forMonth ? { forMonth: updated.forMonth } : {}) }, ctx);
+    });
+  }
+  return patch;
+}
+
+// Rule 6: only a receivable nothing was collected on can be deleted; otherwise it is written off.
+export function deleteReceivable(state: State, id: string, ctx: OpContext): Patch {
+  requireById(state.receivables, id, 'receivable');
+  if (hasCollections(state, id)) fail('RECEIVABLE_IN_USE', { id });
+  return {
+    receivables: state.receivables.filter((r) => r.id !== id),
+    tombstones: logDeletes(state, 'receivable', [id], ctx),
+  };
+}
+
+// Closes it with NO ledger effect (rule 5): what was collected stays, what is left is given up. Reversible.
+export function writeOffReceivable(state: State, id: string, ctx: OpContext): Patch {
+  const receivable = requireById(state.receivables, id, 'receivable');
+  if (receivable.writtenOffAt) return {};
+  if (receivableStatus(state, receivable) === 'settled') fail('RECEIVABLE_SETTLED', { id });
+  const updated = stamp({ ...receivable, writtenOffAt: ctx.now().toISOString() }, ctx);
+  return { receivables: replaceById(state.receivables, updated, 'receivable') };
+}
+
+export function reopenReceivable(state: State, id: string, ctx: OpContext): Patch {
+  const receivable = requireById(state.receivables, id, 'receivable');
+  if (!receivable.writtenOffAt) return {};
+  const { writtenOffAt: _w, ...rest } = receivable;
+  return { receivables: replaceById(state.receivables, stamp(rest, ctx), 'receivable') };
+}
+
+// Rule 3: an income in the receivable's currency on an account of that currency (Q2: no cross-currency collection
+// in v1), dated when the money arrived, tagged with the receivable and its month. Partial is fine; more than what is
+// left is refused (Q3), and so is a written-off receivable (Q4). Built and validated like any income
+// (addTransactionCore) and passed through the same gate.
+export function collectReceivable(state: State, input: ReceivableCollection, ctx: OpContext, options?: OpOptions): Patch {
+  const receivable = requireById(state.receivables, input.receivableId, 'receivable');
+  if (receivable.writtenOffAt) fail('RECEIVABLE_WRITTEN_OFF', { id: receivable.id });
+  const account = requireById(state.accounts, input.accountId, 'account');
+  if (account.currency !== receivable.currency) fail('CURRENCY_MISMATCH', { entity: 'receivable' });
+  const raw: NewIncomeExpense = {
+    type: 'income',
+    amount: input.amount,
+    currency: receivable.currency,
+    accountId: account.id,
+    categoryId: input.categoryId ?? (receivable.kind === 'salary' ? CATEGORY_IDS.salary : CATEGORY_IDS.otherIncome),
+    date: input.date,
+    ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+    receivableId: receivable.id,
+    ...(receivable.forMonth ? { forMonth: receivable.forMonth } : {}),
+  };
+  const patch = addTransactionCore(state, raw, ctx);
+  return settle(state, patch, ctx, options, patch.transactions![0].id);
+}
+
 // --- Recurring rules --------------------------------------------------------
 
 const FREQUENCIES: RecurringRule['frequency'][] = ['weekly', 'monthly', 'yearly'];
@@ -2100,6 +2270,7 @@ const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones' | 'rate
   { key: 'netWorthSnapshots', entity: 'netWorthSnapshot' },
   { key: 'actionDismissals', entity: 'actionDismissal' },
   { key: 'monthlyReviews', entity: 'monthlyReview' },
+  { key: 'receivables', entity: 'receivable' },
 ];
 
 const syncKey = (item: object) =>
@@ -2121,7 +2292,8 @@ function replaceAllData(state: State, next: State, settings: Settings, ctx: OpCo
   // Rate snapshots are immutable and content-addressed (no tombstones); the records now in the state point at the incoming ones.
   const patch: Patch = { settings, rateSnapshots: next.rateSnapshots };
   for (const { key, entity } of COLLECTIONS) {
-    const incoming = next[key] as object[];
+    // A seed written for an older shape may lack a newer collection (e.g. receivables before v9).
+    const incoming = (next[key] ?? []) as object[];
     const incomingIds = new Set(incoming.map(syncKey));
     incomingIds.forEach((id) => present.add(`${entity}:${id}`));
     for (const item of state[key] as object[]) {
