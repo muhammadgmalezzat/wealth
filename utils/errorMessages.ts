@@ -19,7 +19,7 @@ const ENTITY_LABELS: Record<FinanceEntity, string> = {
   liability: 'الالتزام',
   recurringRule: 'المعاملة المتكررة',
   monthlyPlan: 'الخطة',
-  receivable: 'المستحق',
+  receivable: 'المبلغ ده',
 };
 
 const FIELD_LABELS: Record<FinanceField, string> = {
@@ -105,12 +105,12 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   RECEIVABLE_FOR_MONTH_REQUIRED: () => 'اختار الشهر اللي المرتب ده عنه',
   RECEIVABLE_AMOUNT_BELOW_COLLECTED: (d) => `المبلغ مينفعش يبقى أقل من اللي اتحصّل${amountNote(d)}`,
   RECEIVABLE_CURRENCY_LOCKED: () => 'فيه تحصيلات، العملة مش هتتغيّر',
-  RECEIVABLE_IN_USE: () => 'فيه تحصيلات على المستحق ده؛ تقدر تشطبه بس',
+  RECEIVABLE_IN_USE: () => 'فيه تحصيلات على الفلوس دي؛ تقدر تشطبها بس',
   RECEIVABLE_SETTLED: () => 'اتحصّل كله، مفيش حاجة تتشطب',
   RECEIVABLE_OVER_COLLECTED: (d) => `ده أكتر من الباقي${amountNote(d)}؛ لو اتدفع زيادة سجّل الزيادة كدخل منفصل`,
-  RECEIVABLE_WRITTEN_OFF: () => 'المستحق ده متشطب؛ رجّعه مفتوح الأول',
-  RECEIVABLE_PAYMENT_NOT_INCOME: () => 'دي تحصيل لمستحق، لازم تفضل دخل',
-  RECEIVABLE_LINK_REQUIRED: () => '«عن شهر» بيتسجّل مع تحصيل مستحق بس',
+  RECEIVABLE_WRITTEN_OFF: () => 'الفلوس دي متشطبة؛ رجّعها مفتوحة الأول',
+  RECEIVABLE_PAYMENT_NOT_INCOME: () => 'دي تحصيل لفلوس ليّا، لازم تفضل دخل',
+  RECEIVABLE_LINK_REQUIRED: () => '«عن شهر» بيتسجّل مع تحصيل فلوس ليّا بس',
   INVALID_KIND: () => 'النوع غير صالح',
   OCCURRENCE_NOT_DUE: () => 'المستحق ده اتسجل أو اتخطى بالفعل',
   CATEGORY_NAME_TAKEN: () => 'فيه بند بنفس الاسم بالفعل',

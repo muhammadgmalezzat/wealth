@@ -42,26 +42,30 @@ interface ReceivableSheetProps {
   onOpenTransaction?: (transactionId: string) => void;
 }
 
-// «مستحق جديد» / «تعديل المستحق»: money owed to the user (a late salary, a loan). Not money until collected. Edit mode
+// «فلوس ليّا عند حد» / «تعديل: <debtor>»: money owed to the user (a late salary, a loan). Not money until collected. Edit mode
 // also shows what was collected and the actions: سجّل تحصيل · اشطبه / رجّعه مفتوح · احذف (only without collections).
 export function ReceivableSheet({ receivable, onClose, onCollect, onOpenTransaction }: ReceivableSheetProps) {
   const state = useFinanceStore();
   const defaults = receivableDefaults(state);
-  const [kind, setKind] = useState<ReceivableKind>(receivable?.kind ?? 'salary');
-  const [label, setLabel] = useState(receivable?.label ?? '');
-  const [forMonth, setForMonth] = useState(receivable?.forMonth ?? defaults.forMonth);
-  const [amountInput, setAmountInput] = useState(receivable ? amountText(receivable.amount) : '');
-  const [currency, setCurrency] = useState<CurrencyCode>(receivable?.currency ?? defaults.currency);
-  const [dueDate, setDueDate] = useState<string | undefined>(receivable?.dueDate);
-  const [note, setNote] = useState(receivable?.note ?? '');
+  // Explicit checks instead of `receivable?.x`: with the React Compiler on, `receivable?.id` in a call argument was
+  // compiled into a plain `receivable.id` and crashed the add sheet (seen in the web check).
+  const editing: Receivable | null = receivable ?? null;
+  const [kind, setKind] = useState<ReceivableKind>(editing ? editing.kind : 'salary');
+  const [label, setLabel] = useState(editing ? editing.label : '');
+  const [forMonth, setForMonth] = useState(editing && editing.forMonth ? editing.forMonth : defaults.forMonth);
+  const [amountInput, setAmountInput] = useState(editing ? amountText(editing.amount) : '');
+  const [currency, setCurrency] = useState<CurrencyCode>(editing ? editing.currency : defaults.currency);
+  const [dueDate, setDueDate] = useState<string | undefined>(editing ? editing.dueDate : undefined);
+  const [note, setNote] = useState(editing && editing.note ? editing.note : '');
 
   const collections = receivable ? receivableCollections(state, receivable.id) : [];
   const collected = receivable ? receivableCollected(state, receivable) : 0;
   const status = receivable ? receivableStatus(state, receivable) : 'open';
   const currencyLocked = collections.length > 0;
   // An 'other' receivable may have a month only if it already had one (it keeps it); a new one has none.
-  const month = kind === 'salary' ? forMonth : receivable?.kind === 'other' ? receivable.forMonth : undefined;
-  const duplicate = duplicateSalaryReceivable(state, { label, kind, forMonth: month }, receivable?.id);
+  const month = kind === 'salary' ? forMonth : editing && editing.kind === 'other' ? editing.forMonth : undefined;
+  const editingId = editing ? editing.id : undefined;
+  const duplicate = duplicateSalaryReceivable(state, { label, kind, forMonth: month }, editingId);
   const currencies = currencyList(state);
 
   const handleSave = () => {
@@ -74,40 +78,42 @@ export function ReceivableSheet({ receivable, onClose, onCollect, onOpenTransact
       ...(dueDate ? { dueDate } : {}),
       ...(note.trim() ? { note: note.trim() } : {}),
     };
-    const saved = receivable
-      ? runAction('تعذّر الحفظ', () => state.updateReceivable({ ...fields, id: receivable.id }))
+    // Closures only capture `editingId` / `label` (never `receivable.x`): see `editing` above.
+    const saved = editingId
+      ? runAction('تعذّر الحفظ', () => state.updateReceivable({ ...fields, id: editingId }))
       : runAction('تعذّر الحفظ', () => state.addReceivable(fields));
     if (saved) onClose();
   };
 
   const writeOff = () =>
     confirmAction({
-      title: 'شطب المستحق',
-      message: 'هتقفل المستحق ده من غير ما يتسجّل أي فلوس. اللي اتحصّل فعلاً بيفضل زي ما هو، وتقدر ترجّعه بعدين.',
-      confirmText: 'اشطبه',
+      title: 'شطب الفلوس دي',
+      message: 'هتقفلها من غير ما يتسجّل أي فلوس. اللي اتحصّل فعلاً بيفضل زي ما هو، وتقدر ترجّعها بعدين.',
+      confirmText: 'اشطبها',
       cancelText: 'إلغاء',
       onConfirm: () => {
-        if (runAction('تعذّر الشطب', () => state.writeOffReceivable(receivable!.id))) onClose();
+        if (editingId && runAction('تعذّر الشطب', () => state.writeOffReceivable(editingId))) onClose();
       },
     });
 
   const reopen = () => {
-    if (runAction('تعذّر الحفظ', () => state.reopenReceivable(receivable!.id))) onClose();
+    if (editingId && runAction('تعذّر الحفظ', () => state.reopenReceivable(editingId))) onClose();
   };
 
+  const savedLabel = editing ? editing.label : '';
   const remove = () =>
     confirmAction({
-      title: 'حذف المستحق',
-      message: `هل تريد حذف «${receivable!.label}»؟`,
+      title: 'حذف الفلوس دي',
+      message: `هل تريد حذف «${savedLabel}»؟`,
       confirmText: 'حذف',
       cancelText: 'إلغاء',
       onConfirm: () => {
-        if (runAction('تعذّر الحذف', () => state.deleteReceivable(receivable!.id))) onClose();
+        if (editingId && runAction('تعذّر الحذف', () => state.deleteReceivable(editingId))) onClose();
       },
     });
 
   return (
-    <FormSheet visible title={receivable ? 'تعديل المستحق' : 'مستحق جديد'} onCancel={onClose} onSave={handleSave}>
+    <FormSheet visible title={receivable ? `تعديل: ${receivable.label}` : 'فلوس ليّا عند حد'} onCancel={onClose} onSave={handleSave}>
       {receivable && (
         <Card variant="subtle" style={styles.summary}>
           <AppText variant="bodyStrong">
@@ -143,11 +149,11 @@ export function ReceivableSheet({ receivable, onClose, onCollect, onOpenTransact
       )}
 
       {duplicate && (
-        <InsightCard tone="attention" icon="info-outline" message={`فيه مستحق لنفس الشهر عند «${duplicate.label}» بالفعل. لو ده تاني فعلاً كمّل عادي.`} />
+        <InsightCard tone="attention" icon="info-outline" message={`فيه مرتب لنفس الشهر عند «${duplicate.label}» متسجّل بالفعل. لو ده تاني فعلاً كمّل عادي.`} />
       )}
 
       <FormField label="المبلغ">
-        <AmountInput value={amountInput} onChangeText={setAmountInput} currency={currency} accessibilityLabel="المبلغ المستحق" />
+        <AmountInput value={amountInput} onChangeText={setAmountInput} currency={currency} accessibilityLabel="المبلغ اللي ليّا" />
       </FormField>
 
       {currencies.length > 1 && (
@@ -191,15 +197,15 @@ export function ReceivableSheet({ receivable, onClose, onCollect, onOpenTransact
             <Button label="سجّل تحصيل" icon="south-west" block onPress={() => onCollect(receivable)} />
           )}
           {status === 'written_off' ? (
-            <Button label="رجّعه مفتوح" variant="secondary" icon="undo" block onPress={reopen} />
+            <Button label="رجّعها مفتوحة" variant="secondary" icon="undo" block onPress={reopen} />
           ) : status !== 'settled' ? (
-            <Button label="اشطبه" variant="secondary" icon="block" block onPress={writeOff} />
+            <Button label="اشطبها" variant="secondary" icon="block" block onPress={writeOff} />
           ) : null}
           {collections.length === 0 ? (
-            <Button label="احذف المستحق" variant="destructive" icon="delete-outline" block onPress={remove} />
+            <Button label="احذفها" variant="destructive" icon="delete-outline" block onPress={remove} />
           ) : (
             <AppText variant="caption" color="textSecondary" align="center">
-              فيه تحصيلات، تقدر تشطبه بس
+              فيه تحصيلات، تقدر تشطبها بس
             </AppText>
           )}
         </View>

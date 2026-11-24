@@ -376,7 +376,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
         transaction.type === 'asset_purchase'
           ? 'هيتحذف الذهب المرتبط بالمعاملة كمان، والفلوس هترجع للحساب.'
           : collectionOf
-            ? `هل تريد حذف هذه المعاملة؟ المستحق «${collectionOf.label}» هيرجع مفتوح بالمبلغ ده.`
+            ? `هل تريد حذف هذه المعاملة؟ فلوسك عند «${collectionOf.label}» هترجع مفتوحة بالمبلغ ده.`
             : 'هل تريد حذف هذه المعاملة؟',
       confirmText: 'حذف',
       cancelText: 'إلغاء',
@@ -456,7 +456,7 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
             )}
           </View>
           <AppText variant="caption" color="textSecondary">
-            دي تحصيل لمستحق، نوعها وعملتها مش بيتغيّروا.
+            دي تحصيل لفلوس ليّا، نوعها وعملتها مش بيتغيّروا.
           </AppText>
         </View>
       ) : (

@@ -1,9 +1,13 @@
 # Receivables (late salary, money owed to me) — design
 
-Status: **approved (2026-11-24). Steps 1–3 of §10 are implemented** (schema, the v8 → v9 migration, INV-9…11, backup
-shape and restore checks; operations and selectors, with tests and fuzz; store actions and UI); step 4 (docs pass +
-browser check) is not done yet. Step 3 deviations: the section is titled «مستحقات» (owner's request) and sits **after**
-«الالتزامات», with a «غير محصّل» chip; the refill offer opens «كمّل الصناديق» directly after a collection (no extra
+Status: **approved (2026-11-24). Steps 1–4 of §10 are done** (step 4: browser check on synthetic data, polish, release
+notes). **Copy rename (owner, 2026-11-24):** the Assets section is «فلوس ليّا» (action «+ إضافة», sheet «فلوس ليّا عند
+حد» / «تعديل: <debtor>», buttons اشطبها / رجّعها مفتوحة / احذفها, due date «ميعاده …»); «المستحقات» stays for due recurring
+items only. The copy tables below keep the proposal's original wording. Built: schema, the v8 → v9 migration,
+INV-9…11, backup shape and restore checks (step 1); operations and selectors, with tests and fuzz (step 2); store
+actions and UI (step 3). Step 4 fixes: a React Compiler crash opening the add sheet, and «اتحصّل X من Y» moved beside the
+status chip so small phones don't cut it off. Step 3 deviations: the section sits **after** «الالتزامات», with a
+«غير محصّل» chip; the refill offer opens «كمّل الصناديق» directly after a collection (no extra
 yes / no question; إلغاء skips it); the Q9 action shares rule 4's priority with the review prompt; the edit sheet's
 collections open `TransactionSheet` from the Assets screen (one sheet at a time, no stacked modals). Decisions:
 Q1 `writtenOffAt`; Q2 reject cross-currency collection in v1 with the workaround in the sheet; rule 8 chip only (no

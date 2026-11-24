@@ -7860,7 +7860,7 @@ describe('receivables (v9): selectors', () => {
     for (const code of ['RECEIVABLE_FOR_MONTH_REQUIRED', 'RECEIVABLE_AMOUNT_BELOW_COLLECTED', 'RECEIVABLE_CURRENCY_LOCKED', 'RECEIVABLE_IN_USE', 'RECEIVABLE_SETTLED', 'RECEIVABLE_OVER_COLLECTED', 'RECEIVABLE_WRITTEN_OFF', 'RECEIVABLE_PAYMENT_NOT_INCOME', 'RECEIVABLE_LINK_REQUIRED', 'INVALID_KIND'] as const) {
       assert.match(errorMessage(new FinanceValidationError(code)), arabic, code);
     }
-    assert.equal(errorMessage(new FinanceValidationError('NOT_FOUND', { entity: 'receivable' })), 'المستحق غير موجود');
+    assert.equal(errorMessage(new FinanceValidationError('NOT_FOUND', { entity: 'receivable' })), 'المبلغ ده غير موجود');
   });
 });
 
@@ -7921,13 +7921,16 @@ describe('receivables (v9): UI helpers and the Q9 Home suggestion', () => {
     assert.deepEqual(chip('id-2'), { label: 'مستنيه', tone: 'neutral' });
     s = apply(s, ops.collectReceivable(s, { receivableId: 'id-2', accountId: 'S1', amount: 100, date: '2026-10-18' }, ctx));
     assert.deepEqual(chip('id-2'), { label: 'اتحصّل جزء', tone: 'neutral' });
-    assert.match(recvUi.receivableSubtitle(s, s.receivables[1]), /^حاجة تانية · مستحق .*\nاتحصّل .*100.* من .*300/);
+    assert.match(recvUi.receivableSubtitle(s.receivables[1]), /^حاجة تانية · ميعاده [^\n]*$/);
+    assert.match(recvUi.receivableProgress(s, s.receivables[1])!, /^اتحصّل .*100.* من .*300/);
+    assert.equal(recvUi.receivableProgress(s, s.receivables[0]), null, 'nothing collected');
     s = apply(s, ops.collectReceivable(s, { receivableId: 'id-2', accountId: 'S1', amount: 200, date: '2026-10-19' }, ctx));
     assert.deepEqual(chip('id-2'), { label: 'اتحصّل', tone: 'ok' });
     s = apply(s, ops.writeOffReceivable(s, 'id-3', ctx));
     assert.deepEqual(chip('id-3'), { label: 'اتشطب', tone: 'neutral' });
     assert.equal(recvUi.forMonthLabel('2026-09'), `عن شهر ${formatMonthLabel('2026-09')}`);
-    assert.ok(recvUi.receivableSubtitle(s, s.receivables[0]).startsWith(`مرتب · عن شهر ${formatMonthLabel('2026-09')} · مستحق`));
+    assert.equal(recvUi.receivableProgress(s, s.receivables[1]), null, 'settled: no progress line');
+    assert.ok(recvUi.receivableSubtitle(s.receivables[0]).startsWith(`مرتب · عن شهر ${formatMonthLabel('2026-09')} · ميعاده`));
     // Still owed first (by due date), then the closed ones.
     const { open, closed } = recvUi.splitReceivables(s);
     assert.deepEqual(open.map((r) => r.id), ['id-1']);
@@ -7939,7 +7942,7 @@ describe('receivables (v9): UI helpers and the Q9 Home suggestion', () => {
     const r = s.receivables[0];
     assert.equal(recvUi.collectAccountsHelper('SAR'), 'الحسابات المعروضة: حسابات بالريال فقط');
     assert.equal(recvUi.collectAccountsHelper('EGP'), 'الحسابات المعروضة: حسابات بالجنيه فقط');
-    assert.match(recvUi.CROSS_CURRENCY_NOTE, /اشطب المستحق وسجّل الدخل عادي/);
+    assert.match(recvUi.CROSS_CURRENCY_NOTE, /اشطب الفلوس دي هنا وسجّل الدخل عادي/);
     assert.match(recvUi.noAccountNote('USD'), /^مفيش حساب بالدولار/);
     const over = recvUi.collectHint(s, r, 1000.01);
     assert.equal(over.blocked, true);

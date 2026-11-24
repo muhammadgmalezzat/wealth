@@ -6,22 +6,29 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased — branch `receivables` · 1.2.0 · data v9 — receivables («غير محصّل»), in progress
+## Unreleased (ready to ship) — branch `stage-1` · 1.2.0 (OTA, no new build) · data v9 — «فلوس ليّا» (money owed to me)
 
-> Not released. Steps 1–3 of 4 (data, operations, UI); the docs pass and browser check are next. **This release also ships the stage-1 restore-safety
-> fixes** (the 2026-11-23 entry below).
+> **This release ships two things:** data **v9** (receivables, below) **and the stage-1 restore-safety fixes** (the
+> 2026-11-23 entry below, merged but never shipped). Both go out in ONE `eas update` to the 1.2.0 build; no native
+> change, so no new build and no version bump.
 >
-> **Release / rollback (when it ships as an OTA to 1.2.0):** export an **encrypted backup right before updating** (it is
-> a v8 file). The first launch migrates the data to v9 and first keeps a copy as `@wealth_finance_state_backup_v8`.
-> If something looks wrong, an OTA back to the v8 code does **not** undo it: v8 code refuses v9 data (fail-closed)
-> instead of silently dropping receivables. The rollback path is: publish / open the v8 code, **clear the app's data**,
-> then **restore the encrypted v8 backup** taken before the update (Settings → البيانات → استعادة نسخة).
+> **Before updating:** export an **encrypted backup** from Settings → البيانات → تصدير نسخة, right before the update. It
+> is a v8 file. The first launch then migrates the data to v9 (only an empty «فلوس ليّا» list is added; every number stays
+> the same) and keeps the untouched v8 payload as `@wealth_finance_state_backup_v8`.
+>
+> **Rollback path:** clear the app's data, then restore the encrypted v8 backup taken right before the update
+> (Settings → البيانات → استعادة نسخة). Publishing the old v8 code again does **not** undo the migration by itself: v8 code
+> refuses v9 data (fail-closed: an error screen, nothing overwritten) instead of silently dropping receivables. So if
+> the v8 code is republished, the same two steps apply after it: clear app data, restore the v8 backup. If the v9 code
+> stays, those two steps bring the data back to exactly what it was before the update (the backup migrates again).
 
 *For users*
-- جديد في **الأصول**: قسم **مستحقات («غير محصّل»)** للفلوس اللي ليك عند حد ولسه ماوصلتش (مرتب متأخر مثلاً). مش داخلة في الأصول ولا صافي الثروة ولا الصناديق؛ بتشوف الإجمالي بكل عملة وقيمته التقريبية بعملة العرض للمعلومية.
-- **سجّل تحصيل** (كله أو جزء) في حساب بنفس العملة وبيوم ما وصل: بيتسجّل دخل عادي وعليه «عن شهر …». بعدها لو صناديقك ناقصة بتفتحلك **كمّل الصناديق** باقتراح تقدر تعدّله أو تسيبه.
-- **اشطبه** لو مش هيوصل (ومن غير أي فلوس)، و**رجّعه مفتوح** لو غيّرت رأيك. الحذف بس لو مفيش تحصيلات.
-- الرئيسية بتفكّرك لما مرتب يتأخر عن ميعاده («مرتب … لسه ماوصلش» ← **سجّل التحصيل**)، وتقدر تأجّلها بـ «بعدين».
+- جديد في **الأصول**: قسم **فلوس ليّا** (عليه «غير محصّل») للفلوس اللي ليك عند حد ولسه ماوصلتش (مرتب متأخر، فلوس سلّفتها). مش داخلة في الأصول ولا صافي الثروة ولا الصناديق ولا «تقدر تصرف بأمان»؛ بتشوف الإجمالي بكل عملة، وقيمته التقريبية بعملة العرض للمعلومية بس.
+- **سجّل تحصيل** (كله أو جزء) في حساب بنفس العملة وبيوم ما وصل: بيتسجّل دخل عادي وعليه «عن شهر …». لو اتدفع زيادة أو بعملة تانية، الشاشة بتقولك تعمل إيه.
+- بعد التحصيل، لو صناديقك ناقصة بتفتحلك **كمّل الصناديق** باقتراح من نفس الحساب تقدر تعدّله أو تلغيه. مفيش حاجة بتتحجز لوحدها.
+- **اشطبها** لو مش هتوصل (من غير أي فلوس)، و**رجّعها مفتوحة** لو غيّرت رأيك. الحذف بس لو مفيش تحصيلات.
+- الرئيسية بتفكّرك لما مرتب يتأخر عن ميعاده («مرتب … لسه ماوصلش» ← **سجّل التحصيل**)، وتقدر تأجّلها يوم بـ «بعدين».
+- **كمان في الإصدار ده (من ٢٣ نوفمبر):** كلمة سر غلط أو ملف نسخة بايظ بقوا بيطلّعوا رسالة واضحة، وبياناتك الحالية مش بتتلمس.
 
 *Technical*
 - Data v9: `Receivable { id, label, kind: salary|other, forMonth?, amount, currency, dueDate?, note?, writtenOffAt?,
@@ -42,16 +49,21 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
   per currency, informational value, Q5 duplicate, Q8 refill suggestion); 10 error codes with Arabic text (amounts in the
   message). The persist hooks moved to `store/persistMigration.ts` (no behaviour change) so the tests run the real code.
   Tests 474 → 491, incl. "a collection equals the same income typed by hand" and the fuzz over receivable operations.
-- Step 3: store actions; Assets «مستحقات» section; `ReceivableSheet`, `CollectSheet` (same-currency accounts, Q2 / Q3 notes,
+- Step 3: store actions; Assets «فلوس ليّا» section (first titled «مستحقات», renamed in step 4); `ReceivableSheet`, `CollectSheet` (same-currency accounts, Q2 / Q3 notes,
   then the Q8 refill through `AssignSheet`'s new prefill props); collection chips and type / currency lock in
   `TransactionRow` / `TransactionSheet`; Next Best Action `receivable-<id>` (rule 4, dismissible) → Home opens `CollectSheet`;
   pure helpers in `components/assets/receivablesUi.ts`. Tests 491 → 497. Web export builds.
+- Step 4: user-facing rename to «فلوس ليّا» (section, sheets, buttons, error messages; «المستحقات» only for due recurring
+  items). Browser check on synthetic data (12-step QA list, 360 px and 320 px): fixed a crash opening the add sheet
+  (`ReceivableSheet` under the React Compiler: optional-prop reads compiled into unconditional ones) and a cut-off
+  «اتحصّل X من Y» on small phones (moved beside the status chip, `receivableProgress`). Dry run v8 → v9 on the synthetic
+  fixtures: oracle report diff 0, everything but the new list and marker deep-equal. Tests 497.
 
 ---
 
 ## 2026-11-23 · 1.2.0 · data v8 — post-release cleanup: backup restore safety
 
-> Merged (stage-1), **not shipped yet**. The `store/backup.ts` restore-safety fixes ship with the receivables OTA (entry above).
+> On `stage-1`, **not shipped yet**: these restore-safety fixes ship in the same OTA as data v9 («فلوس ليّا», entry above).
 
 *For users*
 - كلمة السر الغلط بقت بتقول «كلمة السر غلط أو الملف تالف» (التشفير مش بيقدر يفرّق بين الاتنين).

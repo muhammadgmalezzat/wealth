@@ -36,18 +36,23 @@ export function receivableChip(state: State, r: Receivable, today: string): Rece
   return status === 'partial' ? { label: 'اتحصّل جزء', tone: 'neutral' } : { label: 'مستنيه', tone: 'neutral' };
 }
 
-// «مرتب · عن شهر أكتوبر ٢٠٢٦ · مستحق ٥ نوفمبر»; partial adds «اتحصّل ج.م 400 من ج.م 1,000».
-export function receivableSubtitle(state: State, r: Receivable): string {
-  const parts = [
+// «مرتب · عن شهر أكتوبر ٢٠٢٦ · ميعاده ٥ نوفمبر».
+export function receivableSubtitle(r: Receivable): string {
+  return [
     r.kind === 'salary' ? 'مرتب' : 'حاجة تانية',
     r.forMonth ? forMonthLabel(r.forMonth) : null,
-    r.dueDate ? `مستحق ${formatDateAr(r.dueDate, { year: false })}` : null,
-  ].filter(Boolean);
+    r.dueDate ? `ميعاده ${formatDateAr(r.dueDate, { year: false })}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+// «اتحصّل ج.م 400 من ج.م 1,000» while partly collected (shown beside the status chip, so a two-line subtitle on a
+// small phone can never cut it off); null otherwise.
+export function receivableProgress(state: State, r: Receivable): string | null {
   const collected = receivableCollected(state, r);
-  const line = parts.join(' · ');
-  return collected > 0.005 && receivableStatus(state, r) !== 'settled'
-    ? `${line}\nاتحصّل ${formatMoney(collected, r.currency)} من ${formatMoney(r.amount, r.currency)}`
-    : line;
+  const status = receivableStatus(state, r);
+  return collected > 0.005 && status !== 'settled' ? `اتحصّل ${formatMoney(collected, r.currency)} من ${formatMoney(r.amount, r.currency)}` : null;
 }
 
 // Still owed first (by due date, then month, then when added), then the closed ones (settled, written off).
@@ -65,7 +70,7 @@ export function splitReceivables(state: Pick<FinanceState, 'transactions' | 'rec
 export const collectAccountsHelper = (currency: CurrencyCode): string => `الحسابات المعروضة: حسابات بال${currencyNameAr(currency)} فقط`;
 
 // Q2: the workaround, said where the user needs it.
-export const CROSS_CURRENCY_NOTE = 'اتدفع بعملة تانية؟ التحصيل لازم يبقى بنفس العملة: اشطب المستحق وسجّل الدخل عادي من المعاملات.';
+export const CROSS_CURRENCY_NOTE = 'اتدفع بعملة تانية؟ التحصيل لازم يبقى بنفس العملة: اشطب الفلوس دي هنا وسجّل الدخل عادي من المعاملات.';
 
 export const noAccountNote = (currency: CurrencyCode): string =>
   `مفيش حساب بال${currencyNameAr(currency)}؛ ضيف حساب الأول من الحسابات. ${CROSS_CURRENCY_NOTE}`;

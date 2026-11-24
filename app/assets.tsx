@@ -6,7 +6,7 @@ import { ACCOUNT_TYPE_ICONS, groupAccounts, holdingTitle, signedDifference } fro
 import { CollectSheet } from '@/components/assets/CollectSheet';
 import { EditAccountSheet } from '@/components/assets/EditAccountSheet';
 import { ReceivableSheet } from '@/components/assets/ReceivableSheet';
-import { receivableChip, receivableSubtitle, splitReceivables } from '@/components/assets/receivablesUi';
+import { receivableChip, receivableProgress, receivableSubtitle, splitReceivables } from '@/components/assets/receivablesUi';
 import { HoldingSheet } from '@/components/assets/HoldingSheet';
 import { TransactionSheet } from '@/components/transactions/TransactionSheet';
 import { AmountInput } from '@/components/ui/AmountInput';
@@ -222,18 +222,24 @@ export default function AssetsScreen() {
   const receivableRow = (r: Receivable) => {
     const chip = receivableChip(state, r, today);
     const closed = !!r.writtenOffAt || chip.label === 'اتحصّل';
+    const progress = receivableProgress(state, r);
     return (
       <ListRow
         key={r.id}
         title={r.label}
         titleColor={closed ? 'textMuted' : undefined}
-        subtitle={receivableSubtitle(state, r)}
+        subtitle={receivableSubtitle(r)}
         subtitleLines={2}
         icon={r.kind === 'salary' ? 'work-outline' : 'person-outline'}
         trailing={<Money amount={closed ? r.amount : receivableRemaining(state, r)} currency={r.currency} align="left" />}
         accessory={
-          <View style={styles.holdingMeta}>
+          <View style={styles.owedMeta}>
             <StatusChip label={chip.label} tone={chip.tone} />
+            {progress && (
+              <AppText variant="caption" color="textSecondary" style={styles.tabular}>
+                {progress}
+              </AppText>
+            )}
           </View>
         }
         onPress={() => setReceivableSheet(r.id)}
@@ -365,7 +371,7 @@ export default function AssetsScreen() {
 
       {/* ── Receivables: money owed to me. Not money: never in the totals above ── */}
       <View>
-        <SectionHeader title="مستحقات" actionLabel="+ مستحق" onAction={() => setReceivableSheet('add')} />
+        <SectionHeader title="فلوس ليّا" actionLabel="+ إضافة" onAction={() => setReceivableSheet('add')} />
         <View style={styles.owedLabel}>
           <StatusChip label="غير محصّل" tone="attention" icon="schedule" />
           <AppText variant="caption" color="textSecondary" style={styles.owedCaption}>
@@ -516,6 +522,8 @@ const styles = StyleSheet.create({
   group: { gap: space.xs },
   toggle: { flexDirection: 'row-reverse', alignItems: 'center', gap: space.xs, minHeight: 36 },
   holdingMeta: { gap: space.xs, marginTop: space.xxs },
+  // RTL: the status chip on the right, the "collected X of Y" line beside it, wrapping on small phones.
+  owedMeta: { flexDirection: 'row-reverse', flexWrap: 'wrap', alignItems: 'center', gap: space.sm, marginTop: space.xxs },
   tabular: { fontVariant: ['tabular-nums'] },
   owedLabel: { flexDirection: 'row-reverse', alignItems: 'flex-start', gap: space.sm, marginBottom: space.sm },
   owedCaption: { flex: 1 },

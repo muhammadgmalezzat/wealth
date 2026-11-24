@@ -747,18 +747,20 @@ snapshots from before out again with them (they were estimates anyway); recorded
 breakdown are left alone. New: `netWorthBreakdown(state)`, `NetWorthFigures.breakdown`.
 
 ### Assets, Categories, Settings, Backup, Lock (Calm Wealth phase 6)
-- **Receivables (data v9) — section «مستحقات» at the end of Assets** (`app/assets.tsx`): a «غير محصّل» chip and a caption
+- **Receivables (data v9) — section «فلوس ليّا» at the end of Assets** (header action «+ إضافة»; «المستحقات» stays reserved for due recurring items) (`app/assets.tsx`): a «غير محصّل» chip and a caption
   saying it is not in the assets, net worth or money; the open + partial totals per currency (`openReceivablesByCurrency`)
   and, when that is not a single reporting-currency amount, «≈ … بأسعار النهارده (للمعلومية بس)» (`openReceivablesValue`).
-  Rows (`components/assets/receivablesUi.ts`: `splitReceivables`, `receivableChip`, `receivableSubtitle`): title the
-  debtor, subtitle «مرتب · عن شهر … · مستحق …» (+ «اتحصّل X من Y»), trailing the remaining, chip مستنيه / متأخر / اتحصّل جزء;
+  Rows (`components/assets/receivablesUi.ts`: `splitReceivables`, `receivableChip`, `receivableSubtitle`, `receivableProgress`):
+  title the debtor (one line, ellipsis), subtitle «مرتب · عن شهر … · ميعاده …» (two lines), trailing the remaining, and
+  beside the chip (مستنيه / متأخر / اتحصّل جزء; overdue wins over partial) «اتحصّل X من Y» while partly collected — not in the
+  subtitle, where a 360 px phone cut it off;
   settled («اتحصّل») and written-off («اتشطب») rows sit in a collapsed «المقفولة (n)». Empty: one caption line, the
-  header's «+ مستحق» stays. The hero totals never include receivables.
+  header's «+ إضافة» stays. The hero totals never include receivables.
 - `ReceivableSheet` (add / edit): kind Segment مرتب | حاجة تانية, «من مين؟», «عن شهر» (`MonthSwitcher`, default last month,
   salary only), amount + currency (default: the last salary income's account currency; locked with a caption once
   collected), optional due date (`FutureDateField`, «بدون ميعاد»), note; the Q5 warning (`duplicateSalaryReceivable`). Edit
   mode adds a summary card, the collections (`TransactionRow`, tapping opens `TransactionSheet` from the screen) and the
-  actions سجّل تحصيل · اشطبه (confirm) / رجّعه مفتوح · احذف المستحق (only without collections; otherwise the caption
+  actions سجّل تحصيل · اشطبها (confirm) / رجّعها مفتوحة · احذفها (only without collections; otherwise the caption
   «فيه تحصيلات، تقدر تشطبه بس»).
 - `CollectSheet` (from the row's edit sheet or Home's Q9 action): «عن شهر» chip, amount prefilled with the remaining
   (`collectHint`: «الباقي» / «هيفضل باقي» / Q3 «ده أكتر من الباقي… سجّل الزيادة كدخل منفصل», which disables save),
@@ -770,6 +772,9 @@ breakdown are left alone. New: `netWorthBreakdown(state)`, `NetWorthFigures.brea
 - `TransactionSheet` on a collection: no type Segment (chips «تحصيل: <label>» + «عن شهر …» and the caption «دي تحصيل لمستحق،
   نوعها وعملتها مش بيتغيّروا»), the account picker only in the receivable's currency, no «خلّيها معاملة متكررة», and the delete
   confirmation adds «المستحق … هيرجع مفتوح بالمبلغ ده». `TransactionRow` shows the «عن شهر …» chip on any income with `forMonth`.
+- React Compiler note (`ReceivableSheet`): the add mode has no receivable, and `receivable?.id` in a call argument or
+  `receivable!.id` inside a callback was compiled into an unconditional `receivable.id` (memo dependency) and crashed the
+  sheet on web. The sheet reads the optional prop once into `editing` / `editingId` and its callbacks only capture those.
 - Store actions `addReceivable`, `updateReceivable`, `deleteReceivable`, `writeOffReceivable`, `reopenReceivable`,
   `collectReceivable(input, options?)` (`useFinanceStore`), called through `runAction`.
 
@@ -982,7 +987,7 @@ Every synced entity has `updatedAt` (set only by operations).
 - **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), updatedAt }`
 - **ReservationMovement** `{ id, fundId, accountId, amount (signed, in the ACCOUNT's currency), kind: reserve|release|reallocate|follow_transfer|follow_exchange|spend|cover|adjust, groupId?, sourceTransactionId?, date, note?, rateSnapshotId, updatedAt }` — money of one account set aside for one fund; `reservation(fund, account)` = Σ amount, never stored. `reallocate` / `follow_*` come in pairs sharing a `groupId` (a follow group's id is the transaction id, or `<id>:…`); `cover` and `spend` carry the `sourceTransactionId` that caused them.
 - **UnresolvedMovement** `{ id, fundId, amount, currency, date, note?, rateSnapshotId, reason: ambiguous|insufficient|negative|no_account, updatedAt }` — migration-only quarantine: counts toward its fund's total, never against an account's available money, until the user resolves it (an account is chosen: it becomes an `adjust` reservation).
-- **Receivable** (v9) `{ id, label, kind: salary|other, forMonth? ('YYYY-MM', required for salary), amount (> 0, in `currency`, native), currency, dueDate?, note?, writtenOffAt? (ISO; present = written off, cleared on reopen), createdAt, updatedAt }` — money owed to the user, **not money**: no account, never read by a money selector (net worth, liquid, balances, funds, unassigned, safe-to-spend, analytics, snapshots). Collected / remaining / status (`open | partial | settled | written_off`) are derived from the incomes that carry its id (`receivableCollected`); only the write-off is stored. Operations and selectors: §9 "Receivables"; UI: §5 Assets "مستحقات" (`docs/architecture/RECEIVABLES_DESIGN.md`).
+- **Receivable** (v9) `{ id, label, kind: salary|other, forMonth? ('YYYY-MM', required for salary), amount (> 0, in `currency`, native), currency, dueDate?, note?, writtenOffAt? (ISO; present = written off, cleared on reopen), createdAt, updatedAt }` — money owed to the user, **not money**: no account, never read by a money selector (net worth, liquid, balances, funds, unassigned, safe-to-spend, analytics, snapshots). Collected / remaining / status (`open | partial | settled | written_off`) are derived from the incomes that carry its id (`receivableCollected`); only the write-off is stored. Operations and selectors: §9 "Receivables"; UI: §5 Assets «فلوس ليّا» (`docs/architecture/RECEIVABLES_DESIGN.md`).
 - **IncomeExpenseTransaction** (v9) may carry `receivableId?` + `forMonth?` (income only): it collects that receivable, and copies its month (INV-10, INV-11).
 - **Account** also has `allowNegative?` (a genuine overdraft account: its balance may go below zero without asking; it holds no reservations).
 - **Holding** (union): `gold { weightGrams, karat: 18|21|24 }` or `currency { currency, quantity }`; common `id, name, purchaseCost: Money` (what it cost, in the currency it was paid in; never changes with rates), `purchaseRateSnapshotId` (the rates of the purchase, to show the cost in another currency as it was then), `purchaseDate?, country, note?, updatedAt`
