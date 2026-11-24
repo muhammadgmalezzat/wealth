@@ -17,6 +17,8 @@ overdraft needs a confirmation unless the account has `allowNegative`. **Not bui
 exchange-rate list UI, per-country gold pricing (product phase), reporting-currency totals on the funds side (unassigned,
 fund suggestions, emergency target stay in EGP / the fund's currency).
 
+**Data v9 (receivables):** see `RECEIVABLES_DESIGN.md`. It adds INV-9…11 (below) and changes nothing in this design.
+
 **Based on:** a read of `store/*`, `utils/currency.ts`, `utils/formatters.ts`, `utils/prices/*`, `constants/*`,
 `components/**` and `app/**` as of data v7 / app 1.2.0 (unbuilt), plus a read-only run of the current logic against
 `store/seed.local.ts` (§G). Where the document says "today" it means that code.
@@ -64,6 +66,7 @@ The six agreed principles, each turned into something a test can check.
 | INV-6 | Every operation returns one patch or throws / returns `needsCover`; nothing is partially applied. | Fuzz test: failed operation leaves state deep-equal |
 | INV-7 | Money values are rounded to the currency's decimals when written and when aggregated; aggregation sums integer minor units. | Precision tests (§H) |
 | INV-8 | Reservations are a partition of cash, not extra money: moving, reserving or releasing never changes net worth. | Property test across random operation sequences |
+| INV-9…11 | (data v9, `RECEIVABLES_DESIGN.md` §2) collected ≤ amount per receivable; a `receivableId` resolves to a receivable in the income's currency; a collection carries its receivable's `forMonth`. | `receivableViolations` / `assertInvariants`; v9 migration and backup restore refuse violations |
 
 About INV-5 and negative balances: the principle says "available must never go below 0". A balance that is itself
 negative (an overdraft) is a different situation; see Open question Q1. The design allows it only on an explicit,

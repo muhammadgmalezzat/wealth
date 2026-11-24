@@ -6,9 +6,39 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased — branch `receivables` · 1.2.0 · data v9 — receivables («غير محصّل»), in progress
+
+> Not released. Step 1 of 4 (data only, nothing visible yet). **This release also ships the stage-1 restore-safety
+> fixes** (the 2026-11-23 entry below).
+>
+> **Release / rollback (when it ships as an OTA to 1.2.0):** export an **encrypted backup right before updating** (it is
+> a v8 file). The first launch migrates the data to v9 and first keeps a copy as `@wealth_finance_state_backup_v8`.
+> If something looks wrong, an OTA back to the v8 code does **not** undo it: v8 code refuses v9 data (fail-closed)
+> instead of silently dropping receivables. The rollback path is: publish / open the v8 code, **clear the app's data**,
+> then **restore the encrypted v8 backup** taken before the update (Settings → البيانات → استعادة نسخة).
+
+*For users*
+- لسه مفيش حاجة ظاهرة: دي أول خطوة (تجهيز البيانات). كل أرقامك زي ما هي بالظبط.
+
+*Technical*
+- Data v9: `Receivable { id, label, kind: salary|other, forMonth?, amount, currency, dueDate?, note?, writtenOffAt?,
+  createdAt, updatedAt }` (status derived; only the write-off stored), `receivables` collection, tombstone entity
+  `receivable`, optional `receivableId` / `forMonth` on income transactions, `settings.v9Step`.
+- `store/migrateV9.ts`: ordered idempotent sub-steps like v8 (step 1 `receivables`), fail-closed;
+  `CURRENT_VERSION = 9`; `migratePersistedState` ends every chain with `applyV9Steps`; the store's `normalize` completes
+  v9 payloads (copy under `…_backup_v9_before_step_N` first); `migrate` keeps `…_backup_v8` as before.
+- INV-9…11 in `store/invariants.ts` (`receivableViolations`, `assertReceivableInvariants`; `assertInvariants` checks
+  INV-5 and INV-9…11); `receivableCollected` selector.
+- Backups: `dataOf` exports receivables; `hasStateShape` requires the list; `openBackup` refuses broken receivable
+  links (`INVALID_FILE`). `replaceAllData` handles the collection (tombstones) and tolerates a seed without it.
+- Tests 447 → 474 (invariants, migration on every oracle fixture with the v8 report unchanged, hydration, backups,
+  restore safety).
+
+---
+
 ## 2026-11-23 · 1.2.0 · data v8 — post-release cleanup: backup restore safety
 
-> Merged (stage-1), **not shipped yet**. The `store/backup.ts` restore-safety fixes ship with the next feature's OTA.
+> Merged (stage-1), **not shipped yet**. The `store/backup.ts` restore-safety fixes ship with the receivables OTA (entry above).
 
 *For users*
 - كلمة السر الغلط بقت بتقول «كلمة السر غلط أو الملف تالف» (التشفير مش بيقدر يفرّق بين الاتنين).

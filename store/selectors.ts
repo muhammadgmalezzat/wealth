@@ -20,6 +20,7 @@ import type {
   IncomeExpenseTransaction,
   Liability,
   NetWorthBreakdown,
+  Receivable,
   SinkingFrequency,
   Transaction,
 } from './types';
@@ -1019,6 +1020,22 @@ export function suggestedEmergencyTarget(
   return roundIn((sumIn(recorded, 'EGP') / recorded.length) * months, 'EGP');
 }
 
+// --- Receivables --------------------------------------------------------------
+
+// What has been collected on a receivable: the incomes tagged with it, summed in its currency (INV-7). Derived,
+// never stored. Money selectors above never read receivables (they are not money).
+export function receivableCollected(
+  state: Pick<State, 'transactions'>,
+  receivable: Pick<Receivable, 'id' | 'currency'>
+): number {
+  return sumIn(
+    state.transactions
+      .filter((tx): tx is IncomeExpenseTransaction => isIncomeExpense(tx) && tx.receivableId === receivable.id)
+      .map((tx) => tx.amount),
+    receivable.currency
+  );
+}
+
 // --- Diagnostics ------------------------------------------------------------
 
 export function stateSummary(state: State) {
@@ -1026,6 +1043,7 @@ export function stateSummary(state: State) {
     accounts: state.accounts.length,
     holdings: state.holdings.length,
     funds: state.funds.length,
+    receivables: state.receivables?.length ?? 0,
     netWorthEGP: Math.round(netWorth(state, 'EGP') * 100) / 100,
     unassignedEGP: Math.round(unassignedEGP(state) * 100) / 100,
   };

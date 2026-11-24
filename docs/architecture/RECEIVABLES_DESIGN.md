@@ -1,6 +1,13 @@
 # Receivables (late salary, money owed to me) — design
 
-Status: **proposal, not built.** Data v9. All numbers in this document are made up.
+Status: **approved (2026-11-24). Step 1 of §10 is implemented** (schema, the v8 → v9 migration, INV-9…11, backup
+shape and restore checks, tests); steps 2–4 (operations, UI, docs pass + browser check) are not built yet. Decisions:
+Q1 `writtenOffAt`; Q2 reject cross-currency collection in v1 with the workaround in the sheet; rule 8 chip only (no
+forMonth grouping view); Q9 yes; Q10, Q11 not in v1; Q3–Q8 and Q12–Q16 as recommended. Deviations in step 1:
+`settings.v9Step` is optional in the type (v8 data has none; it is always set after migrating); `receivableCollected`
+(a §3.2 selector) was built in step 1 because the invariants need it; `assertInvariants` keeps INV-5 in
+`invariantViolations` and adds `receivableViolations` beside it (not one merged list). All numbers in this document are
+made up.
 
 Builds on `CURRENCY_AND_FUNDS_DESIGN.md` (rounding INV-7, native amounts, account-backed funds INV-5, the cover
 gate, fail-closed migrations). The pattern already exists for liabilities: a payment is an ordinary transaction

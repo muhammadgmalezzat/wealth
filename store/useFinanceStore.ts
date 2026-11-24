@@ -7,6 +7,7 @@ import { newId } from '@/utils/id';
 import { fetchLivePrices, priceSourceOf, shouldAutoFetch } from '@/utils/prices/fetchPrices';
 import { createPersistOptions, createWriteGuard, type HydrationFailure } from './hydration';
 import { applyV8Steps, LATEST_V8_STEP } from './migrateV8';
+import { applyV9Steps, LATEST_V9_STEP } from './migrateV9';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import * as ops from './operations';
 import type { CoverSelection, OpOptions } from './cover';
@@ -67,6 +68,7 @@ export function dataOf(s: FinanceState): FinanceState {
     netWorthSnapshots: s.netWorthSnapshots,
     actionDismissals: s.actionDismissals,
     monthlyReviews: s.monthlyReviews,
+    receivables: s.receivables,
     settings: s.settings,
     tombstones: s.tombstones,
   };
@@ -341,16 +343,20 @@ export const useFinanceStore = create<FinanceStore>()(
       // so nothing reads storage, migrates, or calls setState; `hasHydrated` stays false and the
       // server renders the loading state, matching the client's first render.
       skipHydration: isServer,
-      // A payload stored at version 8 by an earlier build (data v8 grew over several builds) is completed here.
-      // The untouched copy is kept first, so a wrong completion can always be undone by hand.
+      // A payload stored at the current version by an earlier build (data v8 and v9 grow over several builds, as
+      // sub-steps) is completed here. The untouched copy is kept first, so a wrong completion can always be undone
+      // by hand.
       normalize: (persisted) => {
-        const done = (persisted as { settings?: { v8Step?: number } }).settings?.v8Step ?? 0;
-        if (done >= LATEST_V8_STEP) return persisted;
+        const settings = (persisted as { settings?: { v8Step?: number; v9Step?: number } }).settings;
+        const v8Done = settings?.v8Step ?? 0;
+        const v9Done = settings?.v9Step ?? 0;
+        if (v8Done >= LATEST_V8_STEP && v9Done >= LATEST_V9_STEP) return persisted;
         void AsyncStorage.setItem(
-          `${BACKUP_KEY_PREFIX}8_before_step_${done}`,
+          v8Done < LATEST_V8_STEP ? `${BACKUP_KEY_PREFIX}8_before_step_${v8Done}` : `${BACKUP_KEY_PREFIX}9_before_step_${v9Done}`,
           JSON.stringify({ state: persisted, version: CURRENT_VERSION })
         );
-        return applyV8Steps(persisted, { now: new Date().toISOString(), newId });
+        const migration = { now: new Date().toISOString(), newId };
+        return applyV9Steps(applyV8Steps(persisted, migration), migration);
       },
       // Persist data only — never actions or hydration flags.
       partialize: (s: FinanceStore) => dataOf(s),

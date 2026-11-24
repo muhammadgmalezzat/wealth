@@ -2100,6 +2100,7 @@ const COLLECTIONS: { key: Exclude<keyof State, 'settings' | 'tombstones' | 'rate
   { key: 'netWorthSnapshots', entity: 'netWorthSnapshot' },
   { key: 'actionDismissals', entity: 'actionDismissal' },
   { key: 'monthlyReviews', entity: 'monthlyReview' },
+  { key: 'receivables', entity: 'receivable' },
 ];
 
 const syncKey = (item: object) =>
@@ -2121,7 +2122,8 @@ function replaceAllData(state: State, next: State, settings: Settings, ctx: OpCo
   // Rate snapshots are immutable and content-addressed (no tombstones); the records now in the state point at the incoming ones.
   const patch: Patch = { settings, rateSnapshots: next.rateSnapshots };
   for (const { key, entity } of COLLECTIONS) {
-    const incoming = next[key] as object[];
+    // A seed written for an older shape may lack a newer collection (e.g. receivables before v9).
+    const incoming = (next[key] ?? []) as object[];
     const incomingIds = new Set(incoming.map(syncKey));
     incomingIds.forEach((id) => present.add(`${entity}:${id}`));
     for (const item of state[key] as object[]) {

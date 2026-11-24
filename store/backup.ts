@@ -3,6 +3,7 @@ import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
+import { assertReceivableInvariants } from './invariants';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import { netWorth } from './selectors';
 import type { FinanceState } from './types';
@@ -249,6 +250,8 @@ export async function openBackup(file: BackupFile, options: OpenOptions): Promis
       newId: options.newId,
     }));
     if (!hasStateShape(state)) throw new BackupError('INVALID_FILE');
+    // Receivable links (INV-9…11): only a hand-edited or damaged file can break them.
+    assertReceivableInvariants(state);
     // What the preview shows next; a file that can't produce it must fail here, not in the sheet.
     netWorth(state);
   } catch {
@@ -273,6 +276,7 @@ const STATE_COLLECTIONS = [
   'netWorthSnapshots',
   'actionDismissals',
   'monthlyReviews',
+  'receivables',
   'tombstones',
 ] as const satisfies readonly (keyof FinanceState)[];
 
