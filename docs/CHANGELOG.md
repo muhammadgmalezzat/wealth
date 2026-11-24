@@ -8,6 +8,8 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ## 2026-11-23 · 1.2.0 · data v8 — post-release cleanup: backup restore safety
 
+> Merged (stage-1), **not shipped yet**. The `store/backup.ts` restore-safety fixes ship with the next feature's OTA.
+
 *For users*
 - كلمة السر الغلط بقت بتقول «كلمة السر غلط أو الملف تالف» (التشفير مش بيقدر يفرّق بين الاتنين).
 - ملف نسخة بايظ أو ناقص أو متعدّل بقى بيطلّع «الملف ده مش نسخة احتياطية سليمة من حصّالة» بدل «حدث خطأ غير متوقع». وملف بايظ مبقاش ممكن يعلّق شاشة فك التشفير. بياناتك الحالية مش بتتلمس في أي حالة من دول.
@@ -23,10 +25,12 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased (2026-11-08) — branch `currency-v8` · data v8 · Phases B–D: currency engine, ledger, account-backed funds
+## 1.2.0 · data v8 · released 2026-11-08 (OTA)
 
-> Not released. `main` stays on data v7 until this branch is merged. One v7 → v8 migration (eight sub-steps), run on the
-> first launch of a build that contains it; a copy of your data is kept first (`@wealth_finance_state_backup_v7`).
+Phases B–D: currency engine, ledger, account-backed funds (branch `currency-v8`, merged into `main`).
+
+> Shipped as an `eas update` to the 1.2.0 build. One v7 → v8 migration (eight sub-steps) runs on the first launch after
+> the update; a copy of your data is kept first (`@wealth_finance_state_backup_v7`).
 
 **ملخص بالمصري (B + C + D)**
 
