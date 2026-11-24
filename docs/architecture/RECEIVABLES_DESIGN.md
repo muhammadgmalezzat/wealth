@@ -1,8 +1,11 @@
 # Receivables (late salary, money owed to me) — design
 
-Status: **approved (2026-11-24). Steps 1 and 2 of §10 are implemented** (schema, the v8 → v9 migration, INV-9…11, backup
-shape and restore checks; operations and selectors, with tests and fuzz); steps 3–4 (UI, docs pass + browser check)
-are not built yet. Decisions:
+Status: **approved (2026-11-24). Steps 1–3 of §10 are implemented** (schema, the v8 → v9 migration, INV-9…11, backup
+shape and restore checks; operations and selectors, with tests and fuzz; store actions and UI); step 4 (docs pass +
+browser check) is not done yet. Step 3 deviations: the section is titled «مستحقات» (owner's request) and sits **after**
+«الالتزامات», with a «غير محصّل» chip; the refill offer opens «كمّل الصناديق» directly after a collection (no extra
+yes / no question; إلغاء skips it); the Q9 action shares rule 4's priority with the review prompt; the edit sheet's
+collections open `TransactionSheet` from the Assets screen (one sheet at a time, no stacked modals). Decisions:
 Q1 `writtenOffAt`; Q2 reject cross-currency collection in v1 with the workaround in the sheet; rule 8 chip only (no
 forMonth grouping view); Q9 yes; Q10, Q11 not in v1; Q3–Q8 and Q12–Q16 as recommended. Deviations in step 1:
 `settings.v9Step` is optional in the type (v8 data has none; it is always set after migrating); `receivableCollected`

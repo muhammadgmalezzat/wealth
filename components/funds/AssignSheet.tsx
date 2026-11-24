@@ -27,11 +27,18 @@ import { runAction } from '@/utils/runAction';
 
 interface AssignSheetProps {
   onClose: () => void;
+  // Opened with a proposal (the refill offer after collecting a receivable, Q8): its currency, account and amounts.
+  // Every field stays editable, and إلغاء skips it.
+  initialCurrency?: CurrencyCode;
+  initialAccountId?: string;
+  prefill?: FundAmount[];
+  title?: string;
+  intro?: string;
 }
 
 // "وزّعها": split unassigned money across funds in one atomic save. The money is in one
 // currency at a time (the ones that have some left); each fund counts it at today's rate.
-export function AssignSheet({ onClose }: AssignSheetProps) {
+export function AssignSheet({ onClose, initialCurrency, initialAccountId, prefill, title, intro }: AssignSheetProps) {
   const state = useFinanceStore();
   const rates = state.settings.rates;
   const funds = fundsByPriority(state);
@@ -41,12 +48,15 @@ export function AssignSheet({ onClose }: AssignSheetProps) {
     .slice()
     .sort((a, b) => toEGP(b.amount, b.currency, rates) - toEGP(a.amount, a.currency, rates))
     .map((s) => s.currency);
+  if (initialCurrency && !options.includes(initialCurrency)) options.unshift(initialCurrency);
   if (options.length === 0) options.push('EGP');
 
-  const [picked, setPicked] = useState<CurrencyCode | null>(null);
-  const [amounts, setAmounts] = useState<Record<string, string>>({});
+  const [picked, setPicked] = useState<CurrencyCode | null>(initialCurrency ?? null);
+  const [amounts, setAmounts] = useState<Record<string, string>>(() =>
+    Object.fromEntries((prefill ?? []).filter((p) => p.amount > 0).map((p) => [p.fundId, String(p.amount)]))
+  );
   // null = each fund's account is chosen automatically (shown under the summary); an id applies to all of them.
-  const [accountPick, setAccountPick] = useState<string | null>(null);
+  const [accountPick, setAccountPick] = useState<string | null>(initialAccountId ?? null);
   const currency = picked && options.includes(picked) ? picked : options[0];
   const accountChoices = state.accounts.filter((a) => a.currency === currency && !a.archived);
   const pickedId = accountPick && accountChoices.some((a) => a.id === accountPick) ? accountPick : undefined;
@@ -103,7 +113,12 @@ export function AssignSheet({ onClose }: AssignSheetProps) {
   };
 
   return (
-    <FormSheet visible title="وزّع الفلوس" onCancel={onClose} onSave={handleSave}>
+    <FormSheet visible title={title ?? "وزّع الفلوس"} onCancel={onClose} onSave={handleSave}>
+      {intro && (
+        <AppText variant="secondary" color="textSecondary" style={styles.intro}>
+          {intro}
+        </AppText>
+      )}
       {options.length > 1 && (
         <View style={styles.currency}>
           <Segment<CurrencyCode>
@@ -184,6 +199,7 @@ export function AssignSheet({ onClose }: AssignSheetProps) {
 
 const styles = StyleSheet.create({
   currency: { marginBottom: space.md },
+  intro: { marginBottom: space.md },
   summary: { gap: space.xs },
   hint: { marginTop: space.md },
   suggest: { marginVertical: space.md },

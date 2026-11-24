@@ -198,7 +198,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencyRegistry.ts, countries.ts, currencies.ts (names, v7-shaped DEFAULT_RATES for the seeds), market.ts
-tests/logic.test.ts         491 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         497 tests over store/*, utils/* and the pure UI helpers
 tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
@@ -549,6 +549,7 @@ priority order); `nextActions` drops snoozed ones. Each action:
 | 2 | `resolve` | `unresolvedMovements` not empty | urgent | فلوس محجوزة ومش محدد حسابها | حدّد الحساب → ResolveSheet |
 | 3 | `overspent` | this month's plan has `overspentLines` | warning | عدّيت ميزانية: {names} | افتح الخطة → /plan |
 | 4 | `review-YYYY-MM` | `pendingReviewMonth`: last month had transactions (≥ trackingStartDate) and no `monthlyReviews` entry | opportunity | راجع شهر {month} | ابدأ المراجعة → /review?month= |
+| 4 | `receivable-<id>` | `receivableOverdue`: a receivable still open or partial whose `dueDate` < today (one action each, dismissible through `actionDismissals`) | warning | مرتب {month} لسه ماوصلش / {remaining} عند {label} لسه ماوصلوش | سجّل التحصيل → `collect` (Home opens `CollectSheet`) |
 | 5 | `plan-YYYY-MM` | no plan this month | warning | اعمل خطة الشهر | اعمل الخطة → /plan |
 | 6 | `emergency` | no active emergency fund → create; or emergency cash (EGP) < 1 month of essentials (`suggestedEmergencyTarget(3)/3`, needs history) → allocate | opportunity | ابدأ صندوق الطوارئ | أنشئ الصندوق → FundSheet / خصص الآن → fund |
 | 7 | `sinking-<id>` | sinking fund with `nextDueDate − today ≤ 14` days (overdue included) and `target − fundCurrent > 0` | warning | فاضل {X} على {fund} | خصص الآن → /fund/[id]?allocate=1 |
@@ -746,6 +747,31 @@ snapshots from before out again with them (they were estimates anyway); recorded
 breakdown are left alone. New: `netWorthBreakdown(state)`, `NetWorthFigures.breakdown`.
 
 ### Assets, Categories, Settings, Backup, Lock (Calm Wealth phase 6)
+- **Receivables (data v9) — section «مستحقات» at the end of Assets** (`app/assets.tsx`): a «غير محصّل» chip and a caption
+  saying it is not in the assets, net worth or money; the open + partial totals per currency (`openReceivablesByCurrency`)
+  and, when that is not a single reporting-currency amount, «≈ … بأسعار النهارده (للمعلومية بس)» (`openReceivablesValue`).
+  Rows (`components/assets/receivablesUi.ts`: `splitReceivables`, `receivableChip`, `receivableSubtitle`): title the
+  debtor, subtitle «مرتب · عن شهر … · مستحق …» (+ «اتحصّل X من Y»), trailing the remaining, chip مستنيه / متأخر / اتحصّل جزء;
+  settled («اتحصّل») and written-off («اتشطب») rows sit in a collapsed «المقفولة (n)». Empty: one caption line, the
+  header's «+ مستحق» stays. The hero totals never include receivables.
+- `ReceivableSheet` (add / edit): kind Segment مرتب | حاجة تانية, «من مين؟», «عن شهر» (`MonthSwitcher`, default last month,
+  salary only), amount + currency (default: the last salary income's account currency; locked with a caption once
+  collected), optional due date (`FutureDateField`, «بدون ميعاد»), note; the Q5 warning (`duplicateSalaryReceivable`). Edit
+  mode adds a summary card, the collections (`TransactionRow`, tapping opens `TransactionSheet` from the screen) and the
+  actions سجّل تحصيل · اشطبه (confirm) / رجّعه مفتوح · احذف المستحق (only without collections; otherwise the caption
+  «فيه تحصيلات، تقدر تشطبه بس»).
+- `CollectSheet` (from the row's edit sheet or Home's Q9 action): «عن شهر» chip, amount prefilled with the remaining
+  (`collectHint`: «الباقي» / «هيفضل باقي» / Q3 «ده أكتر من الباقي… سجّل الزيادة كدخل منفصل», which disables save),
+  `AccountPicker` over non-archived accounts **in the receivable's currency** with «الحسابات المعروضة: حسابات بال<currency> فقط»
+  and the Q2 note (no account: the note + save disabled), receipt date (`PastDateField`), income category (default «راتب»
+  / «دخل آخر»), note. Saves through `runAction` → `collectReceivable` (so a `NeedsCoverError` would open the cover sheet).
+  Then, if `receivableRefillSuggestion` is not empty (`shouldOfferRefill`), the sheet turns into `AssignSheet` «كمّل الصناديق»
+  (new optional props `initialCurrency`, `initialAccountId`, `prefill`, `title`, `intro`): editable, إلغاء skips it.
+- `TransactionSheet` on a collection: no type Segment (chips «تحصيل: <label>» + «عن شهر …» and the caption «دي تحصيل لمستحق،
+  نوعها وعملتها مش بيتغيّروا»), the account picker only in the receivable's currency, no «خلّيها معاملة متكررة», and the delete
+  confirmation adds «المستحق … هيرجع مفتوح بالمبلغ ده». `TransactionRow` shows the «عن شهر …» chip on any income with `forMonth`.
+- Store actions `addReceivable`, `updateReceivable`, `deleteReceivable`, `writeOffReceivable`, `reopenReceivable`,
+  `collectReceivable(input, options?)` (`useFinanceStore`), called through `runAction`.
 
 - Assets / Categories / Settings: see the route table. Balances first; value differences are
   secondary text with a sign, never green/red, no percent or arrows.
@@ -956,7 +982,7 @@ Every synced entity has `updatedAt` (set only by operations).
 - **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), updatedAt }`
 - **ReservationMovement** `{ id, fundId, accountId, amount (signed, in the ACCOUNT's currency), kind: reserve|release|reallocate|follow_transfer|follow_exchange|spend|cover|adjust, groupId?, sourceTransactionId?, date, note?, rateSnapshotId, updatedAt }` — money of one account set aside for one fund; `reservation(fund, account)` = Σ amount, never stored. `reallocate` / `follow_*` come in pairs sharing a `groupId` (a follow group's id is the transaction id, or `<id>:…`); `cover` and `spend` carry the `sourceTransactionId` that caused them.
 - **UnresolvedMovement** `{ id, fundId, amount, currency, date, note?, rateSnapshotId, reason: ambiguous|insufficient|negative|no_account, updatedAt }` — migration-only quarantine: counts toward its fund's total, never against an account's available money, until the user resolves it (an account is chosen: it becomes an `adjust` reservation).
-- **Receivable** (v9) `{ id, label, kind: salary|other, forMonth? ('YYYY-MM', required for salary), amount (> 0, in `currency`, native), currency, dueDate?, note?, writtenOffAt? (ISO; present = written off, cleared on reopen), createdAt, updatedAt }` — money owed to the user, **not money**: no account, never read by a money selector (net worth, liquid, balances, funds, unassigned, safe-to-spend, analytics, snapshots). Collected / remaining / status (`open | partial | settled | written_off`) are derived from the incomes that carry its id (`receivableCollected`); only the write-off is stored. Operations and selectors: §9 "Receivables"; UI: not built yet (receivables step 3, `docs/architecture/RECEIVABLES_DESIGN.md`).
+- **Receivable** (v9) `{ id, label, kind: salary|other, forMonth? ('YYYY-MM', required for salary), amount (> 0, in `currency`, native), currency, dueDate?, note?, writtenOffAt? (ISO; present = written off, cleared on reopen), createdAt, updatedAt }` — money owed to the user, **not money**: no account, never read by a money selector (net worth, liquid, balances, funds, unassigned, safe-to-spend, analytics, snapshots). Collected / remaining / status (`open | partial | settled | written_off`) are derived from the incomes that carry its id (`receivableCollected`); only the write-off is stored. Operations and selectors: §9 "Receivables"; UI: §5 Assets "مستحقات" (`docs/architecture/RECEIVABLES_DESIGN.md`).
 - **IncomeExpenseTransaction** (v9) may carry `receivableId?` + `forMonth?` (income only): it collects that receivable, and copies its month (INV-10, INV-11).
 - **Account** also has `allowNegative?` (a genuine overdraft account: its balance may go below zero without asking; it holds no reservations).
 - **Holding** (union): `gold { weightGrams, karat: 18|21|24 }` or `currency { currency, quantity }`; common `id, name, purchaseCost: Money` (what it cost, in the currency it was paid in; never changes with rates), `purchaseRateSnapshotId` (the rates of the purchase, to show the cost in another currency as it was then), `purchaseDate?, country, note?, updatedAt`
@@ -1436,6 +1462,8 @@ rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previ
 series by location and estimated points, money map, runway, fund projections, every insight trigger and the
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
+
+v9 suites (receivables step 3): the Q9 Next Best Action (one per overdue receivable, partial shows what is left, gone when settled / written off / not yet due, snoozed through `dismissAction` for 24 h per receivable) and the UI helpers (status chips, subtitles, open / closed split, the account helper per currency, Q2 / Q3 notes, the amount hint, new-receivable defaults, the Q8 offer rule).
 
 v9 suites (receivables step 2): every operation's rules and Arabic messages, partial → settled, refusals change nothing, **a collection has the same effect as the same income typed by hand** (v8 report diff 0, net worth, month summary, unassigned, safe-to-spend), collected / status follow edits and deletes of collections, the link is kept by edits, forMonth re-stamping, write-off / reopen with zero ledger effect, delete only without collections, the cover gate on deleting a reserved collection, the selectors (totals, informational value, overdue, Q5, Q8); the D4 **fuzz** now also adds / collects / edits / writes off / reopens / deletes receivables and asserts INV-9…11 and "net worth without receivables is the same" after every step, on all three variants.
 

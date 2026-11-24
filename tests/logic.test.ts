@@ -111,7 +111,8 @@ import type { FinanceState, Fund, Receivable, RecurringRule, ReservationKind, Re
 import { addMonthsToDate } from '@/utils/dates';
 import { errorMessage } from '@/utils/errorMessages';
 import { currencyNameAr } from '@/constants/currencies';
-import { formatCurrency, formatDayLabel, formatPercent, moreThingsPhrase, timeAgoPhrase } from '@/utils/formatters';
+import { formatCurrency, formatDayLabel, formatMonthLabel, formatPercent, moreThingsPhrase, timeAgoPhrase } from '@/utils/formatters';
+import * as recvUi from '@/components/assets/receivablesUi';
 import { parseAmount } from '@/utils/parseAmount';
 import * as priceCalc from '@/utils/prices/calc';
 import * as prices from '@/utils/prices/fetchPrices';
@@ -7860,5 +7861,101 @@ describe('receivables (v9): selectors', () => {
       assert.match(errorMessage(new FinanceValidationError(code)), arabic, code);
     }
     assert.equal(errorMessage(new FinanceValidationError('NOT_FOUND', { entity: 'receivable' })), 'المستحق غير موجود');
+  });
+});
+
+// --- Receivables, step 3: UI helpers and the Home suggestion ----------------------------------------------------------
+
+describe('receivables (v9): UI helpers and the Q9 Home suggestion', () => {
+  // Made-up numbers: an EGP and a SAR account, a fund below target, three receivables.
+  const NOW_Q9 = new Date(2026, 9, 20, 12); // 20 Oct 2026
+  const world = (): FinanceState => {
+    const ctx = makeCtx();
+    let s: FinanceState = {
+      ...emptyState(),
+      accounts: [account('E1', 'EGP', 5000), account('S1', 'SAR', 1000, 'SA')],
+      funds: [fund({ id: 'F1', priority: 1, targetAmount: 10000, monthlyContribution: 2000 })],
+    };
+    const add = (input: ops.NewReceivable) => (s = apply(s, ops.addReceivable(s, input, ctx)));
+    add({ label: 'الشركة', kind: 'salary', forMonth: '2026-09', amount: 1000, currency: 'EGP', dueDate: '2026-10-05' }); // id-1 overdue
+    add({ label: 'أحمد', kind: 'other', amount: 300, currency: 'SAR', dueDate: '2026-12-01' }); // id-2 not yet due
+    add({ label: 'سامي', kind: 'other', amount: 50, currency: 'SAR', dueDate: '2026-10-01' }); // id-3 overdue
+    return s;
+  };
+  const q9 = (s: FinanceState, now = NOW_Q9) => nba.nextActions(s, now).filter((a) => a.id.startsWith('receivable-'));
+
+  it('Q9: one dismissible action per overdue receivable, opening its collect sheet', () => {
+    const actions = q9(world());
+    assert.deepEqual(actions.map((a) => a.id), ['receivable-id-1', 'receivable-id-3']);
+    const [salary, other] = actions;
+    assert.equal(salary.title, `مرتب ${formatMonthLabel('2026-09')} لسه ماوصلش`);
+    assert.match(other.title, /عند سامي لسه ماوصلوش/);
+    assert.deepEqual(salary.cta, { label: 'سجّل التحصيل', route: 'collect', params: { id: 'id-1' } });
+    assert.equal(salary.dismissible, true);
+    assert.deepEqual([salary.amount, salary.currency], [1000, 'EGP']);
+  });
+
+  it('Q9: gone once settled or written off; partial still counts (with what is left); not before the due date', () => {
+    const ctx = makeCtx();
+    let s = world();
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-1', accountId: 'E1', amount: 400, date: '2026-10-18' }, ctx));
+    assert.equal(q9(s).find((a) => a.id === 'receivable-id-1')?.amount, 600);
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-1', accountId: 'E1', amount: 600, date: '2026-10-19' }, ctx));
+    s = apply(s, ops.writeOffReceivable(s, 'id-3', ctx));
+    assert.deepEqual(q9(s), []);
+    assert.deepEqual(q9(world(), new Date(2026, 8, 30, 12)), [], 'nothing overdue yet');
+  });
+
+  it('Q9: "بعدين" snoozes it through the existing actionDismissals (24 h), per receivable', () => {
+    const s = world();
+    const later = apply(s, ops.dismissAction(s, 'receivable-id-1', { newId: () => 'x', now: () => NOW_Q9 }));
+    assert.deepEqual(q9(later).map((a) => a.id), ['receivable-id-3']);
+    assert.deepEqual(q9(later, new Date(NOW_Q9.getTime() + 25 * 3600_000)).map((a) => a.id), ['receivable-id-1', 'receivable-id-3']);
+  });
+
+  it('chips and subtitles say the status in words', () => {
+    const ctx = makeCtx();
+    let s = world();
+    const chip = (id: string) => recvUi.receivableChip(s, s.receivables.find((r) => r.id === id)!, '2026-10-20');
+    assert.deepEqual(chip('id-1'), { label: 'متأخر', tone: 'attention' });
+    assert.deepEqual(chip('id-2'), { label: 'مستنيه', tone: 'neutral' });
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-2', accountId: 'S1', amount: 100, date: '2026-10-18' }, ctx));
+    assert.deepEqual(chip('id-2'), { label: 'اتحصّل جزء', tone: 'neutral' });
+    assert.match(recvUi.receivableSubtitle(s, s.receivables[1]), /^حاجة تانية · مستحق .*\nاتحصّل .*100.* من .*300/);
+    s = apply(s, ops.collectReceivable(s, { receivableId: 'id-2', accountId: 'S1', amount: 200, date: '2026-10-19' }, ctx));
+    assert.deepEqual(chip('id-2'), { label: 'اتحصّل', tone: 'ok' });
+    s = apply(s, ops.writeOffReceivable(s, 'id-3', ctx));
+    assert.deepEqual(chip('id-3'), { label: 'اتشطب', tone: 'neutral' });
+    assert.equal(recvUi.forMonthLabel('2026-09'), `عن شهر ${formatMonthLabel('2026-09')}`);
+    assert.ok(recvUi.receivableSubtitle(s, s.receivables[0]).startsWith(`مرتب · عن شهر ${formatMonthLabel('2026-09')} · مستحق`));
+    // Still owed first (by due date), then the closed ones.
+    const { open, closed } = recvUi.splitReceivables(s);
+    assert.deepEqual(open.map((r) => r.id), ['id-1']);
+    assert.deepEqual(closed.map((r) => r.id).sort(), ['id-2', 'id-3']);
+  });
+
+  it('collect sheet: the account helper names the currency; Q3 blocks more than what is left and explains the workaround', () => {
+    const s = world();
+    const r = s.receivables[0];
+    assert.equal(recvUi.collectAccountsHelper('SAR'), 'الحسابات المعروضة: حسابات بالريال فقط');
+    assert.equal(recvUi.collectAccountsHelper('EGP'), 'الحسابات المعروضة: حسابات بالجنيه فقط');
+    assert.match(recvUi.CROSS_CURRENCY_NOTE, /اشطب المستحق وسجّل الدخل عادي/);
+    assert.match(recvUi.noAccountNote('USD'), /^مفيش حساب بالدولار/);
+    const over = recvUi.collectHint(s, r, 1000.01);
+    assert.equal(over.blocked, true);
+    assert.match(over.hint.text, /أكتر من الباقي .*سجّل الزيادة كدخل منفصل/);
+    assert.deepEqual([recvUi.collectHint(s, r, 1000).blocked, recvUi.collectHint(s, r, null).blocked], [false, false]);
+    assert.match(recvUi.collectHint(s, r, 400).hint.text, /هيفضل باقي .*600/);
+  });
+
+  it('new-receivable defaults: last month, the currency of the last salary’s account; Q8 offer only with something to propose', () => {
+    const s = world();
+    assert.deepEqual(recvUi.receivableDefaults(s, NOW_Q9), { forMonth: '2026-09', currency: 'EGP' });
+    const paidInSar = apply(s, ops.addTransaction(s, { type: 'income', amount: 10, currency: 'SAR', accountId: 'S1', categoryId: 'cat-income-salary', date: '2026-10-01' }, makeCtx()));
+    assert.equal(recvUi.receivableDefaults(paidInSar, NOW_Q9).currency, 'SAR');
+    assert.equal(recvUi.shouldOfferRefill([]), false);
+    assert.equal(recvUi.shouldOfferRefill([{ fundId: 'F1', amount: 0.001, currency: 'EGP' }]), false);
+    assert.equal(recvUi.shouldOfferRefill(sel.receivableRefillSuggestion(s, 'E1', 400, NOW_Q9)), true);
+    assert.equal(recvUi.amountText(1234.5), '1234.5');
   });
 });

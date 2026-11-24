@@ -130,6 +130,14 @@ interface FinanceActions {
   updateLiability: (liability: ops.Editable<Liability>) => void;
   deleteLiability: (id: string) => void;
 
+  // Receivables (data v9): money owed to the user. Only collecting touches an account (an income, through the gate).
+  addReceivable: (input: ops.NewReceivable) => void;
+  updateReceivable: (edit: ops.ReceivableEdit) => void;
+  deleteReceivable: (id: string) => void;
+  writeOffReceivable: (id: string) => void;
+  reopenReceivable: (id: string) => void;
+  collectReceivable: (input: ops.ReceivableCollection, options?: OpOptions) => void;
+
   // `linkTransactionId`: the transaction a rule is being made from ("خليها متكررة").
   addRecurringRule: (input: ops.NewRecurringRule, linkTransactionId?: string) => void;
   updateRecurringRule: (rule: ops.Editable<RecurringRule>) => void;
@@ -269,6 +277,13 @@ export const useFinanceStore = create<FinanceStore>()(
       addLiability: (input) => set(ops.addLiability(get(), input, ctx)),
       updateLiability: (liability) => set(ops.updateLiability(get(), liability, ctx)),
       deleteLiability: (id) => set(ops.deleteLiability(get(), id, ctx)),
+
+      addReceivable: (input) => set(ops.addReceivable(get(), input, ctx)),
+      updateReceivable: (edit) => set(ops.updateReceivable(get(), edit, ctx)),
+      deleteReceivable: (id) => set(ops.deleteReceivable(get(), id, ctx)),
+      writeOffReceivable: (id) => set(ops.writeOffReceivable(get(), id, ctx)),
+      reopenReceivable: (id) => set(ops.reopenReceivable(get(), id, ctx)),
+      collectReceivable: (input, options) => set(ops.collectReceivable(get(), input, ctx, options)),
 
       addRecurringRule: (input, linkTransactionId) => set(ops.addRecurringRule(get(), input, ctx, linkTransactionId)),
       updateRecurringRule: (rule) => set(ops.updateRecurringRule(get(), rule, ctx)),

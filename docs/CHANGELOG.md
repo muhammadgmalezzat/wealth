@@ -8,7 +8,7 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ## Unreleased — branch `receivables` · 1.2.0 · data v9 — receivables («غير محصّل»), in progress
 
-> Not released. Steps 1–2 of 4 (data, operations and selectors; nothing visible yet). **This release also ships the stage-1 restore-safety
+> Not released. Steps 1–3 of 4 (data, operations, UI); the docs pass and browser check are next. **This release also ships the stage-1 restore-safety
 > fixes** (the 2026-11-23 entry below).
 >
 > **Release / rollback (when it ships as an OTA to 1.2.0):** export an **encrypted backup right before updating** (it is
@@ -18,7 +18,10 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 > then **restore the encrypted v8 backup** taken before the update (Settings → البيانات → استعادة نسخة).
 
 *For users*
-- لسه مفيش حاجة ظاهرة: تجهيز البيانات والعمليات (تسجيل مستحق، تحصيل جزئي أو كامل، شطب ورجوع، حذف). كل أرقامك زي ما هي بالظبط.
+- جديد في **الأصول**: قسم **مستحقات («غير محصّل»)** للفلوس اللي ليك عند حد ولسه ماوصلتش (مرتب متأخر مثلاً). مش داخلة في الأصول ولا صافي الثروة ولا الصناديق؛ بتشوف الإجمالي بكل عملة وقيمته التقريبية بعملة العرض للمعلومية.
+- **سجّل تحصيل** (كله أو جزء) في حساب بنفس العملة وبيوم ما وصل: بيتسجّل دخل عادي وعليه «عن شهر …». بعدها لو صناديقك ناقصة بتفتحلك **كمّل الصناديق** باقتراح تقدر تعدّله أو تسيبه.
+- **اشطبه** لو مش هيوصل (ومن غير أي فلوس)، و**رجّعه مفتوح** لو غيّرت رأيك. الحذف بس لو مفيش تحصيلات.
+- الرئيسية بتفكّرك لما مرتب يتأخر عن ميعاده («مرتب … لسه ماوصلش» ← **سجّل التحصيل**)، وتقدر تأجّلها بـ «بعدين».
 
 *Technical*
 - Data v9: `Receivable { id, label, kind: salary|other, forMonth?, amount, currency, dueDate?, note?, writtenOffAt?,
@@ -39,6 +42,10 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
   per currency, informational value, Q5 duplicate, Q8 refill suggestion); 10 error codes with Arabic text (amounts in the
   message). The persist hooks moved to `store/persistMigration.ts` (no behaviour change) so the tests run the real code.
   Tests 474 → 491, incl. "a collection equals the same income typed by hand" and the fuzz over receivable operations.
+- Step 3: store actions; Assets «مستحقات» section; `ReceivableSheet`, `CollectSheet` (same-currency accounts, Q2 / Q3 notes,
+  then the Q8 refill through `AssignSheet`'s new prefill props); collection chips and type / currency lock in
+  `TransactionRow` / `TransactionSheet`; Next Best Action `receivable-<id>` (rule 4, dismissible) → Home opens `CollectSheet`;
+  pure helpers in `components/assets/receivablesUi.ts`. Tests 491 → 497. Web export builds.
 
 ---
 
