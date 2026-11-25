@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { fundPercent } from '@/components/funds/fundsUi';
+import { goalFigures, goalSpentLine } from '@/components/funds/goalsUi';
 import { FUND_STATUS, fundStatusSentence } from '@/components/funds/labels';
 import { AppText } from '@/components/ui/AppText';
 import { Card } from '@/components/ui/Card';
@@ -10,7 +11,6 @@ import { ProgressBar } from '@/components/ui/ProgressBar';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { opacity, space } from '@/constants/theme';
 import {
-  fundCurrent,
   fundDueDate,
   fundLinkedValue,
   fundProgress,
@@ -31,7 +31,9 @@ interface FundCardProps {
 export function FundCard({ fund, state, onPress }: FundCardProps) {
   const status = fundStatus(state, fund.id);
   const chip = FUND_STATUS[status];
-  const current = fundCurrent(state, fund.id);
+  // A goal counts what it already spent on its purpose toward the target (held + spent).
+  const { shown: current } = goalFigures(state, fund);
+  const spentLine = goalSpentLine(state, fund);
   const progress = fundProgress(state, fund.id);
   // Capped at 100% ("تخطيت الهدف" past the target).
   const pct = fundPercent(progress);
@@ -64,6 +66,12 @@ export function FundCard({ fund, state, onPress }: FundCardProps) {
             من {formatMoney(fund.targetAmount, fund.currency)}
           </AppText>
         </View>
+
+        {spentLine && (
+          <AppText variant="caption" color="textSecondary" style={styles.percent}>
+            {spentLine}
+          </AppText>
+        )}
 
         <ProgressBar
           progress={progress}

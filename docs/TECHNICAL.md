@@ -198,7 +198,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencyRegistry.ts, countries.ts, currencies.ts (names, v7-shaped DEFAULT_RATES for the seeds), market.ts
-tests/logic.test.ts         529 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         538 tests over store/*, utils/* and the pure UI helpers
 tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
@@ -1197,6 +1197,22 @@ Spending from a fund (FUND_SPEND_AND_GOALS_DESIGN.md step 1; data unchanged, sti
   payments included; their `nextDueDate` is not moved back. `cover` movements are untouched by delete (the Q4 offer).
 - `paySinkingFund` uses the same spend stage (same movement: min(payment, the fund's reservation on the paying account),
   note «اتدفعت: …»).
+- **UI (step 4).** `TransactionSheet`: «من صندوق:» chips (`goalsUi.spendChoices`: funds holding money on the account,
+  shown even when free money is enough, AC-1) with the live line (`spendLine`); a new expense passes
+  `options.spend = [planSpend…]`; an edit that keeps the fund and the account passes nothing (the store re-applies), any
+  change passes it explicitly (`[]` = «بدون»); measured with the expense's own spending given back (`withoutSpends`). The
+  delete confirmation names the fund(s) the money goes back to (and that an achieved goal stays achieved).
+  `TransactionRow`: «من صندوق: …» chip. `CoverRequestSheet`: a cover shortfall carrying `expense` becomes «تدفعه منين؟»
+  — two radio cards, none selected (Q1), «تأكيد» disabled until a valid choice; «من صندوق» = per-fund amounts prefilled by
+  `defaultExpensePicks` (saved as `spend`), «من الفلوس الحرة الأول» = tick funds, exactly the shortfall (`coverPicks`, saved as
+  `cover`); `expenseSplit` validates and `splitProblemText` explains; other shortfalls keep the old cards. `AchieveSheet`
+  «مبروك! 🎉» (`achieveSummary`): leftover per account, release vs keep with no default (AC-4). Fund detail: «تم الهدف 🎉»
+  (primary once reached; opened by `?achieve=1` from the Q8 nudge), achieved state (chip «اتحقق …», release leftover via
+  `withdrawMany`, move it out via `MoveMoneySheet` move mode, «رجّعه هدف مفتوح»), figures «اتحط فيه» / «اتصرف منه»
+  (Q6), «اتصرف على» (`fundPurchases`). `FundCard` and the hero show held + spent for goals with «اتصرف منه X · لسه فيه Y».
+  Funds tab: collapsed «أهداف اتحققت (n)» (`achievedLine`). `MoveMoneySheet` never offers achieved goals as targets and
+  has no «إضافة» for one. `fundsSummary` «إجمالي المحجوز» includes achieved goals' leftovers. Store actions
+  `achieveFund`, `reopenFund`.
 - **Goals achieved (step 3).** `achieveFund(id, { releaseLeftover })`: goals only (`FUND_NOT_A_GOAL`); sets `achievedAt`
   (twice = `{}`); with `releaseLeftover` its remaining reservations are released ('release', every account) in the same
   patch, never otherwise (AC-4). `reopenFund(id)` clears it (released money is not taken back). Guards (INV-13,
@@ -1334,6 +1350,13 @@ All of these take an optional `to` (default the reporting currency) and round ea
 - «غير محصّل»: `openReceivablesByCurrency` (open + partial remaining per currency) and `openReceivablesValue(to)` (the same at **today's** rates; informational, never added to money).
 - `duplicateSalaryReceivable` (Q5 warning: same trimmed label + month), `receivableRefillSuggestion(accountId, collected)` (Q8: `suggestAllocationIn` over min(collected, the account's available) — funds below target only, by priority, each capped by its suggested monthly amount).
 - No money selector reads `receivables` (tested: net worth, liquid, unassigned, month summary, safe-to-spend, the v8 report).
+
+### Goal progress basis (decided 2026-11-25, step 4)
+- `fundProgressAmount(fund)`: for a **goal**, what it holds + `fundSpent` (its 'spend' movements, i.e. expenses
+  «من صندوق»); a 'cover' (its money used for another expense) and releases are not counted and lower it. Emergency and
+  sinking funds: what they hold (`fundCurrent`). `fundProgress`, `fundRequiredMonthly`, the month pace behind
+  `fundStatus` / `fundMonthShortfall`, `fundSuggestedMonthly`, `fundNextStep`, the analytics projection's remaining and the
+  Q8 nudge all use it.
 
 ### Fund metrics and achieved goals (`store/selectors.ts`, step 3)
 - `fundsByPriority` now excludes **achieved** goals as well as archived funds, so every suggestion, picker, plan
@@ -1527,6 +1550,8 @@ rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previ
 series by location and estimated points, money map, runway, fund projections, every insight trigger and the
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
+
+Fund-spending suites (step 4): the goal progress basis (a purchase keeps progress, a partial purchase changes nothing, a cover lowers it and raises the requirement, emergency and sinking unchanged, the nudge / analytics / next-step sentence on the same basis) and the UI helpers (picker choices and live lines, edits measured without their own spending, chip and delete names, problem texts, cover picks, goal figures and spent line, the achieve summary, the achieved row, the reserved total keeping leftovers). A web walkthrough on synthetic data covered the tablet case, both cards of «تدفعه منين؟», delete giving the money back, «تم الهدف» from the nudge, keep / release, «أهداف اتحققت» and reopen at 360 px.
 
 Fund-spending suites (step 3): «تم الهدف» (goals only, twice = once, keep vs release in one patch), AC-2 (reaching the target never achieves; the Q8 nudge, its counting of spending, dismissal, gone once achieved), AC-3 reopen, INV-13 guards with the state unchanged and everything still allowed (release, reallocate out, smaller allocation, details, spending the leftover, follow, cover candidate), AC-5, the two restorations, INV-13 itself, rule-4 exclusions (suggestions, plan suggestions, refill, nudges, Home, analytics) while history / totals / backups keep it, Q6 (the three metrics, by month, at their own rates; spending no longer lowers «اتحوّش» or the plan's allocated), AC-9 on every write path, error messages; the D4 fuzz also achieves (keep / release) and reopens goals and asserts INV-13 after every step and that no step adds new money to a goal that was already achieved.
 

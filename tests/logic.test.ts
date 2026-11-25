@@ -113,6 +113,7 @@ import { errorMessage } from '@/utils/errorMessages';
 import { currencyNameAr } from '@/constants/currencies';
 import { formatCurrency, formatDayLabel, formatMonthLabel, formatPercent, moreThingsPhrase, timeAgoPhrase } from '@/utils/formatters';
 import * as recvUi from '@/components/assets/receivablesUi';
+import * as goalsUi from '@/components/funds/goalsUi';
 import { parseAmount } from '@/utils/parseAmount';
 import * as priceCalc from '@/utils/prices/calc';
 import * as prices from '@/utils/prices/fetchPrices';
@@ -8628,5 +8629,127 @@ describe('fund spending (step 3): goals achieved, the three fund metrics, INV-13
   it('error messages', () => {
     assert.equal(errorMessage(new FinanceValidationError('FUND_ACHIEVED')), 'الهدف ده اتحقق؛ رجّعه هدف مفتوح الأول');
     assert.equal(errorMessage(new FinanceValidationError('FUND_NOT_A_GOAL')), '«تم الهدف» للأهداف بس');
+  });
+});
+
+// --- Goal progress basis (decided 2026-11-25): goals count what they spent on their purpose ------------------------
+
+describe('fund spending (step 4): goal progress counts reserved + spent; a cover lowers it; emergency and sinking unchanged', () => {
+  // Made-up numbers: A 20,000; goal T (6,000 target, due March) and goal C hold 6,000 / 3,000; E (emergency) 5,000;
+  // S (sinking, 1,200 a year) 1,200.
+  const NOV = new Date(2026, 10, 26, 12);
+  const world = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [strictAccount('A', 'EGP', 20000)],
+    funds: [
+      fund({ id: 'T', priority: 1, targetAmount: 6000, deadline: '2027-03-31' }),
+      fund({ id: 'C', priority: 4, targetAmount: 6000, deadline: '2027-03-31' }),
+      fund({ id: 'E', priority: 2, targetAmount: 30000, type: 'emergency', monthlyContribution: 2000 }),
+      fund({ id: 'S', priority: 3, targetAmount: 1200, type: 'sinking', frequency: 'yearly', nextDueDate: '2026-12-10' }),
+    ],
+    reservationMovements: [resv('rt', 'T', 'A', 6000, '2026-10-05'), resv('rc', 'C', 'A', 3000, '2026-10-05'), resv('re', 'E', 'A', 5000, '2026-10-05'), resv('rs', 'S', 'A', 1200, '2026-10-05')],
+  });
+  const ctx = () => ({ newId: (() => { let n = 0; return () => `g-${++n}`; })(), now: () => NOV });
+  const exp = (amount: number): ops.NewIncomeExpense => ({ type: 'expense', amount, currency: 'EGP', accountId: 'A', categoryId: 'cat-essentials-bills', date: '2026-11-20' });
+  const spend = (s: FinanceState, fundId: string, amount: number) => apply(s, ops.addTransaction(s, exp(amount), ctx(), { spend: [{ fundId, accountId: 'A', amount }] }));
+
+  it('a purchase «من صندوق» keeps a goal’s progress: 100%, nothing more required, ahead (it does not look unstarted)', () => {
+    const s = spend(world(), 'T', 6000);
+    assert.equal(sel.fundCurrent(s, 'T'), 0, 'it holds nothing now…');
+    assert.equal(sel.fundProgressAmount(s, 'T'), 6000, '…but its purpose was paid');
+    assert.deepEqual([sel.fundProgress(s, 'T'), sel.fundRequiredMonthly(s, 'T', NOV), sel.fundStatus(s, 'T', NOV), sel.fundSuggestedMonthly(s, 'T', NOV)], [1, 0, 'ahead', 0]);
+    assert.equal(nba.allActions(s, NOV).some((a) => a.id === 'behind-T'), false);
+    // A partial purchase: 2,000 spent + 4,000 still reserved = the same progress as before buying.
+    const part = spend(world(), 'T', 2000);
+    assert.equal(sel.fundProgress(part, 'T'), sel.fundProgress(world(), 'T'));
+  });
+
+  it('a cover (the goal’s money used for something else) does NOT count: it lowers progress and raises what is required', () => {
+    const before = world();
+    // Free money is 20,000 − 15,200 = 4,800, so a 5,800 expense needs exactly 1,000 from C.
+    const s = apply(before, ops.addTransaction(before, exp(5800), ctx(), { cover: [{ fundId: 'C', accountId: 'A', amount: 1000 }] }));
+    assert.equal(sel.fundProgressAmount(s, 'C'), 2000);
+    assert.ok(sel.fundProgress(s, 'C') < sel.fundProgress(before, 'C'));
+    assert.ok(sel.fundRequiredMonthly(s, 'C', NOV)! > sel.fundRequiredMonthly(before, 'C', NOV)!);
+    assert.equal(sel.fundSpent(s, 'C'), 0);
+  });
+
+  it('emergency and sinking funds keep the holdings-only basis (spending lowers them as before)', () => {
+    const e = spend(world(), 'E', 1000);
+    assert.deepEqual([sel.fundProgressAmount(e, 'E'), sel.fundProgress(e, 'E')], [4000, 4000 / 30000]);
+    const paid = apply(world(), ops.paySinkingFund(world(), { fundId: 'S', accountId: 'A', categoryId: 'cat-essentials-bills', amount: 1200, date: '2026-11-20' }, ctx()));
+    assert.deepEqual([sel.fundProgressAmount(paid, 'S'), sel.fundProgress(paid, 'S')], [0, 0], 'a new cycle starts');
+  });
+
+  it('the Q8 nudge and the analytics projection use the same basis', () => {
+    const s = spend(world(), 'T', 6000);
+    assert.ok(nba.allActions(s, NOV).some((a) => a.id === 'goal-reached-T'));
+    assert.equal(analytics.fundsProjection(s, NOV).find((p) => p.fundId === 'T')!.status, 'completed');
+    assert.equal(fundsUi.fundNextStep(s, s.funds[0], NOV).text, 'وصلت للهدف.');
+  });
+});
+
+describe('fund spending (step 4): UI helpers for «من صندوق», «تدفعه منين؟», «تم الهدف 🎉» and «أهداف اتحققت»', () => {
+  // Made-up numbers: A 10,000 holds T («تابلت», goal 6,000) 6,000 and O 1,000; B 3,000 holds nothing.
+  const world = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [strictAccount('A', 'EGP', 10000), strictAccount('B', 'EGP', 3000)],
+    funds: [fund({ id: 'T', name: 'تابلت', priority: 1, targetAmount: 6000 }), fund({ id: 'O', name: 'سفر', priority: 2, targetAmount: 5000 })],
+    reservationMovements: [resv('r-t', 'T', 'A', 6000), resv('r-o', 'O', 'A', 1000)],
+  });
+  const exp = (amount: number): ops.NewIncomeExpense => ({ type: 'expense', amount, currency: 'EGP', accountId: 'A', categoryId: 'cat-essentials-bills', date: '2026-10-10' });
+  // Formatted amounts carry direction isolates (U+2066 … U+2069) around them; compare the readable text.
+  const plain = (text: string) => text.replace(/[⁦-⁩‎‏]/g, '');
+
+  it('the picker lists only funds with money on the account; the live line says where the money comes from', () => {
+    const s = world();
+    assert.deepEqual(goalsUi.spendChoices(s, 'A').map((c) => [c.fundId, c.name, c.amount]), [['O', 'سفر', 1000], ['T', 'تابلت', 6000]]);
+    assert.deepEqual(goalsUi.spendChoices(s, 'B'), [], 'no funds there: the picker is hidden');
+    assert.match(plain(goalsUi.spendLine(s, 'T', 'A', 6000, 'EGP')), /^هيتصرف .*6,000 من «تابلت»، وفلوسك الحرة مش هتتلمس\.$/);
+    assert.match(plain(goalsUi.spendLine(s, 'T', 'A', 6500, 'EGP')), /6,000 من «تابلت» \(كل اللي فيه\) و .*500 من الفلوس الحرة\./);
+    assert.match(plain(goalsUi.spendLine(s, 'T', 'B', 100, 'EGP')), /^«تابلت» مالوش فلوس في الحساب ده؛ المصروف هيتدفع من الفلوس الحرة\.$/);
+  });
+
+  it('an edit is measured with its own spending given back; the row chip and the delete line name the fund', () => {
+    const s = apply(world(), ops.addTransaction(world(), exp(6000), makeCtx(), { spend: [{ fundId: 'T', accountId: 'A', amount: 6000 }] }));
+    const tx = s.transactions[0];
+    assert.equal(sel.reservation(s, 'T', 'A'), 0);
+    assert.equal(sel.reservation(goalsUi.withoutSpends(s, tx.id), 'T', 'A'), 6000);
+    assert.equal(goalsUi.withoutSpends(s, undefined), s);
+    assert.deepEqual([goalsUi.spendNames(s, tx), goalsUi.spendTotal(s, tx)], [['تابلت'], 6000]);
+  });
+
+  it('«تدفعه منين؟»: the problem text and the cover picks over the ticked funds', () => {
+    const context = { amount: 6000, freeBefore: 2000, funds: [{ fundId: 'O', amount: 1000 }, { fundId: 'T', amount: 6000 }], minFromFunds: 4000, maxFromFunds: 6000 };
+    assert.match(goalsUi.splitProblemText('BELOW_MIN', context, 'EGP'), /على الأقل/);
+    assert.match(goalsUi.splitProblemText('NOT_EXACT', context, 'EGP'), /بالظبط/);
+    for (const p of ['NOTHING_CHOSEN', 'ABOVE_MAX', 'OVER_FUND', 'NOT_POSITIVE'] as const) assert.match(goalsUi.splitProblemText(p, context, 'EGP'), /[؀-ۿ]/);
+    assert.deepEqual(goalsUi.coverPicks(context, ['O', 'T']), [{ fundId: 'O', amount: 1000 }, { fundId: 'T', amount: 3000 }]);
+    assert.deepEqual(goalsUi.coverPicks(context, ['T']), [{ fundId: 'T', amount: 4000 }]);
+    assert.deepEqual(goalsUi.coverPicks(context, ['O']), [{ fundId: 'O', amount: 1000 }], 'not enough: the split reports NOT_EXACT');
+  });
+
+  it('a goal shows held + spent; «تم الهدف 🎉» lists target, spent, purchases and the leftover per account', () => {
+    const s = apply(world(), ops.addTransaction(world(), exp(5500), makeCtx(), { spend: [{ fundId: 'T', accountId: 'A', amount: 5500 }] }));
+    const t = s.funds.find((f) => f.id === 'T')!;
+    assert.deepEqual(goalsUi.goalFigures(s, t), { shown: 6000, held: 500, spent: 5500 });
+    assert.match(plain(goalsUi.goalSpentLine(s, t)!), /^اتصرف منه .*5,500 · لسه فيه .*500$/);
+    assert.equal(goalsUi.goalSpentLine(world(), world().funds[0]), null, 'nothing spent: no line');
+    const summary = goalsUi.achieveSummary(s, t);
+    assert.match(plain(summary.targetLine), /^الهدف .*6,000 · اتصرف عليه .*5,500 \(مصروف واحد\)$/);
+    assert.deepEqual(summary.leftover.map((l) => [l.accountId, l.amount]), [['A', 500]]);
+    // Emergency / sinking funds are not goals: what they hold, nothing more.
+    const e = fund({ id: 'E', type: 'emergency' });
+    assert.deepEqual(goalsUi.goalFigures({ ...s, funds: [...s.funds, e] }, e), { shown: 0, held: 0, spent: 0 });
+  });
+
+  it('«أهداف اتحققت»: the row line; and «إجمالي المحجوز» still counts an achieved goal’s leftover', () => {
+    const { ctx } = makeClock(new Date('2026-11-20T10:00:00.000Z'));
+    const s0 = apply(world(), ops.addTransaction(world(), exp(5500), ctx, { spend: [{ fundId: 'T', accountId: 'A', amount: 5500 }] }));
+    const s = apply(s0, ops.achieveFund(s0, 'T', { releaseLeftover: false }, ctx));
+    const t = s.funds.find((f) => f.id === 'T')!;
+    assert.match(plain(goalsUi.achievedLine(s, t)), /^اتحقق .* · اتصرف .*5,500 من .*6,000$/);
+    assert.equal(fundsUi.fundsSummary(s, NOW).reservedEGP, 500 + 1000, 'leftover 500 + O 1,000');
+    assert.equal(fundsUi.fundsSummary(s, NOW).count, 1, 'only active funds are counted');
   });
 });

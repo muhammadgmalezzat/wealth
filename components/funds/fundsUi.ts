@@ -2,6 +2,7 @@ import { formatMoney } from '@/components/ui/formatMoney';
 import {
   fundCurrent,
   fundDueDate,
+  fundProgressAmount,
   fundRequiredMonthly,
   fundsByPriority,
   fundStatus,
@@ -25,8 +26,10 @@ export function fundsSummary(state: FinanceState, now: Date = new Date()): Funds
   const funds = fundsByPriority(state);
   let reservedEGP = 0;
   let requiredEGP = 0;
+  // «إجمالي المحجوز» is every fund's money, achieved goals' leftovers included (it is still reserved); what is
+  // required and the count are about active funds only.
+  for (const fund of state.funds.filter((f) => !f.archived)) reservedEGP += toEGP(fundCurrent(state, fund.id), fund.currency, rates);
   for (const fund of funds) {
-    reservedEGP += toEGP(fundCurrent(state, fund.id), fund.currency, rates);
     const required = fundRequiredMonthly(state, fund.id, now);
     if (required !== null) requiredEGP += toEGP(required, fund.currency, rates);
   }
@@ -42,8 +45,8 @@ const EPSILON = 0.005;
 
 // The one sentence under a fund's progress on its detail screen.
 export function fundNextStep(state: FinanceState, fund: Fund, now: Date = new Date()): NextStep {
-  const current = fundCurrent(state, fund.id);
-  const remaining = fund.targetAmount - current;
+  // Goals count what they already spent on their purpose toward the target (fundProgressAmount).
+  const remaining = fund.targetAmount - fundProgressAmount(state, fund.id);
   if (remaining <= EPSILON) return { tone: 'ok', text: 'وصلت للهدف.' };
   if (!fundDueDate(fund)) {
     return { tone: 'neutral', text: `لسه محتاج ${formatMoney(remaining, fund.currency)} للوصول للهدف.` };

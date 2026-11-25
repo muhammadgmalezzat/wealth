@@ -518,12 +518,24 @@ export function fundCurrent(state: State, fundId: string): number {
   return roundIn(fundAllocated(state, fundId) + fundLinkedValue(state, fundId), fund?.currency ?? 'EGP');
 }
 
+// What counts toward the target (decided 2026-11-25, FUND_SPEND §3.5): for a GOAL, what it still holds + what it already
+// spent on its purpose ('spend', «من صندوق»), so buying the thing never makes the goal look unstarted; money taken from
+// it for something else ('cover') or released does not count and lowers it. Emergency and sinking funds: what they hold
+// now (a sinking payment starts a new cycle). Fund currency. Progress, the monthly requirement, the month's pace (status)
+// and the suggestion all read this; the Q8 nudge uses the same basis.
+export function fundProgressAmount(state: State, fundId: string): number {
+  const fund = findFund(state, fundId);
+  if (!fund) return 0;
+  const current = fundCurrent(state, fundId);
+  return fund.type === 'goal' ? roundIn(current + fundSpent(state, fundId), fund.currency) : current;
+}
+
 // 0..∞ (can exceed 1 when over-funded). A non-positive target counts as complete.
 export function fundProgress(state: State, fundId: string): number {
   const fund = findFund(state, fundId);
   if (!fund) return 0;
   if (fund.targetAmount <= 0) return 1;
-  return Math.max(0, fundCurrent(state, fundId) / fund.targetAmount);
+  return Math.max(0, fundProgressAmount(state, fundId) / fund.targetAmount);
 }
 
 // A fund movement in `currency` as it was worth when made (for history: plan progress, the
@@ -561,7 +573,7 @@ export function fundRequiredMonthly(state: State, fundId: string, now: Date = ne
   const fund = findFund(state, fundId);
   const due = fund && fundDueDate(fund);
   if (!fund || !due) return null;
-  const remaining = Math.max(0, fund.targetAmount - fundCurrent(state, fundId));
+  const remaining = Math.max(0, fund.targetAmount - fundProgressAmount(state, fundId));
   return remaining / monthsUntil(due, now);
 }
 
@@ -617,7 +629,7 @@ function monthPace(state: State, fundId: string, now: Date): MonthPace | null {
       .map((m) => movementValueInFund(state, m)),
     fund.currency
   );
-  const currentAtMonthStart = fundCurrent(state, fundId) - allocatedThisMonth;
+  const currentAtMonthStart = fundProgressAmount(state, fundId) - allocatedThisMonth;
   const remainingAtMonthStart = Math.max(0, fund.targetAmount - currentAtMonthStart);
   return { required: remainingAtMonthStart / monthsUntil(due, now), allocatedThisMonth };
 }
@@ -848,7 +860,7 @@ export function withdrawalPlan(
 export function fundSuggestedMonthly(state: State, fundId: string, now: Date = new Date()): number {
   const fund = findFund(state, fundId);
   if (!fund) return 0;
-  const remaining = Math.max(0, fund.targetAmount - fundCurrent(state, fundId));
+  const remaining = Math.max(0, fund.targetAmount - fundProgressAmount(state, fundId));
   const monthly = fundRequiredMonthly(state, fundId, now) ?? fund.monthlyContribution ?? 0;
   return Math.min(monthly, remaining);
 }

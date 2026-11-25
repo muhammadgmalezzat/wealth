@@ -114,6 +114,9 @@ interface FinanceActions {
   editFund: (fundId: string, edit: ops.FundEdit) => void;
   allocateMany: (allocations: FundAmount[], note?: string) => void;
   withdrawMany: (withdrawals: FundAmount[], note?: string) => void;
+  // «تم الهدف 🎉» (goals): keep or release the leftover, chosen by the user; and reopening.
+  achieveFund: (fundId: string, options: { releaseLeftover: boolean }) => void;
+  reopenFund: (fundId: string) => void;
   paySinkingFund: (payment: ops.SinkingPayment, options?: OpOptions) => void;
   // `currency`: the currency of `amount` (the fund's when omitted).
   allocateToFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode) => void;
@@ -261,6 +264,8 @@ export const useFinanceStore = create<FinanceStore>()(
       editFund: (fundId, edit) => set(ops.editFund(get(), fundId, edit, ctx)),
       allocateMany: (allocations, note) => set(ops.allocateMany(get(), allocations, note, ctx)),
       withdrawMany: (withdrawals, note) => set(ops.withdrawMany(get(), withdrawals, note, ctx)),
+      achieveFund: (fundId, options) => set(ops.achieveFund(get(), fundId, options, ctx)),
+      reopenFund: (fundId) => set(ops.reopenFund(get(), fundId, ctx)),
       paySinkingFund: (payment, options) => set(ops.paySinkingFund(get(), payment, ctx, options)),
       allocateToFund: (fundId, amount, note, currency) =>
         set(ops.allocateToFund(get(), fundId, amount, note, ctx, currency)),

@@ -46,7 +46,8 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
   const held = currencyList(state).filter((c) => cash[c] > 0.005);
   // Withdrawing is only possible in a currency the fund holds.
   const options: readonly CurrencyCode[] = mode === 'allocate' ? currencyList(state) : held.length > 0 ? held : [fund.currency];
-  const otherFunds = state.funds.filter((f) => f.id !== fund.id);
+  // Achieved goals never receive (INV-13); an achieved goal itself can only give back or move out (AC-4).
+  const otherFunds = state.funds.filter((f) => f.id !== fund.id && !f.achievedAt && !f.archived);
   const target = otherFunds.find((f) => f.id === targetId) ?? otherFunds[0];
   const currency = options.includes(picked) ? picked : options[0];
 
@@ -93,7 +94,7 @@ export function MoveMoneySheet({ fund, mode: initialMode, onClose }: MoveMoneySh
     <FormSheet visible title={fund.name} onCancel={onClose} onSave={handleSave}>
       <Segment<Mode>
         options={[
-          { label: 'إضافة', value: 'allocate' },
+          ...(fund.achievedAt ? [] : [{ label: 'إضافة', value: 'allocate' as const }]),
           { label: 'سحب', value: 'withdraw' },
           ...(otherFunds.length > 0 ? [{ label: 'نقل لصندوق', value: 'move' as const }] : []),
         ]}

@@ -3,7 +3,11 @@ import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useState, type ComponentProps } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
+import { AchieveSheet } from '@/components/funds/AchieveSheet';
 import { FundSheet } from '@/components/funds/FundSheet';
+import { goalFigures, goalSpentLine, leftoverByAccount } from '@/components/funds/goalsUi';
+import { TransactionRow } from '@/components/transactions/TransactionRow';
+import { TransactionSheet } from '@/components/transactions/TransactionSheet';
 import { fundNextStep, fundPercent, movementKind } from '@/components/funds/fundsUi';
 import { FREQUENCY_LABELS, FUND_STATUS, FUND_TYPE_LABELS } from '@/components/funds/labels';
 import { MoveMoneySheet } from '@/components/funds/MoveMoneySheet';
@@ -26,11 +30,13 @@ import {
   currencyList,
   fundAllocated,
   fundCashByCurrency,
-  fundCurrent,
+  fundContributed,
   fundDueDate,
   fundLinkedValue,
   fundProgress,
+  fundPurchases,
   fundRequiredMonthly,
+  fundSpent,
   fundStatus,
   fundMovementRows,
   holdingValue,
@@ -40,8 +46,10 @@ import {
 import type { Fund } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { monthsUntil } from '@/utils/dates';
+import { confirmAction } from '@/utils/dialogs';
+import { runAction } from '@/utils/runAction';
 
-type SheetKind = 'edit' | 'allocate' | 'withdraw' | 'pay' | null;
+type SheetKind = 'edit' | 'allocate' | 'withdraw' | 'pay' | 'move' | 'achieve' | null;
 
 // "فاضل شهر" · "فاضل شهرين" · "فاضل 3 شهور" · "فاضل 14 شهر".
 const monthsLeftPhrase = (n: number) =>
@@ -56,10 +64,16 @@ const TYPE_ICONS: Record<Fund['type'], ComponentProps<typeof MaterialIcons>['nam
 // Progress and the next action first, history last: hero · next step · actions · facts · linked
 // gold · movements. "تعديل" in the header opens FundSheet (edit / delete).
 export default function FundDetailScreen() {
-  // Home's next actions link here with ?allocate=1 to open the allocate sheet right away.
-  const { id, allocate } = useLocalSearchParams<{ id: string; allocate?: string }>();
+  // Home's next actions link here with ?allocate=1 to open the allocate sheet right away, and the Q8 nudge with
+  // ?achieve=1 to open «تم الهدف 🎉» (an active goal only).
+  const { id, allocate, achieve } = useLocalSearchParams<{ id: string; allocate?: string; achieve?: string }>();
   const state = useFinanceStore();
-  const [sheet, setSheet] = useState<SheetKind>(allocate === '1' ? 'allocate' : null);
+  const opening = state.funds.find((f) => f.id === id);
+  const [sheet, setSheet] = useState<SheetKind>(
+    allocate === '1' ? 'allocate' : achieve === '1' && opening?.type === 'goal' && !opening.achievedAt ? 'achieve' : null
+  );
+  // A purchase opened from «اتصرف على».
+  const [txId, setTxId] = useState<string | null>(null);
 
   if (!state.hasHydrated) return <LoadingView />;
 
@@ -78,8 +92,15 @@ export default function FundDetailScreen() {
   const now = new Date();
   const status = fundStatus(state, fund.id, now);
   const chip = FUND_STATUS[status];
-  const current = fundCurrent(state, fund.id);
+  // A goal shows what counts toward its target: what it holds + what it already spent on its purpose.
+  const { shown: current } = goalFigures(state, fund);
+  const spentLine = goalSpentLine(state, fund);
   const progress = fundProgress(state, fund.id);
+  const goal = fund.type === 'goal';
+  const achieved = !!fund.achievedAt;
+  const leftover = leftoverByAccount(state, fund.id);
+  const purchases = goal ? fundPurchases(state, fund.id) : [];
+  const openTx = state.transactions.find((t) => t.id === txId);
   const pct = fundPercent(progress);
   const linkedValue = fundLinkedValue(state, fund.id);
   const due = fundDueDate(fund);
@@ -100,14 +121,35 @@ export default function FundDetailScreen() {
   const cashBreakdown = heldCurrencies.length > 1 ? heldCurrencies.map((c) => formatMoney(cash[c], c)).join(' + ') : null;
 
   const facts: { label: string; value: string }[] = [
-    requiredMonthly !== null ? { label: 'مطلوب شهرياً', value: formatMoney(requiredMonthly, fund.currency) } : null,
-    { label: 'نقداً في الصندوق', value: formatMoney(fundAllocated(state, fund.id), fund.currency) },
+    requiredMonthly !== null && !achieved ? { label: 'مطلوب شهرياً', value: formatMoney(requiredMonthly, fund.currency) } : null,
+    { label: achieved ? 'لسه محجوز' : 'نقداً في الصندوق', value: formatMoney(fundAllocated(state, fund.id), fund.currency) },
+    // Q6: what was put in and what was spent are their own figures (a goal's spending is not un-saving).
+    goal ? { label: 'اتحط فيه', value: formatMoney(fundContributed(state, fund.id), fund.currency) } : null,
+    goal && fundSpent(state, fund.id) > 0.005 ? { label: 'اتصرف منه', value: formatMoney(fundSpent(state, fund.id), fund.currency) } : null,
     // Cash set aside in more than one currency: each in its own currency.
     cashBreakdown ? { label: 'بالعملات', value: cashBreakdown } : null,
     linkedValue > 0 ? { label: 'قيمة الذهب المربوط', value: formatMoney(linkedValue, fund.currency) } : null,
     due ? { label: sinking ? 'الاستحقاق القادم' : 'الموعد', value: formatDateAr(due) } : null,
     sinking && fund.frequency ? { label: 'التكرار', value: FREQUENCY_LABELS[fund.frequency] } : null,
   ].filter((f): f is { label: string; value: string } => f !== null);
+
+  // AC-4: the leftover of an achieved goal back to free money (every currency it is held in), asked first.
+  const releaseLeftover = () =>
+    confirmAction({
+      title: 'رجّع الباقي',
+      message: `هيرجع ${leftover.map((l) => formatMoney(l.amount, l.currency)).join(' + ')} للفلوس الحرة. الهدف هيفضل متحقق.`,
+      confirmText: 'رجّع',
+      cancelText: 'إلغاء',
+      onConfirm: () => {
+        runAction('تعذّر الحفظ', () =>
+          state.withdrawMany(
+            heldCurrencies.map((c) => ({ fundId: fund.id, amount: cash[c], currency: c })),
+            'رجوع الباقي بعد تحقيق الهدف'
+          )
+        );
+      },
+    });
+  const reopen = () => runAction('تعذّر الحفظ', () => state.reopenFund(fund.id));
 
   return (
     <Screen scroll edges={['bottom']} contentStyle={styles.content}>
@@ -147,9 +189,18 @@ export default function FundDetailScreen() {
           tone={status === 'behind' ? 'attention' : 'normal'}
           goldPortion={linkedValue > 0 && fund.targetAmount > 0 ? linkedValue / fund.targetAmount : 0}
         />
+        {spentLine && (
+          <AppText variant="secondary" color="textSecondary" style={styles.tabular}>
+            {spentLine}
+          </AppText>
+        )}
         <View style={styles.statusRow}>
           <View style={styles.chips}>
-            <StatusChip label={chip.label} tone={chip.tone} />
+            {achieved ? (
+              <StatusChip label={`اتحقق ${formatDateAr(fund.achievedAt!, { year: false })}`} tone="ok" icon="celebration" />
+            ) : (
+              <StatusChip label={chip.label} tone={chip.tone} />
+            )}
             {pct.over && <StatusChip label="تخطيت الهدف" tone="ok" />}
           </View>
           <AppText variant="caption" color="textSecondary" style={styles.tabular}>
@@ -169,7 +220,16 @@ export default function FundDetailScreen() {
       </Card>
 
       {/* ── Next step ── */}
-      {step.tone === 'attention' ? (
+      {achieved ? (
+        <Card variant="subtle" style={styles.step}>
+          <MaterialIcons name="celebration" size={20} color={colors.primary700} />
+          <AppText variant="secondary" style={styles.flex}>
+            {leftover.length > 0
+              ? `الهدف اتحقق. لسه محجوز له ${leftover.map((l) => formatMoney(l.amount, l.currency)).join(' + ')}؛ رجّعه للفلوس الحرة أو انقله لصندوق تاني.`
+              : 'الهدف اتحقق. 🎉'}
+          </AppText>
+        </Card>
+      ) : step.tone === 'attention' ? (
         <InsightCard tone="attention" message={step.text} />
       ) : (
         <Card variant="subtle" style={styles.step}>
@@ -186,7 +246,13 @@ export default function FundDetailScreen() {
 
       {/* ── Actions: one primary ── */}
       <View style={styles.actions}>
-        {sinking ? (
+        {achieved ? (
+          <>
+            {leftover.length > 0 && <Button label="رجّع الباقي للفلوس الحرة" block onPress={releaseLeftover} />}
+            {leftover.length > 0 && <Button label="انقل لصندوق تاني" variant="secondary" block onPress={() => setSheet('move')} />}
+            <Button label="رجّعه هدف مفتوح" variant="tertiary" icon="undo" onPress={reopen} />
+          </>
+        ) : sinking ? (
           <>
             <Button label="اتدفعت" block onPress={() => setSheet('pay')} />
             <Button label="إضافة مبلغ" variant="secondary" block onPress={() => setSheet('allocate')} />
@@ -194,11 +260,27 @@ export default function FundDetailScreen() {
           </>
         ) : (
           <>
-            <Button label="إضافة مبلغ" block onPress={() => setSheet('allocate')} />
+            {/* One primary: «تم الهدف 🎉» once a goal reached its target, «إضافة مبلغ» otherwise. */}
+            <Button label="إضافة مبلغ" variant={goal && progress >= 1 ? 'secondary' : 'primary'} block onPress={() => setSheet('allocate')} />
             <Button label="سحب مبلغ" variant="secondary" block onPress={() => setSheet('withdraw')} />
+            {goal && (
+              <Button label="تم الهدف 🎉" variant={progress >= 1 ? 'primary' : 'tertiary'} block={progress >= 1} onPress={() => setSheet('achieve')} />
+            )}
           </>
         )}
       </View>
+
+      {/* ── What the goal paid for (its «من صندوق» expenses) ── */}
+      {purchases.length > 0 && (
+        <View>
+          <SectionHeader title="اتصرف على" />
+          <ListGroup>
+            {purchases.map((tx) => (
+              <TransactionRow key={tx.id} tx={tx} state={state} showDate onPress={() => setTxId(tx.id)} />
+            ))}
+          </ListGroup>
+        </View>
+      )}
 
       {/* ── Facts ── */}
       <ListGroup>
@@ -256,7 +338,7 @@ export default function FundDetailScreen() {
               return (
                 <ListRow
                   key={m.id}
-                  title={kind === 'allocation' ? 'إضافة' : kind === 'payment' ? 'اتدفعت' : 'سحب'}
+                  title={kind === 'allocation' ? 'إضافة' : kind === 'payment' ? (goal ? 'اتصرف' : 'اتدفعت') : 'سحب'}
                   subtitle={[formatDateAr(m.date), kind === 'payment' ? null : m.note].filter(Boolean).join(' · ')}
                   subtitleLines={1}
                   icon={kind === 'allocation' ? 'south-west' : kind === 'payment' ? 'receipt-long' : 'north-east'}
@@ -283,6 +365,9 @@ export default function FundDetailScreen() {
         <MoveMoneySheet fund={fund} mode={sheet} onClose={() => setSheet(null)} />
       )}
       {sheet === 'pay' && <PaySinkingSheet fund={fund} onClose={() => setSheet(null)} />}
+      {sheet === 'move' && <MoveMoneySheet fund={fund} mode="move" onClose={() => setSheet(null)} />}
+      {sheet === 'achieve' && <AchieveSheet fund={fund} onClose={() => setSheet(null)} />}
+      {openTx && <TransactionSheet key={openTx.id} transaction={openTx} onClose={() => setTxId(null)} />}
     </Screen>
   );
 }

@@ -19,7 +19,9 @@ type IconName = ComponentProps<typeof MaterialIcons>['name'];
 
 interface TransactionRowProps {
   tx: Transaction;
-  state: Pick<FinanceState, 'accounts' | 'categories' | 'holdings' | 'rateSnapshots'>;
+  state: Pick<FinanceState, 'accounts' | 'categories' | 'holdings' | 'rateSnapshots'> &
+    // For the «من صندوق: …» chip of an expense paid from a fund (optional: lists that don't pass them show no chip).
+    Partial<Pick<FinanceState, 'reservationMovements' | 'funds'>>;
   onPress: () => void;
   showDate?: boolean;
   /** @deprecated separators come from ListGroup; still accepted. */
@@ -37,6 +39,14 @@ interface Description {
   icon: IconName;
   iconTone: IconTone;
   archivedCategory: boolean;
+}
+
+// «من صندوق: تابلت» on an expense whose money came from a fund («من صندوق», a sinking payment); null otherwise.
+function fromFundChip(state: TransactionRowProps['state'], tx: Transaction): string | null {
+  if (tx.type !== 'expense' || !state.reservationMovements || !state.funds) return null;
+  const ids = [...new Set(state.reservationMovements.filter((m) => m.kind === 'spend' && m.sourceTransactionId === tx.id).map((m) => m.fundId))];
+  if (ids.length === 0) return null;
+  return `من صندوق: ${ids.map((id) => state.funds!.find((f) => f.id === id)?.name.trim() ?? '—').join('، ')}`;
 }
 
 function describe(state: TransactionRowProps['state'], tx: Transaction): Description {
@@ -99,6 +109,7 @@ export function TransactionRow({ tx, state, onPress, showDate = false }: Transac
   const chips = [
     // A receivable's collection: the month it was owed for (cash basis: it counts on its own date).
     tx.type === 'income' && tx.forMonth ? forMonthLabel(tx.forMonth) : null,
+    fromFundChip(state, tx),
     tx.type === 'expense' && tx.oneTime ? 'لمرة واحدة' : null,
     tx.recurringRuleId ? 'متكرر' : null,
     d.archivedCategory ? 'مؤرشف' : null,

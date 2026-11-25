@@ -6,15 +6,19 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased — branch `goals-upgrade` · 1.2.0 · data v9 (no migration) — spending from a fund, steps 1–3 of 5
+## Unreleased — branch `goals-upgrade` · 1.2.0 · data v9 (no migration) — spending from a fund, steps 1–4 of 5
 
-> Not released. Steps 1–3 of FUND_SPEND_AND_GOALS_DESIGN.md (the spend core; what the cover sheet gets for an
-> expense; goals achieved and the fund metrics); the screens come in step 4.
+> Not released. Steps 1–4 of FUND_SPEND_AND_GOALS_DESIGN.md (the spend core; what the cover sheet gets for an
+> expense; goals achieved and the fund metrics; the screens). Step 5 (docs pass + release notes) is next.
 
 *For users*
 - حذف مصروف اتدفع من فلوس صندوق (زي «اتدفعت» لمصاريف دورية) بقى بيرجّع الفلوس للصندوق لوحده، والموعد الجاي مش بيرجع لورا. وتعديل مبلغه بيظبط اللي اتاخد من الصندوق.
 - الصرف من صندوق على اللي كان بيتحوّش له مبقاش بيتحسب كأنك سحبت من التحويش: «اللي اتحوّش» الشهر ده وحالة الصندوق (متأخر / متقدم) بقوا مش بيتأثروا بيه.
 - لما هدف يوصل لمبلغه، الرئيسية بتسألك «وصلت لهدف «…»؟». التطبيق عمره ما بيقفل الهدف لوحده.
+- **من صندوق** في شاشة المصروف: اشتري الحاجة اللي كنت محوّش لها من فلوس الصندوق، وفلوسك الحرة مش بتتلمس.
+- **تدفعه منين؟** بدل «محتاج تغطية» لما المصروف أكبر من فلوسك الحرة: «من صندوق» أو «من الفلوس الحرة الأول»، ومفيش اختيار جاهز.
+- **تم الهدف 🎉** (ترجّع الباقي أو تسيبه)، و**أهداف اتحققت** في الصناديق، و**رجّعه هدف مفتوح**.
+- الهدف اللي اشتريت منه الحاجة بيفضل «وصل» (اللي اتصرف بيتحسب)، والسلفة منه بتقلّله.
 
 *Technical*
 - `OpOptions.spend` (fund money spent on the expense, applied before the cover gate), `planSpend`, `selectors.spendOf`;
@@ -29,6 +33,10 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
   `achieveFund` / `reopenFund`; `FUND_ACHIEVED` / `FUND_NOT_A_GOAL`; INV-13 (`achievedViolations`); `fundsByPriority`
   excludes achieved goals; `achievedFunds`, `fundSpent`, `fundContributed`, `fundPurchases`; Q6: `countsAsSaving` excludes
   'spend'; Next Best Action `goal-reached-<id>` (Q8). Tests 517 → 529 (+ fuzz).
+- Step 4: goal progress basis `fundProgressAmount` (goals: held + spent; covers lower it; emergency / sinking unchanged);
+  UI: «من صندوق» picker, «تدفعه منين؟», `AchieveSheet`, achieved state on the fund screen, «أهداف اتحققت», the fund-spend
+  chip, purchases list, Q6 figures; `fundsSummary` keeps achieved leftovers in «إجمالي المحجوز»; helpers in
+  `components/funds/goalsUi.ts`. Tests 529 → 538. Web export builds.
 
 ---
 

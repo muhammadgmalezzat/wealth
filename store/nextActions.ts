@@ -10,7 +10,7 @@ import {
   fundCurrent,
   fundMonthShortfall,
   fundsByPriority,
-  fundSpent,
+  fundProgressAmount,
   fundStatus,
   receivableOverdue,
   receivableRemaining,
@@ -215,7 +215,7 @@ export function allActions(state: State, now: Date = new Date(), blockedAuto = 0
   // confirm «تم الهدف 🎉»; it never achieves by itself (AC-2). Dismissible.
   for (const fund of fundsByPriority(state)) {
     if (fund.type !== 'goal' || !(fund.targetAmount > 0)) continue;
-    const reached = roundIn(fundCurrent(state, fund.id) + fundSpent(state, fund.id), fund.currency);
+    const reached = fundProgressAmount(state, fund.id);
     if (reached < fund.targetAmount - EPSILON) continue;
     add(4, {
       id: `goal-reached-${fund.id}`,
