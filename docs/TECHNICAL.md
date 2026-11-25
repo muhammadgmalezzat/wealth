@@ -198,7 +198,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencyRegistry.ts, countries.ts, currencies.ts (names, v7-shaped DEFAULT_RATES for the seeds), market.ts
-tests/logic.test.ts         510 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         517 tests over store/*, utils/* and the pure UI helpers
 tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
@@ -1185,7 +1185,9 @@ Spending from a fund (FUND_SPEND_AND_GOALS_DESIGN.md step 1; data unchanged, sti
   movements (`sourceTransactionId` = the expense, the expense's rate snapshot) **before** `settle` measures anything, so
   the fund's own money pays first and free money only the rest; a cover is asked only beyond that. `SPEND_INVALID` when
   the transaction is not an expense, the account differs, an amount is not > 0, a fund would spend more than it holds on
-  that account, or the spends add up to more than the expense. Operations that record no income / expense ignore it.
+  that account, or the spends add up to more than the expense. **Operations that record no expense ignore
+  `options.spend`** (transfers, exchanges, gold purchases, account edits, deletes, `paySinkingFund`, which spends its
+  own fund); an **income** given a spend is still rejected with `SPEND_INVALID`.
   `planSpend(fund, account, amount)` (cover.ts) = min(amount, the fund's reservation there): what «من صندوق» takes.
 - The link is derived (`selectors.spendOf(txId)`), never stored on the transaction. **Edit:** the old spend movements are
   removed (tombstoned) and re-applied — an explicit `options.spend` wins (`[]` = none); otherwise the same fund(s) at
@@ -1194,6 +1196,18 @@ Spending from a fund (FUND_SPEND_AND_GOALS_DESIGN.md step 1; data unchanged, sti
   payments included; their `nextDueDate` is not moved back. `cover` movements are untouched by delete (the Q4 offer).
 - `paySinkingFund` uses the same spend stage (same movement: min(payment, the fund's reservation on the paying account),
   note «اتدفعت: …»).
+- **What the cover sheet gets for an expense (step 2).** `settle(…, context)`: when the operation records or edits an
+  EXPENSE (`addTransaction`, `updateTransaction` of an expense, `confirmOccurrence` of an expense rule), the `'cover'`
+  shortfall on that account carries `expense: ExpenseContext` = `{ amount, freeBefore, funds (lowest priority first),
+  minFromFunds, maxFromFunds }`, measured from the state WITHOUT the expense (an edit: also without its old fund
+  spending). minFromFunds = the shortfall; maxFromFunds = min(expense, what the funds hold there). Gold purchases,
+  income deletes, balance edits, transfers and `paySinkingFund` (which already spends its own fund) carry none, and the
+  'negative' line never does. Pure helpers for the «تدفعه منين؟» sheet (cover.ts): `expenseSplit(context, accountId,
+  currency, choice, picks)` → the options to retry with (`spend` for «من صندوق», `cover` for «من الفلوس الحرة الأول»), the
+  live from-funds / from-free figures and a problem (`NOTHING_CHOSEN` · `BELOW_MIN` · `ABOVE_MAX` · `OVER_FUND` ·
+  `NOT_EXACT` · `NOT_POSITIVE`; no options while there is one). «من صندوق» takes any total within [min, max];
+  «من الفلوس الحرة الأول» exactly the shortfall (the gate's rule). `defaultExpensePicks`: «من صندوق» prefilled only when one
+  fund holds the whole expense; «الفلوس الحرة الأول» = today's proposal. Neither card is chosen by default (Q1).
 
 Receivables (data v9; none of them touches an account, a balance or a reservation, except `collectReceivable`):
 - `addReceivable({ label, kind, forMonth?, amount, currency, dueDate?, note? })`: label trimmed and required; kind
@@ -1486,6 +1500,8 @@ rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previ
 series by location and estimated points, money map, runway, fund projections, every insight trigger and the
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
+
+Fund-spending suites (step 2): the context of an expense shortfall (one fund, several funds, beyond fund + free money, an edited expense), only expense operations carry it, every split rule and problem code, the starting picks of each card, a retry with each card through `runAction` giving the two different results, AC-10 (cancelling changes nothing; a split with a problem sends nothing).
 
 Fund-spending suites (step 1): the tablet case (spend first; without a choice today's 2,000 question; answering «من صندوق» vs today's cover gives different numbers), partial spend, overdraft beyond fund + free, `planSpend`, every `SPEND_INVALID` case with the state unchanged, edits (amount down / up, date / category, another account with and without the fund, explicit «بدون» and fund switch, type change), AC-7 full reversal (all fund, fund + free, free + cover with the Q4 offer, spend + cover + free, sinking payment), the sinking movement unchanged and its delete, a transfer after the purchase, a confirmed recurring expense with a spend and processDue never spending, AC-10 atomicity, INV-12 itself; the D4 fuzz adds expenses «من صندوق» (valid and refused) and edits of them, asserting INV-12 after every step.
 

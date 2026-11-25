@@ -9,7 +9,7 @@ import { priceSourceOf, type PriceFetchResult } from '@/utils/prices/fetchPrices
 import { planIdFor } from './migrations';
 import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
-import { coversOf, followPreview, NeedsCoverError, planRelease, planReserve, planSpend, shortfallsBetween, type CoverSelection, type OpOptions, type Shortfall } from './cover';
+import { coversOf, expenseContext, followPreview, NeedsCoverError, planRelease, planReserve, planSpend, shortfallsBetween, type CoverSelection, type OpOptions, type Shortfall } from './cover';
 import { invariantViolations } from './invariants';
 import { CATEGORY_IDS, feeCategoryId } from './defaultCategories';
 import { snapshotForNow } from './rateSnapshots';
@@ -460,9 +460,27 @@ function addTransactionCore(state: State, raw: NewIncomeExpense, ctx: OpContext)
 // released in the same patch), or it throws NeedsCoverError and applies nothing. Going below zero on an account that
 // does not allow it needs an explicit confirmation too.
 
-function settle(state: State, patch: Patch, ctx: OpContext, options?: OpOptions, sourceTransactionId?: string): Patch {
+// `expense`: the operation records (or edits) an expense of `amount` on `accountId`; `base` is the state without it.
+// A cover shortfall on that account then carries the ExpenseContext, so the sheet can offer «من صندوق» as well as
+// «من الفلوس الحرة الأول» (FUND_SPEND §3.2). Nothing else about the gate changes.
+interface GateContext {
+  expense?: { accountId: string; amount: number; base: State };
+}
+
+function settle(
+  state: State,
+  patch: Patch,
+  ctx: OpContext,
+  options?: OpOptions,
+  sourceTransactionId?: string,
+  context?: GateContext
+): Patch {
   const next: State = { ...state, ...patch };
-  const shortfalls = shortfallsBetween(state, next);
+  const shortfalls = shortfallsBetween(state, next).map((s) =>
+    s.kind === 'cover' && context?.expense && s.accountId === context.expense.accountId
+      ? { ...s, expense: expenseContext(context.expense.base, s.accountId, context.expense.amount) }
+      : s
+  );
   if (shortfalls.length === 0) return patch;
 
   const unmet: Shortfall[] = [];
@@ -598,8 +616,12 @@ export function addTransaction(state: State, raw: NewIncomeExpense, ctx: OpConte
   const patch = addTransactionCore(state, raw, ctx);
   const tx = patch.transactions![0];
   const spent = withSpend(state, patch, tx, options?.spend, ctx);
-  return settle(state, spent, ctx, options, tx.id);
+  return settle(state, spent, ctx, options, tx.id, expenseGate(tx, state));
 }
+
+// The gate context of an expense (undefined for anything else). `base` = the state without it.
+const expenseGate = (tx: Transaction, base: State): GateContext | undefined =>
+  tx.type === 'expense' ? { expense: { accountId: tx.accountId, amount: tx.amount, base } } : undefined;
 
 // --- Spending from a fund (FUND_SPEND_AND_GOALS_DESIGN.md §3.1–3.3) ---------------------------------------------
 //
@@ -822,7 +844,9 @@ export function updateTransaction(state: State, raw: Editable<Transaction>, ctx:
     },
     ctx,
     options,
-    raw.id
+    raw.id,
+    // An edited expense is presented as a whole, from the state without it (its old fund spending given back).
+    expenseGate(updated, { ...reversed, transactions: reversed.transactions.filter((x) => x.id !== raw.id) })
   );
 }
 
@@ -2042,7 +2066,8 @@ export function confirmOccurrence(
     },
     ctx,
     options,
-    tx.id
+    tx.id,
+    expenseGate(tx, state)
   );
 }
 

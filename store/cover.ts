@@ -52,6 +52,104 @@ export interface Shortfall {
   // A default way to do it (lowest-priority fund first for a cover; proportional for a conversion). Empty for
   // 'negative'.
   suggested: { fundId: string; amount: number }[];
+  // Only on a 'cover' shortfall caused by an EXPENSE on this account (add, edit, confirmed recurring expense): what the
+  // «تدفعه منين؟» sheet needs to offer both ways — spend from a fund, or free money first (FUND_SPEND §3.2, §5.2).
+  expense?: ExpenseContext;
+}
+
+// The expense as the cover sheet must present it. Measured in the state WITHOUT this expense (and, for an edit, without
+// its old fund spending), so both choices are computed from the same starting point.
+export interface ExpenseContext {
+  // The expense, in the account's currency.
+  amount: number;
+  // The account's free money before it: max(0, balance − reserved).
+  freeBefore: number;
+  // What each fund holds on the account, lowest priority first (the order a cover takes them in).
+  funds: { fundId: string; amount: number }[];
+  // How much must come from funds whatever the choice (the shortfall), and how much at most can.
+  minFromFunds: number;
+  maxFromFunds: number;
+}
+
+// Built by the gate for an expense of `amount` on `accountId`, from `base` (the state without the expense).
+export function expenseContext(
+  base: Pick<FinanceState, 'accounts' | 'transactions' | 'reservationMovements' | 'funds'>,
+  accountId: string,
+  amount: number
+): ExpenseContext {
+  const currency = base.accounts.find((a) => a.id === accountId)?.currency ?? 'EGP';
+  const freeBefore = roundIn(Math.max(0, accountBalance(base, accountId) - accountReserved(base, accountId)), currency);
+  const funds = reservationsOn(base, accountId);
+  const held = roundIn(funds.reduce((sum, f) => sum + f.amount, 0), currency);
+  const maxFromFunds = roundIn(Math.min(amount, held), currency);
+  const minFromFunds = roundIn(Math.min(maxFromFunds, Math.max(0, amount - freeBefore)), currency);
+  return { amount, freeBefore, funds, minFromFunds, maxFromFunds };
+}
+
+// The two cards of «تدفعه منين؟» (Q1: neither is preselected).
+//  - 'spend' «من صندوق»: the purchase was what the fund(s) were for. Any total between minFromFunds and maxFromFunds;
+//    the rest comes from free money. Saved as 'spend' (counts toward the goal; deleting the expense gives it back).
+//  - 'cover' «من الفلوس الحرة الأول»: free money first, then exactly the shortfall borrowed from funds. Saved as 'cover'
+//    (the Q4 offer on delete). Which funds is editable; the total is not (the gate takes exactly what is missing).
+export type ExpenseChoice = 'spend' | 'cover';
+
+export type ExpenseSplitProblem = 'NOTHING_CHOSEN' | 'BELOW_MIN' | 'ABOVE_MAX' | 'OVER_FUND' | 'NOT_EXACT' | 'NOT_POSITIVE';
+
+export interface ExpenseSplit {
+  // What to pass back to the operation (merged with the other parts of the decision, e.g. confirm.negative).
+  options: Pick<OpOptions, 'spend' | 'cover'>;
+  fromFunds: number;
+  fromFree: number;
+  // Why the split can't be saved yet; undefined when it can.
+  problem?: ExpenseSplitProblem;
+}
+
+// Turns a card + per-fund amounts into the operation's options, with the live "من الفلوس الحرة" figure and what is
+// wrong with it (the sheet disables «تأكيد» while there is a problem). Pure; shared with the operations' rules.
+export function expenseSplit(
+  context: ExpenseContext,
+  accountId: string,
+  currency: CurrencyCode,
+  choice: ExpenseChoice | null,
+  picks: { fundId: string; amount: number }[]
+): ExpenseSplit {
+  const chosen = picks.filter((p) => p.amount !== 0);
+  const fromFunds = roundIn(chosen.reduce((sum, p) => sum + (Number.isFinite(p.amount) ? p.amount : 0), 0), currency);
+  const fromFree = roundIn(Math.max(0, context.amount - fromFunds), currency);
+  const selections = chosen.map((p) => ({ fundId: p.fundId, accountId, amount: roundIn(p.amount, currency) }));
+  const result = (problem?: ExpenseSplitProblem): ExpenseSplit => ({
+    options: problem || !choice ? {} : choice === 'spend' ? { spend: selections } : { cover: selections },
+    fromFunds,
+    fromFree,
+    ...(problem ? { problem } : {}),
+  });
+  if (!choice) return result('NOTHING_CHOSEN');
+  if (chosen.some((p) => !(p.amount > 0))) return result('NOT_POSITIVE');
+  const held = new Map(context.funds.map((f) => [f.fundId, f.amount]));
+  if (chosen.some((p) => p.amount > (held.get(p.fundId) ?? 0) + EPSILON)) return result('OVER_FUND');
+  if (choice === 'cover') return Math.abs(fromFunds - context.minFromFunds) > EPSILON ? result('NOT_EXACT') : result();
+  if (fromFunds < context.minFromFunds - EPSILON) return result('BELOW_MIN');
+  if (fromFunds > context.maxFromFunds + EPSILON) return result('ABOVE_MAX');
+  return result();
+}
+
+// What each card starts with. «من صندوق»: prefilled only when exactly one fund on the account holds the whole expense
+// (that fund, the full expense); else empty for the user to fill. «من الفلوس الحرة الأول»: today's proposal (the
+// shortfall from the lowest-priority funds first).
+export function defaultExpensePicks(context: ExpenseContext, choice: ExpenseChoice): { fundId: string; amount: number }[] {
+  if (choice === 'spend') {
+    const whole = context.funds.filter((f) => f.amount >= context.amount - EPSILON);
+    return whole.length === 1 ? [{ fundId: whole[0].fundId, amount: context.amount }] : [];
+  }
+  const picks: { fundId: string; amount: number }[] = [];
+  let left = context.minFromFunds;
+  for (const f of context.funds) {
+    if (left <= EPSILON) break;
+    const take = Math.min(left, f.amount);
+    picks.push({ fundId: f.fundId, amount: Math.round(take * 100) / 100 });
+    left = Math.round((left - take) * 100) / 100;
+  }
+  return picks;
 }
 
 // Thrown instead of applying. NOT a FinanceValidationError: callers must open the cover flow for it, never show it
