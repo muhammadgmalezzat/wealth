@@ -398,8 +398,10 @@ export function fundMovementRows(state: MovementRowState): FundMovementRow[] {
 
 // Whether a movement adds to or takes from what is saved. Moving a reservation between funds or accounts
 // (reallocate, a transfer or exchange carrying it) saves nothing new.
+// Q6 (decided, FUND_SPEND_AND_GOALS_DESIGN.md §3.5): spending a fund on its purpose is NOT un-saving, so 'spend' is out
+// of the saving pace too (like moves between funds and accounts). Spending has its own metric (fundSpent).
 export const countsAsSaving = (kind: ReservationKind): boolean =>
-  kind !== 'reallocate' && kind !== 'follow_transfer' && kind !== 'follow_exchange';
+  kind !== 'reallocate' && kind !== 'follow_transfer' && kind !== 'follow_exchange' && kind !== 'spend';
 
 // The fund money an expense SPENT (its 'spend' movements, FUND_SPEND_AND_GOALS_DESIGN.md §3.3): the link between a
 // purchase and its fund(s) is derived from these, never stored on the transaction. Amounts are ≤ 0, in the account's
@@ -628,8 +630,51 @@ export function fundMonthShortfall(state: State, fundId: string, now: Date = new
 }
 
 // Active funds, highest priority (lowest number) first.
+// Active funds by priority: not archived and NOT ACHIEVED. Every suggestion, picker, plan line suggestion, refill offer
+// (receivables Q8), fund status nudge and Next Best Action reads this list, so an achieved goal leaves all of them at
+// once (rule 4). History, backups, totals and cover candidates read state.funds.
 export function fundsByPriority(state: Pick<State, 'funds'>): Fund[] {
-  return state.funds.filter((f) => !f.archived).sort((a, b) => a.priority - b.priority);
+  return state.funds.filter((f) => !f.archived && !f.achievedAt).sort((a, b) => a.priority - b.priority);
+}
+
+export const isAchieved = (fund: Pick<Fund, 'achievedAt'>): boolean => !!fund.achievedAt;
+
+// «أهداف اتحققت»: newest first.
+export function achievedFunds(state: Pick<State, 'funds'>): Fund[] {
+  return state.funds.filter(isAchieved).sort((a, b) => (b.achievedAt! < a.achievedAt! ? -1 : b.achievedAt! > a.achievedAt! ? 1 : 0));
+}
+
+// The three fund metrics are kept apart (Q6): CONTRIBUTIONS (money put in: 'reserve' and positive 'adjust'),
+// SPENDING ('spend', money used for the fund's purpose) and what is still RESERVED (fundAllocated / fundCurrent). Covers
+// and releases are neither: money taken back. Each movement counts in the fund's currency at its own rates.
+const fundMetric = (state: State, fundId: string, pick: (m: FundMovementRow) => boolean, month?: string): number => {
+  const fund = findFund(state, fundId);
+  if (!fund) return 0;
+  return sumIn(
+    fundMovementRows(state)
+      .filter((m) => m.fundId === fundId && pick(m) && (!month || monthOf(m.date) === month))
+      .map((m) => movementAmountIn(state, m, fund.currency)),
+    fund.currency
+  );
+};
+
+// What the fund spent on its purpose (positive), optionally in one month.
+export function fundSpent(state: State, fundId: string, month?: string): number {
+  // `0 - x`, not `-x`: nothing spent is 0, never −0 (which a screen could print as «−0»).
+  return 0 - fundMetric(state, fundId, (m) => m.kind === 'spend', month);
+}
+
+// What was put into the fund (positive), optionally in one month.
+export function fundContributed(state: State, fundId: string, month?: string): number {
+  return fundMetric(state, fundId, (m) => m.kind === 'reserve' || (m.kind === 'adjust' && m.amount > 0), month);
+}
+
+// The expenses the fund's money paid for (its 'spend' movements' sources that still exist), newest first.
+export function fundPurchases(state: Pick<State, 'reservationMovements' | 'transactions'>, fundId: string): IncomeExpenseTransaction[] {
+  const ids = new Set(state.reservationMovements.filter((m) => m.kind === 'spend' && m.fundId === fundId && m.sourceTransactionId).map((m) => m.sourceTransactionId!));
+  return state.transactions
+    .filter((t): t is IncomeExpenseTransaction => t.type === 'expense' && ids.has(t.id))
+    .sort(compareNewestFirst);
 }
 
 // Gold/currency holdings that `fundId` may link: unlinked ones plus its own.

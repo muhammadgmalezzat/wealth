@@ -18,8 +18,8 @@ export interface InvariantViolation {
 }
 
 type InvariantState = Pick<FinanceState, 'accounts' | 'transactions' | 'reservationMovements'> &
-  // Data before v9 has none.
-  Partial<Pick<FinanceState, 'receivables'>>;
+  // Data before v9 has none; funds are only needed for INV-13.
+  Partial<Pick<FinanceState, 'receivables' | 'funds'>>;
 
 // Float noise is not a violation.
 const EPSILON = 0.005;
@@ -137,12 +137,38 @@ export function spendViolations(state: Pick<FinanceState, 'transactions' | 'rese
   return violations;
 }
 
-export type AnyViolation = InvariantViolation | ReceivableViolation | SpendViolation;
+// INV-13 (FUND_SPEND_AND_GOALS_DESIGN.md §2): an achieved goal receives no new money after it was achieved — no
+// 'reserve' and no incoming 'reallocate' made after achievedAt. It may still lose money (spend, cover, release,
+// reallocate out) and its leftover still follows transfers / exchanges. Two kinds of "in" are restorations, not new
+// money, and stay allowed: the Q4 re-reserve of a cover (a 'reserve' carrying the deleted transaction's id) and
+// resolving a migrated reservation onto an account ('adjust').
+export interface AchievedViolation {
+  code: 'ACHIEVED_RECEIVED';
+  achievedFundId: string;
+  movementId: string;
+  amount: number;
+}
+
+export function achievedViolations(state: Pick<FinanceState, 'funds' | 'reservationMovements'>): AchievedViolation[] {
+  const achievedAt = new Map(state.funds.filter((f) => f.achievedAt).map((f) => [f.id, f.achievedAt!]));
+  if (achievedAt.size === 0) return [];
+  return state.reservationMovements
+    .filter((m) => {
+      const at = achievedAt.get(m.fundId);
+      if (!at || !(m.amount > 0) || m.updatedAt <= at) return false;
+      return (m.kind === 'reserve' && !m.sourceTransactionId) || m.kind === 'reallocate';
+    })
+    .map((m) => ({ code: 'ACHIEVED_RECEIVED' as const, achievedFundId: m.fundId, movementId: m.id, amount: m.amount }));
+}
+
+export type AnyViolation = InvariantViolation | ReceivableViolation | SpendViolation | AchievedViolation;
 
 const describe = (v: AnyViolation) =>
   'accountId' in v
     ? `${v.code}(${v.accountId}${v.fundId ? `/${v.fundId}` : ''}=${v.amount})`
-    : 'spendTransactionId' in v
+    : 'achievedFundId' in v
+      ? `${v.code}(${v.achievedFundId}/${v.movementId}=${v.amount})`
+      : 'spendTransactionId' in v
       ? `${v.code}(${v.spendTransactionId}${v.fundId ? `/${v.fundId}` : ''}${v.amount !== undefined ? `=${v.amount}` : ''})`
       : `${v.code}(${v.receivableId}${v.transactionId ? `/${v.transactionId}` : ''}${v.amount !== undefined ? `=${v.amount}` : ''})`;
 
@@ -156,9 +182,14 @@ export class InvariantError extends Error {
   }
 }
 
-// INV-5, INV-9…11 and INV-12.
+// INV-5, INV-9…11, INV-12 and INV-13.
 export function assertInvariants(state: InvariantState): void {
-  const violations: AnyViolation[] = [...invariantViolations(state), ...receivableViolations(state), ...spendViolations(state)];
+  const violations: AnyViolation[] = [
+    ...invariantViolations(state),
+    ...receivableViolations(state),
+    ...spendViolations(state),
+    ...achievedViolations({ funds: state.funds ?? [], reservationMovements: state.reservationMovements }),
+  ];
   if (violations.length > 0) throw new InvariantError(violations);
 }
 

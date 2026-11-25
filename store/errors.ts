@@ -57,7 +57,9 @@ export type FinanceErrorCode =
   | 'RECEIVABLE_PAYMENT_NOT_INCOME'
   | 'RECEIVABLE_LINK_REQUIRED'
   | 'INVALID_KIND'
-  | 'SPEND_INVALID';
+  | 'SPEND_INVALID'
+  | 'FUND_ACHIEVED'
+  | 'FUND_NOT_A_GOAL';
 
 export type FinanceEntity =
   | 'account'

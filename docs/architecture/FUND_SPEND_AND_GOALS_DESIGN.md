@@ -1,7 +1,11 @@
 # Spending from a fund, goals achieved, and the cover-sheet order — design
 
-Status: **approved (2026-11-24); steps 1–2 of §9 implemented** (the spend core; the expense context for the cover sheet).
-Steps 3–5 not built. Step 2 deviations: the «من الفلوس الحرة الأول» card takes exactly the shortfall (the gate's existing
+Status: **approved (2026-11-24); steps 1–3 of §9 implemented** (the spend core; the expense context for the cover sheet;
+goals achieved, INV-13, exclusions, the Q6 metrics and the Q8 nudge). Steps 4–5 not built. Step 3 deviations: two
+restorations may still add to an achieved goal (the Q4 re-reserve of a cover, resolving a migrated reservation), so INV-13
+checks reserve-without-source and incoming reallocate only; `editFund` also refuses a type change for an achieved goal;
+`fundSpent` / `fundContributed` value each movement at its own rates (as §3.5 says) — the existing `movementValueInFund`
+uses today's rate and is unchanged. Step 2 deviations: the «من الفلوس الحرة الأول» card takes exactly the shortfall (the gate's existing
 rule: a cover is exactly what is missing), so only «من صندوق» has an editable total; `paySinkingFund` gets no expense context
 (it already spends its own fund and ignores `options.spend`). Decisions: §6 (Q1, Q6, Q8 and §3.3, marked **Decided**). Additional
 acceptance criteria: §10 (AC-1 … AC-10). Builds on data v9 (`CURRENCY_AND_FUNDS_DESIGN.md`: account-backed

@@ -6,13 +6,15 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased — branch `goals-upgrade` · 1.2.0 · data v9 (no migration) — spending from a fund, steps 1–2 of 5
+## Unreleased — branch `goals-upgrade` · 1.2.0 · data v9 (no migration) — spending from a fund, steps 1–3 of 5
 
-> Not released. Steps 1–2 of FUND_SPEND_AND_GOALS_DESIGN.md (the spend core; what the cover sheet gets for an
-> expense); no new screen yet.
+> Not released. Steps 1–3 of FUND_SPEND_AND_GOALS_DESIGN.md (the spend core; what the cover sheet gets for an
+> expense; goals achieved and the fund metrics); the screens come in step 4.
 
 *For users*
 - حذف مصروف اتدفع من فلوس صندوق (زي «اتدفعت» لمصاريف دورية) بقى بيرجّع الفلوس للصندوق لوحده، والموعد الجاي مش بيرجع لورا. وتعديل مبلغه بيظبط اللي اتاخد من الصندوق.
+- الصرف من صندوق على اللي كان بيتحوّش له مبقاش بيتحسب كأنك سحبت من التحويش: «اللي اتحوّش» الشهر ده وحالة الصندوق (متأخر / متقدم) بقوا مش بيتأثروا بيه.
+- لما هدف يوصل لمبلغه، الرئيسية بتسألك «وصلت لهدف «…»؟». التطبيق عمره ما بيقفل الهدف لوحده.
 
 *Technical*
 - `OpOptions.spend` (fund money spent on the expense, applied before the cover gate), `planSpend`, `selectors.spendOf`;
@@ -23,6 +25,10 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 - Step 2: a cover shortfall caused by an expense carries `ExpenseContext` (amount, free money before, the funds, the
   from-funds bounds) for the «تدفعه منين؟» sheet; pure `expenseSplit` / `defaultExpensePicks`. No behaviour change: the
   same shortfalls, amounts and proposals as before. Tests 510 → 517.
+- Step 3: `Fund.achievedAt?` (no migration; the released v9 code keeps it on every write path — rollback simulated);
+  `achieveFund` / `reopenFund`; `FUND_ACHIEVED` / `FUND_NOT_A_GOAL`; INV-13 (`achievedViolations`); `fundsByPriority`
+  excludes achieved goals; `achievedFunds`, `fundSpent`, `fundContributed`, `fundPurchases`; Q6: `countsAsSaving` excludes
+  'spend'; Next Best Action `goal-reached-<id>` (Q8). Tests 517 → 529 (+ fuzz).
 
 ---
 

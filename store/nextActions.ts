@@ -10,6 +10,7 @@ import {
   fundCurrent,
   fundMonthShortfall,
   fundsByPriority,
+  fundSpent,
   fundStatus,
   receivableOverdue,
   receivableRemaining,
@@ -114,7 +115,7 @@ function amountToShow(parts: CurrencyAmount[], totalEGP: number): { amount: numb
 
 // Every applicable action, snoozed ones included, sorted by priority. Rules, in order:
 //  1 due 'confirm' items          2 automatic items needing a cover / unresolved reservations   3 overspent plan lines
-//  4 last month not reviewed; an overdue receivable (one each, dismissible)
+//  4 last month not reviewed; an overdue receivable (one each, dismissible); a goal that reached its target (Q8)
 //  5 no plan this month                  6 no / thin emergency fund
 //  7 sinking fund due ≤ 14 days    8 fund behind this month              9 money without a job
 // 10 gold / FX prices ≥ 7 days old 11 last backup ≥ 7 days old (or never)
@@ -207,6 +208,21 @@ export function allActions(state: State, now: Date = new Date(), blockedAuto = 0
       amount: remaining,
       currency: r.currency,
       cta: { label: 'سجّل التحصيل', route: 'collect', params: { id: r.id } },
+    });
+  }
+
+  // 4 — Q8 (decided): an active goal whose money (still reserved + already spent on it) reached its target. A nudge to
+  // confirm «تم الهدف 🎉»; it never achieves by itself (AC-2). Dismissible.
+  for (const fund of fundsByPriority(state)) {
+    if (fund.type !== 'goal' || !(fund.targetAmount > 0)) continue;
+    const reached = roundIn(fundCurrent(state, fund.id) + fundSpent(state, fund.id), fund.currency);
+    if (reached < fund.targetAmount - EPSILON) continue;
+    add(4, {
+      id: `goal-reached-${fund.id}`,
+      severity: 'opportunity',
+      title: `وصلت لهدف «${fund.name.trim()}»؟`,
+      subtitle: `فيه ${formatMoney(reached, fund.currency)} من ${formatMoney(fund.targetAmount, fund.currency)}. لو خلص علّمه «تم الهدف 🎉».`,
+      cta: { label: 'تم الهدف 🎉', route: '/fund/[id]', params: { id: fund.id, achieve: '1' } },
     });
   }
 

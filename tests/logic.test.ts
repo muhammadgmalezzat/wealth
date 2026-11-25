@@ -67,8 +67,8 @@ import {
 } from '@/store/migrations';
 import * as nba from '@/store/nextActions';
 import * as reviewLogic from '@/store/review';
-import { assertInvariants, InvariantError, invariantViolations, receivableViolations, spendViolations } from '@/store/invariants';
-import { coversOf, defaultExpensePicks, expenseSplit, followPreview, mergeOptions, NeedsCoverError, planSpend, proposedOptions, type ExpenseChoice, type OpOptions } from '@/store/cover';
+import { achievedViolations, assertInvariants, InvariantError, invariantViolations, receivableViolations, spendViolations } from '@/store/invariants';
+import { coversOf, defaultExpensePicks, expenseSplit, followPreview, mergeOptions, NeedsCoverError, planSpend, proposedOptions, reservationsOn, type ExpenseChoice, type OpOptions } from '@/store/cover';
 import { runActionWith, type CoverRequest } from '@/utils/runActionCore';
 import * as analyticsUi from '@/components/analytics/analyticsUi';
 import * as exchangeUi from '@/components/transactions/exchangeUi';
@@ -7064,10 +7064,11 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
     };
     let applied = 0;
     let spendsApplied = 0;
+    let achievedSteps = 0;
     let asked = 0;
     for (let i = 0; i < steps; i++) {
       const before = JSON.stringify(s);
-      const kind = pick(['expense', 'income', 'transfer', 'exchange', 'gold', 'reserve', 'release', 'delete', 'edit', 'opening', 'recvAdd', 'recvCollect', 'recvCollect', 'recvEdit', 'recvWriteOff', 'recvReopen', 'recvDelete', 'spendExpense', 'spendExpense', 'spendEdit']);
+      const kind = pick(['expense', 'income', 'transfer', 'exchange', 'gold', 'reserve', 'release', 'delete', 'edit', 'opening', 'recvAdd', 'recvCollect', 'recvCollect', 'recvEdit', 'recvWriteOff', 'recvReopen', 'recvDelete', 'spendExpense', 'spendExpense', 'spendEdit', 'achieve', 'reopen']);
       const currency = pick(currencies);
       const ids = idsOf(currency);
       const scale = currency === 'SAR' ? 1 : 12.5;
@@ -7125,6 +7126,17 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
           run((o) => ops.addTransaction(snapshot, { type: 'expense', amount, currency, accountId, categoryId: 'cat-essentials-bills', date: '2026-10-10' }, ctx, mergeOptions({ spend: [{ fundId, accountId, amount: take }] }, o)));
           if (s !== snapshot && sel.spendOf(s, s.transactions[0].id).length > 0) spendsApplied++;
         }
+      } else if (kind === 'achieve') {
+        // «تم الهدف» on a random goal, keeping or releasing its leftover; later reserves into it must be refused.
+        const goals = snapshot.funds.filter((f) => f.type === 'goal');
+        if (goals.length > 0) {
+          const id = pick(goals).id;
+          run(() => ops.achieveFund(snapshot, id, { releaseLeftover: rand() < 0.5 }, ctx));
+          if (snapshot.funds.find((f) => f.id === id)!.achievedAt === undefined && s !== snapshot) achievedSteps++;
+        }
+      } else if (kind === 'reopen') {
+        const done = snapshot.funds.filter((f) => f.achievedAt);
+        if (done.length > 0) run(() => ops.reopenFund(snapshot, pick(done).id, ctx));
       } else if (kind === 'spendEdit') {
         // Re-edit an expense that spent fund money: a new amount (the fund is re-applied) or an explicit «بدون».
         const spent = snapshot.transactions.filter((t) => t.type === 'expense' && sel.spendOf(snapshot, t.id).length > 0);
@@ -7155,6 +7167,16 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
       assert.deepEqual(invariantViolations(s), [], `after step ${i} (${kind})`);
       assert.deepEqual(receivableViolations(s), [], `INV-9…11 after step ${i} (${kind})`);
       assert.deepEqual(spendViolations(s), [], `INV-12 after step ${i} (${kind})`);
+      assert.deepEqual(achievedViolations(s), [], `INV-13 after step ${i} (${kind})`);
+      // INV-13 without clocks: no movement added in this step brings new money into a goal that was already achieved.
+      const wasAchieved = new Set(snapshot.funds.filter((f) => f.achievedAt).map((f) => f.id));
+      if (wasAchieved.size > 0) {
+        const known = new Set(snapshot.reservationMovements.map((m) => m.id));
+        const intoAchieved = s.reservationMovements.filter(
+          (m) => !known.has(m.id) && wasAchieved.has(m.fundId) && m.amount > 0 && ((m.kind === 'reserve' && !m.sourceTransactionId) || m.kind === 'reallocate')
+        );
+        assert.deepEqual(intoAchieved, [], `INV-13 (new money) after step ${i} (${kind})`);
+      }
       // Receivables are not money: the money figures are the same without them.
       assert.equal(netWorth(s), netWorth({ ...s, receivables: [] }));
       for (const c of currencies) {
@@ -7167,7 +7189,7 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
         for (const a of s.accounts) if (!a.allowNegative) assert.ok(sel.accountBalance(s, a.id) >= -0.005, `${a.id} went negative at step ${i} (${kind})`);
       }
     }
-    return { applied, asked, state: s, spendsApplied };
+    return { applied, asked, state: s, spendsApplied, achievedSteps };
   }
 
   const world = (): FinanceState => ({
@@ -7177,8 +7199,9 @@ describe('INV-5 holds on every write path (D4 fuzz) and failed operations change
   });
 
   it('every account strict, every cover and overdraft question answered yes: never an invalid state', () => {
-    const { applied, asked, spendsApplied } = fuzz(world(), 11, 400, true);
+    const { applied, asked, spendsApplied, achievedSteps } = fuzz(world(), 11, 400, true);
     assert.ok(spendsApplied > 5, `spends applied ${spendsApplied}`);
+    assert.ok(achievedSteps > 2, `goals achieved ${achievedSteps}`);
     assert.ok(applied > 150, `applied ${applied}`);
     assert.ok(asked > 20, `asked ${asked}`);
   });
@@ -8391,5 +8414,219 @@ describe('fund spending (step 2): the expense context on a cover shortfall, and 
     assert.equal(JSON.stringify(s), before);
     const bad = expenseSplit(coverOf(requests[0].error).expense!, 'A', 'EGP', 'spend', [{ fundId: 'T', amount: 100 }]);
     assert.deepEqual([bad.problem, bad.options], ['BELOW_MIN', {}]);
+  });
+});
+
+// --- Goals achieved and the fund metrics, step 3 (FUND_SPEND §3.4–3.5, INV-13, Q6, Q8, AC-2…AC-5, AC-9) ---------------
+
+describe('fund spending (step 3): goals achieved, the three fund metrics, INV-13, exclusions', () => {
+  // Made-up numbers: A 10,000 holds T (goal, 6,000 target) 6,000 and O (goal) 1,000; B 3,000 holds T 500.
+  // S is a sinking fund and E an emergency fund (not goals).
+  const world = (): FinanceState => ({
+    ...emptyState(),
+    accounts: [strictAccount('A', 'EGP', 10000), strictAccount('B', 'EGP', 3000)],
+    funds: [
+      fund({ id: 'T', priority: 2, targetAmount: 6000, deadline: '2027-03-01' }),
+      fund({ id: 'O', priority: 3, targetAmount: 5000, monthlyContribution: 500 }),
+      fund({ id: 'S', priority: 4, targetAmount: 1200, type: 'sinking', frequency: 'yearly', nextDueDate: '2026-10-25' }),
+      fund({ id: 'E', priority: 1, targetAmount: 30000, type: 'emergency' }),
+    ],
+    reservationMovements: [resv('r-t-a', 'T', 'A', 6000), resv('r-t-b', 'T', 'B', 500), resv('r-o-a', 'O', 'A', 1000)],
+  });
+  const clock = () => makeClock(new Date('2026-10-15T09:00:00.000Z'));
+  const res = (s: FinanceState, f: string, a: string) => sel.reservation(s, f, a);
+  const fundOf = (s: FinanceState, id: string) => s.funds.find((f) => f.id === id)!;
+  const exp = (amount: number, accountId = 'A'): ops.NewIncomeExpense => ({ type: 'expense', amount, currency: 'EGP', accountId, categoryId: 'cat-essentials-bills', date: '2026-10-10' });
+  const achieved = (release = false) => {
+    const { ctx, advance } = clock();
+    const s = apply(world(), ops.achieveFund(world(), 'T', { releaseLeftover: release }, ctx));
+    advance(10);
+    return { s, ctx, advance };
+  };
+
+  it('«تم الهدف»: goals only, explicit, twice = once; the leftover is kept unless the user releases it (same patch)', () => {
+    const { ctx, iso } = clock();
+    for (const id of ['S', 'E']) assert.throws(() => ops.achieveFund(world(), id, { releaseLeftover: false }, ctx), { code: 'FUND_NOT_A_GOAL' });
+    assert.throws(() => ops.achieveFund(world(), 'nope', { releaseLeftover: false }, ctx), { code: 'NOT_FOUND' });
+    const kept = apply(world(), ops.achieveFund(world(), 'T', { releaseLeftover: false }, ctx));
+    assert.equal(fundOf(kept, 'T').achievedAt, iso());
+    assert.deepEqual([res(kept, 'T', 'A'), res(kept, 'T', 'B')], [6000, 500], 'leftover stays reserved and visible (AC-4)');
+    assert.deepEqual(kept.reservationMovements, world().reservationMovements, 'no movement');
+    assert.deepEqual(ops.achieveFund(kept, 'T', { releaseLeftover: true }, ctx), {}, 'twice = once (and never releases later by itself)');
+    const released = apply(world(), ops.achieveFund(world(), 'T', { releaseLeftover: true }, ctx));
+    assert.deepEqual([res(released, 'T', 'A'), res(released, 'T', 'B')], [0, 0]);
+    assert.deepEqual([sel.accountAvailable(released, 'A'), sel.accountAvailable(released, 'B')], [9000, 3000]);
+    assert.ok(released.reservationMovements.slice(-2).every((m) => m.kind === 'release'), 'release, not cover or spend (AC-6)');
+    assertInvariants(released);
+  });
+
+  it('AC-2: reaching the target never achieves; the Q8 nudge appears (dismissible) and leaves once achieved', () => {
+    const s = world(); // T: 6,000 + 500 reserved ≥ 6,000 target
+    assert.equal(fundOf(s, 'T').achievedAt, undefined);
+    const nudge = nba.nextActions(s, NOW).find((a) => a.id === 'goal-reached-T')!;
+    assert.ok(nudge, 'nudge shown');
+    assert.deepEqual([nudge.dismissible, nudge.cta], [true, { label: 'تم الهدف 🎉', route: '/fund/[id]', params: { id: 'T', achieve: '1' } }]);
+    assert.match(nudge.title, /وصلت لهدف «T»؟/);
+    // Spending counts toward "reached": T spent 6,000 on the tablet, 500 left on B, still a nudge, still not achieved.
+    const spent = apply(s, ops.addTransaction(s, exp(6000), makeCtx(), { spend: [{ fundId: 'T', accountId: 'A', amount: 6000 }] }));
+    assert.ok(nba.nextActions(spent, NOW).some((a) => a.id === 'goal-reached-T'));
+    assert.equal(fundOf(spent, 'T').achievedAt, undefined);
+    // Below the target: none. Snoozed: gone for a day. Achieved: gone.
+    assert.equal(nba.allActions({ ...s, reservationMovements: [resv('x', 'T', 'A', 100)] }, NOW).some((a) => a.id === 'goal-reached-T'), false);
+    const snoozed = apply(s, ops.dismissAction(s, 'goal-reached-T', makeCtx()));
+    assert.equal(nba.nextActions(snoozed, NOW).some((a) => a.id === 'goal-reached-T'), false);
+    assert.equal(nba.allActions(achieved().s, NOW).some((a) => a.id === 'goal-reached-T'), false);
+  });
+
+  it('AC-3: reopening clears it (twice = once); released money is not taken back', () => {
+    const { s, ctx } = achieved(true);
+    const open = apply(s, ops.reopenFund(s, 'T', ctx));
+    assert.equal('achievedAt' in fundOf(open, 'T'), false);
+    assert.deepEqual([res(open, 'T', 'A'), res(open, 'T', 'B')], [0, 0]);
+    assert.deepEqual(ops.reopenFund(open, 'T', ctx), {});
+    assert.doesNotThrow(() => ops.allocateToFund(open, 'T', 100, undefined, ctx), 'open again: it can receive money');
+  });
+
+  it('INV-13 guards: no new money into an achieved goal; money out, follows and restorations still work (AC-4)', () => {
+    const { s, ctx } = achieved();
+    const before = JSON.stringify(s);
+    assert.throws(() => ops.allocateToFund(s, 'T', 100, undefined, ctx), { code: 'FUND_ACHIEVED' });
+    assert.throws(() => ops.allocateMany(s, [{ fundId: 'O', amount: 10 }, { fundId: 'T', amount: 10 }], undefined, ctx), { code: 'FUND_ACHIEVED' });
+    assert.throws(() => ops.reallocate(s, { fromFundId: 'O', toFundId: 'T', amount: 100 }, ctx), { code: 'FUND_ACHIEVED' });
+    assert.throws(() => ops.editFund(s, 'T', { name: 'T', targetAmount: 6000, cashAllocation: 7000 }, ctx), { code: 'FUND_ACHIEVED' });
+    assert.throws(() => ops.editFund(s, 'T', { name: 'T', targetAmount: 6000, cashAllocation: 6500, type: 'emergency' }, ctx), { code: 'FUND_ACHIEVED' });
+    assert.equal(JSON.stringify(s), before, 'AC-10: refused, nothing changed');
+    // Out: release, reallocate to an active fund, a smaller allocation, details, spending its leftover.
+    assert.equal(res(apply(s, ops.withdrawFromFund(s, 'T', 500, undefined, ctx, undefined, 'B')), 'T', 'B'), 0);
+    const moved = apply(s, ops.reallocate(s, { fromFundId: 'T', toFundId: 'O', amount: 1000, accountId: 'A' }, ctx));
+    assert.deepEqual([res(moved, 'T', 'A'), res(moved, 'O', 'A')], [5000, 2000]);
+    const renamed = apply(s, ops.editFund(s, 'T', { name: 'تابلت', targetAmount: 6500, cashAllocation: 6000 }, ctx));
+    assert.deepEqual([fundOf(renamed, 'T').name, fundOf(renamed, 'T').targetAmount, !!fundOf(renamed, 'T').achievedAt, sel.fundAllocated(renamed, 'T')], ['تابلت', 6500, true, 6000]);
+    const spentLeft = apply(s, ops.addTransaction(s, exp(300, 'B'), ctx, { spend: [{ fundId: 'T', accountId: 'B', amount: 300 }] }));
+    assert.equal(res(spentLeft, 'T', 'B'), 200);
+    // Its leftover follows a transfer (A: 10,000 = T 6,000 + O 1,000 + free 3,000; sending 5,000 carries 2,000 of it).
+    const followed = apply(s, ops.addTransfer(s, { fromAccountId: 'A', toAccountId: 'B', amount: 5000, date: '2026-10-16' }, ctx));
+    assert.ok(followed.reservationMovements.some((m) => m.fundId === 'T' && m.kind === 'follow_transfer' && m.amount > 0));
+    // The leftover is still a cover candidate (reserved money).
+    assert.ok(reservationsOn(s, 'A').some((r) => r.fundId === 'T'));
+    for (const x of [moved, renamed, spentLeft, followed]) assertInvariants(x);
+  });
+
+  it('AC-5: deleting a purchase of an achieved goal gives the money back and the goal stays achieved', () => {
+    const { ctx, advance } = clock();
+    let s = apply(world(), ops.addTransaction(world(), exp(6000), ctx, { spend: [{ fundId: 'T', accountId: 'A', amount: 6000 }] }));
+    const purchase = s.transactions[0];
+    advance();
+    s = apply(s, ops.achieveFund(s, 'T', { releaseLeftover: false }, ctx));
+    const at = fundOf(s, 'T').achievedAt;
+    advance();
+    s = apply(s, ops.deleteTransaction(s, purchase.id, ctx));
+    assert.deepEqual([res(s, 'T', 'A'), fundOf(s, 'T').achievedAt], [6000, at]);
+    assertInvariants(s);
+  });
+
+  it('Q4 re-reserve and resolving a migrated reservation still restore into an achieved goal (restorations, not new money)', () => {
+    const { s, ctx, advance } = achieved();
+    // A cover taken from T's leftover, then the expense deleted: the offer gives it back.
+    const covered = apply(s, ops.addTransaction(s, exp(4000), ctx, { cover: [{ fundId: 'O', accountId: 'A', amount: 1000 }] }));
+    const big = apply(covered, ops.addTransaction(covered, exp(500), ctx, { cover: [{ fundId: 'T', accountId: 'A', amount: 500 }] }));
+    const id = big.transactions[0].id;
+    advance();
+    const gone = apply(big, ops.deleteTransaction(big, id, ctx));
+    const back = apply(gone, ops.reReserveCovers(gone, coversOf(big, id), id, ctx));
+    assert.equal(res(back, 'T', 'A'), 6000);
+    assertInvariants(back);
+    const migrated: FinanceState = { ...s, unresolvedMovements: [{ id: 'u1', fundId: 'T', amount: 200, currency: 'EGP', date: '2026-09-01', rateSnapshotId: S125.id, reason: 'ambiguous', updatedAt: T0 }] };
+    const resolved = apply(migrated, ops.resolveUnresolved(migrated, { fundId: 'T', currency: 'EGP', accountId: 'B' }, ctx));
+    assert.equal(res(resolved, 'T', 'B'), 700);
+    assertInvariants(resolved);
+  });
+
+  it('INV-13 itself: a reserve or an incoming reallocate made after achievedAt; restorations and earlier movements are fine', () => {
+    const { s } = achieved();
+    const at = fundOf(s, 'T').achievedAt!;
+    const later = '2026-10-20T00:00:00.000Z';
+    const m = (patch: Partial<ReservationMovement>): ReservationMovement => ({ ...resv('x', 'T', 'A', 50), updatedAt: later, ...patch });
+    const codes = (moves: ReservationMovement[]) => achievedViolations({ funds: s.funds, reservationMovements: [...s.reservationMovements, ...moves] }).map((v) => v.code);
+    assert.deepEqual(codes([m({})]), ['ACHIEVED_RECEIVED']);
+    assert.deepEqual(codes([m({ kind: 'reallocate' })]), ['ACHIEVED_RECEIVED']);
+    assert.deepEqual(codes([m({ updatedAt: at })]), [], 'not after');
+    assert.deepEqual(codes([m({ sourceTransactionId: 'gone' })]), [], 'Q4 restoration');
+    assert.deepEqual(codes([m({ kind: 'adjust' })]), [], 'resolved migration');
+    assert.deepEqual(codes([m({ amount: -50, kind: 'release' })]), [], 'money out');
+    assert.throws(() => assertInvariants({ ...s, reservationMovements: [...s.reservationMovements, m({})] }), (e: unknown) => e instanceof InvariantError && /ACHIEVED_RECEIVED/.test(e.message));
+  });
+
+  it('rule 4: achieved goals leave suggestions, plan suggestions, the refill offer, nudges and Home; stay in history, totals and backups', async () => {
+    const { s } = achieved();
+    const ids = (list: { fundId?: string; id?: string }[]) => list.map((x) => x.fundId ?? x.id);
+    assert.equal(sel.fundsByPriority(s).some((f) => f.id === 'T'), false);
+    assert.deepEqual(sel.achievedFunds(s).map((f) => f.id), ['T']);
+    assert.equal(ids(sel.suggestAllocationIn(s, 'EGP', 50000, NOW)).includes('T'), false);
+    assert.equal(ids(planning.suggestedContributions(s, 'EGP', NOW)).includes('T'), false);
+    assert.equal(ids(sel.receivableRefillSuggestion(s, 'A', 3000, NOW)).includes('T'), false);
+    assert.equal(nba.allActions(s, NOW).some((a) => a.id.endsWith('-T')), false);
+    assert.equal(home.homeFunds(s, NOW, 9).some((f) => f.id === 'T'), false);
+    assert.equal(analytics.fundsProjection(s, NOW).some((p) => p.fundId === 'T'), false);
+    // Still there: the fund, its money, the totals, and a backup round trip.
+    assert.deepEqual([sel.fundCurrent(s, 'T'), sel.accountReserved(s, 'A')], [6500, 7000]);
+    const file = await createBackup(s, { now: NOW, crypto: nodeCrypto });
+    const opened = await openBackup(parseBackup(serializeBackup(file)), { now: NOW, newId: () => 'x' });
+    assert.equal(fundOf(opened.state, 'T').achievedAt, fundOf(s, 'T').achievedAt);
+  });
+
+  it('Q6: contributions, spending and what is reserved are three separate figures; spending is not un-saving', () => {
+    const { ctx } = clock();
+    let s = world();
+    s = apply(s, ops.allocateToFund(s, 'T', 0.01, undefined, ctx, undefined, 'B'));
+    s = apply(s, ops.addTransaction(s, exp(4000), ctx, { spend: [{ fundId: 'T', accountId: 'A', amount: 4000 }] }));
+    s = apply(s, ops.withdrawFromFund(s, 'T', 500, undefined, ctx, undefined, 'B'));
+    // Contributions: the two 'reserve' rows of the fixture (6,000 + 500) + 0.01; spending 4,000; reserved now 2,000.01.
+    assert.equal(sel.fundContributed(s, 'T'), 6500.01);
+    assert.equal(sel.fundSpent(s, 'T'), 4000);
+    assert.equal(sel.fundAllocated(s, 'T'), 2000.01);
+    assert.equal(sel.fundContributed(s, 'T', '2026-10'), 0.01, 'only what was put in this month');
+    assert.equal(sel.fundSpent(s, 'T', '2026-09'), 0);
+    assert.equal(sel.countsAsSaving('spend'), false);
+    assert.equal(sel.countsAsSaving('reserve'), true);
+    // Spending a fund this month no longer lowers what was SAVED this month (monthFlows, the plan's «اتخصص»). What the
+    // goal still REQUIRES is a separate question (it follows what is reserved now; see the step-3 report).
+    const noPurchase = apply(world(), ops.allocateToFund(world(), 'T', 0.01, undefined, ctx, undefined, 'B'));
+    const withPurchase = apply(noPurchase, ops.addTransaction(noPurchase, exp(4000), ctx, { spend: [{ fundId: 'T', accountId: 'A', amount: 4000 }] }));
+    assert.equal(sel.monthFlows(withPurchase, '2026-10').savedToFunds, sel.monthFlows(noPurchase, '2026-10').savedToFunds);
+    const plan = (x: FinanceState) => apply(x, ops.savePlan(x, { month: '2026-10', currency: 'EGP', expectedIncome: 1, lines: [], fundContributions: [{ fundId: 'T', amount: 100 }] }, ctx));
+    assert.deepEqual(planning.planProgress(plan(withPurchase), '2026-10')!.contributions, planning.planProgress(plan(noPurchase), '2026-10')!.contributions);
+  });
+
+  it('Q6: a SAR reservation spent for an EGP goal counts at its own rates, not today’s', () => {
+    const { ctx } = clock();
+    const s0: FinanceState = { ...world(), accounts: [...world().accounts, strictAccount('S1', 'SAR', 1000, 'SA')], reservationMovements: [...world().reservationMovements, resv('r-t-s', 'T', 'S1', 400)] };
+    const s1 = apply(s0, ops.addTransaction(s0, { ...exp(100, 'S1'), currency: 'SAR' }, ctx, { spend: [{ fundId: 'T', accountId: 'S1', amount: 100 }] }));
+    const spentEGP = sel.fundSpent(s1, 'T');
+    assert.equal(spentEGP, 1250, '100 SAR at 12.5');
+    assert.equal(sel.fundSpent(withSar(s1, 13), 'T'), spentEGP, 'a later rate does not change what was spent');
+  });
+
+  it('AC-9: achievedAt survives every write path of today’s code (the released v9 code was checked the same way)', async () => {
+    const { s, ctx } = achieved();
+    const at = fundOf(s, 'T').achievedAt;
+    const keeps = (x: FinanceState, name: string) => assert.equal(fundOf(x, 'T').achievedAt, at, name);
+    keeps(apply(s, ops.updateFund(s, { ...fundOf(s, 'T'), name: 'x' }, ctx)), 'updateFund');
+    keeps(apply(s, ops.editFund(s, 'T', { name: 'x', targetAmount: 6000, cashAllocation: 6000 }, ctx)), 'editFund');
+    keeps(apply(s, ops.deleteFund(s, 'O', ctx)), 'deleteFund (another)');
+    keeps(apply(s, ops.allocateToFund(s, 'O', 10, undefined, ctx)), 'allocate (another)');
+    keeps(apply(s, ops.withdrawFromFund(s, 'T', 100, undefined, ctx)), 'withdraw');
+    keeps(apply(s, ops.reallocate(s, { fromFundId: 'T', toFundId: 'O', amount: 100 }, ctx)), 'reallocate out');
+    keeps(apply(s, ops.addTransfer(s, { fromAccountId: 'A', toAccountId: 'B', amount: 9000, date: '2026-10-16' }, ctx)), 'transfer (follow)');
+    keeps(apply(s, ops.paySinkingFund(s, { fundId: 'S', accountId: 'A', categoryId: 'cat-essentials-bills', amount: 100, date: '2026-10-16' }, ctx)), 'paySinkingFund (another)');
+    keeps(apply(s, ops.restoreFromBackup({ ...s, funds: [] }, s, ctx)), 'restoreFromBackup');
+    keeps(apply(s, ops.replaceWithSeed(s, s, ctx)), 'replaceWithSeed');
+    const file = await createBackup(s, { password: 'pw', now: NOW, crypto: { ...nodeCrypto, iterations: 1000 } });
+    keeps((await openBackup(parseBackup(serializeBackup(file)), { password: 'pw', now: NOW, newId: () => 'x' })).state, 'encrypted backup');
+  });
+
+  it('error messages', () => {
+    assert.equal(errorMessage(new FinanceValidationError('FUND_ACHIEVED')), 'الهدف ده اتحقق؛ رجّعه هدف مفتوح الأول');
+    assert.equal(errorMessage(new FinanceValidationError('FUND_NOT_A_GOAL')), '«تم الهدف» للأهداف بس');
   });
 });

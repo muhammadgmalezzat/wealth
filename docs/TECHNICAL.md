@@ -198,7 +198,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencyRegistry.ts, countries.ts, currencies.ts (names, v7-shaped DEFAULT_RATES for the seeds), market.ts
-tests/logic.test.ts         517 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         529 tests over store/*, utils/* and the pure UI helpers
 tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
@@ -549,6 +549,7 @@ priority order); `nextActions` drops snoozed ones. Each action:
 | 2 | `resolve` | `unresolvedMovements` not empty | urgent | فلوس محجوزة ومش محدد حسابها | حدّد الحساب → ResolveSheet |
 | 3 | `overspent` | this month's plan has `overspentLines` | warning | عدّيت ميزانية: {names} | افتح الخطة → /plan |
 | 4 | `review-YYYY-MM` | `pendingReviewMonth`: last month had transactions (≥ trackingStartDate) and no `monthlyReviews` entry | opportunity | راجع شهر {month} | ابدأ المراجعة → /review?month= |
+| 4 | `goal-reached-<fundId>` | an active goal (not achieved) whose reserved money + `fundSpent` ≥ its target (Q8); never achieves it (AC-2) | opportunity | وصلت لهدف «…»؟ | تم الهدف 🎉 → /fund/[id]?achieve=1 (the sheet comes in step 4) |
 | 4 | `receivable-<id>` | `receivableOverdue`: a receivable still open or partial whose `dueDate` < today (one action each, dismissible through `actionDismissals`) | warning | مرتب {month} لسه ماوصلش / {remaining} عند {label} لسه ماوصلوش | سجّل التحصيل → `collect` (Home opens `CollectSheet`) |
 | 5 | `plan-YYYY-MM` | no plan this month | warning | اعمل خطة الشهر | اعمل الخطة → /plan |
 | 6 | `emergency` | no active emergency fund → create; or emergency cash (EGP) < 1 month of essentials (`suggestedEmergencyTarget(3)/3`, needs history) → allocate | opportunity | ابدأ صندوق الطوارئ | أنشئ الصندوق → FundSheet / خصص الآن → fund |
@@ -984,7 +985,7 @@ Every synced entity has `updatedAt` (set only by operations).
   - **Fee** `{ accountId (the source or the target of the move), amount (> 0, in that account's currency), categoryId? (an expense category; default the fees category) }` — stored on the record, so editing or deleting an exchange is one atomic change
   - (a transaction's `amount` is on `income | expense | transfer | asset_purchase`; an exchange has sent / received instead)
   - `asset_purchase`: `accountId`, `currency`, `holdingId` — cash turned into a holding
-- **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), updatedAt }`
+- **Fund** `{ id, name, type: emergency|goal|sinking, targetAmount, currency, deadline? (goals), priority (lower = more important), monthlyContribution?, linkedHoldingIds[], createdAt, archived?, frequency?: yearly|semiannual|quarterly, nextDueDate? (sinking), achievedAt? (goals: ISO of the user's «تم الهدف 🎉»; absent = active), updatedAt }` — `achievedAt` is optional, so data v9 needs no migration; the released v9 code keeps it on every fund write path and in backups (checked: the AC-9 rollback simulation on `1c8f5b8` and the AC-9 test on today's code).
 - **ReservationMovement** `{ id, fundId, accountId, amount (signed, in the ACCOUNT's currency), kind: reserve|release|reallocate|follow_transfer|follow_exchange|spend|cover|adjust, groupId?, sourceTransactionId?, date, note?, rateSnapshotId, updatedAt }` — money of one account set aside for one fund; `reservation(fund, account)` = Σ amount, never stored. `reallocate` / `follow_*` come in pairs sharing a `groupId` (a follow group's id is the transaction id, or `<id>:…`); `cover` and `spend` carry the `sourceTransactionId` that caused them.
 - **UnresolvedMovement** `{ id, fundId, amount, currency, date, note?, rateSnapshotId, reason: ambiguous|insufficient|negative|no_account, updatedAt }` — migration-only quarantine: counts toward its fund's total, never against an account's available money, until the user resolves it (an account is chosen: it becomes an `adjust` reservation).
 - **Receivable** (v9) `{ id, label, kind: salary|other, forMonth? ('YYYY-MM', required for salary), amount (> 0, in `currency`, native), currency, dueDate?, note?, writtenOffAt? (ISO; present = written off, cleared on reopen), createdAt, updatedAt }` — money owed to the user, **not money**: no account, never read by a money selector (net worth, liquid, balances, funds, unassigned, safe-to-spend, analytics, snapshots). Collected / remaining / status (`open | partial | settled | written_off`) are derived from the incomes that carry its id (`receivableCollected`); only the write-off is stored. Operations and selectors: §9 "Receivables"; UI: §5 Assets «فلوس ليّا» (`docs/architecture/RECEIVABLES_DESIGN.md`).
@@ -1196,6 +1197,14 @@ Spending from a fund (FUND_SPEND_AND_GOALS_DESIGN.md step 1; data unchanged, sti
   payments included; their `nextDueDate` is not moved back. `cover` movements are untouched by delete (the Q4 offer).
 - `paySinkingFund` uses the same spend stage (same movement: min(payment, the fund's reservation on the paying account),
   note «اتدفعت: …»).
+- **Goals achieved (step 3).** `achieveFund(id, { releaseLeftover })`: goals only (`FUND_NOT_A_GOAL`); sets `achievedAt`
+  (twice = `{}`); with `releaseLeftover` its remaining reservations are released ('release', every account) in the same
+  patch, never otherwise (AC-4). `reopenFund(id)` clears it (released money is not taken back). Guards (INV-13,
+  `FUND_ACHIEVED` «الهدف ده اتحقق؛ رجّعه هدف مفتوح الأول»): `allocateToFund`, `allocateMany`, `reallocate` INTO it, and
+  `editFund` raising its allocation or changing its type. Allowed: release, reallocate out, a smaller allocation,
+  details, spending its leftover, its leftover following transfers / exchanges, the Q4 re-reserve of a cover and
+  resolving a migrated reservation onto an account (restorations). Deleting a purchase of an achieved goal gives the
+  spend back and does not reopen it (AC-5). Reaching the target never achieves a goal (AC-2).
 - **What the cover sheet gets for an expense (step 2).** `settle(…, context)`: when the operation records or edits an
   EXPENSE (`addTransaction`, `updateTransaction` of an expense, `confirmOccurrence` of an expense rule), the `'cover'`
   shortfall on that account carries `expense: ExpenseContext` = `{ amount, freeBefore, funds (lowest priority first),
@@ -1325,6 +1334,24 @@ All of these take an optional `to` (default the reporting currency) and round ea
 - «غير محصّل»: `openReceivablesByCurrency` (open + partial remaining per currency) and `openReceivablesValue(to)` (the same at **today's** rates; informational, never added to money).
 - `duplicateSalaryReceivable` (Q5 warning: same trimmed label + month), `receivableRefillSuggestion(accountId, collected)` (Q8: `suggestAllocationIn` over min(collected, the account's available) — funds below target only, by priority, each capped by its suggested monthly amount).
 - No money selector reads `receivables` (tested: net worth, liquid, unassigned, month summary, safe-to-spend, the v8 report).
+
+### Fund metrics and achieved goals (`store/selectors.ts`, step 3)
+- `fundsByPriority` now excludes **achieved** goals as well as archived funds, so every suggestion, picker, plan
+  suggestion, the receivables refill offer (Q8), fund-status nudges, Next Best Actions, Home's funds and the analytics
+  projection drop them at once (rule 4). History, totals, backups and cover candidates (`reservationsOn`) read
+  `state.funds` and keep them. `isAchieved`, `achievedFunds` (newest first).
+- **Q6 (decided): three separate metrics** — `fundContributed(fund, month?)` (money put in: 'reserve' and positive
+  'adjust'), `fundSpent(fund, month?)` ('spend', the fund's purpose) and what is still reserved (`fundAllocated` /
+  `fundCurrent`). Each movement counts in the fund's currency **at its own rates**. `countsAsSaving` no longer counts
+  'spend', so a purchase or a sinking payment does not lower the month's saving pace («اتحوّش للصناديق», the plan's
+  allocated, fund status "behind"). Covers and releases still count as money taken back. Note: what a goal still
+  *requires* follows what it holds now (`fundCurrent`), not what it spent.
+- `fundPurchases(fund)`: the expenses its spend movements paid (that still exist), newest first.
+
+### Achieved invariant (INV-13, `store/invariants.ts`)
+- `achievedViolations`: no 'reserve' (without a source transaction) and no incoming 'reallocate' on an achieved goal
+  made after `achievedAt` (`ACHIEVED_RECEIVED`). Restorations (the Q4 re-reserve, resolving a migrated reservation
+  'adjust') and money out are fine. `assertInvariants` checks INV-5, INV-9…11, INV-12 and INV-13.
 
 ### Spend invariant (INV-12, `store/invariants.ts`)
 - For every expense, its `spend` movements are < 0, all on the expense's account, and together ≤ the expense (`spendViolations`: `SPEND_NOT_EXPENSE`, `SPEND_WRONG_ACCOUNT`, `SPEND_NOT_NEGATIVE`, `SPEND_EXCEEDS_EXPENSE`); a fund never going negative is INV-5. A spend whose source transaction no longer exists (a sinking payment deleted before deletes gave spends back) is legacy and not checked. `assertInvariants` checks INV-5, INV-9…11 and INV-12; it runs in tests and the v7 → v8 migration, not on every load.
@@ -1500,6 +1527,8 @@ rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previ
 series by location and estimated points, money map, runway, fund projections, every insight trigger and the
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
+
+Fund-spending suites (step 3): «تم الهدف» (goals only, twice = once, keep vs release in one patch), AC-2 (reaching the target never achieves; the Q8 nudge, its counting of spending, dismissal, gone once achieved), AC-3 reopen, INV-13 guards with the state unchanged and everything still allowed (release, reallocate out, smaller allocation, details, spending the leftover, follow, cover candidate), AC-5, the two restorations, INV-13 itself, rule-4 exclusions (suggestions, plan suggestions, refill, nudges, Home, analytics) while history / totals / backups keep it, Q6 (the three metrics, by month, at their own rates; spending no longer lowers «اتحوّش» or the plan's allocated), AC-9 on every write path, error messages; the D4 fuzz also achieves (keep / release) and reopens goals and asserts INV-13 after every step and that no step adds new money to a goal that was already achieved.
 
 Fund-spending suites (step 2): the context of an expense shortfall (one fund, several funds, beyond fund + free money, an edited expense), only expense operations carry it, every split rule and problem code, the starting picks of each card, a retry with each card through `runAction` giving the two different results, AC-10 (cancelling changes nothing; a split with a problem sends nothing).
 

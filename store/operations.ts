@@ -1224,6 +1224,7 @@ export function allocateToFund(
   accountId?: string
 ): Patch {
   const fund = requireById(state.funds, fundId, 'fund');
+  assertOpen(fund);
   const value = fundMoney(state, fundId, amount, currency);
   assertPositive(value, 'amount');
   assertCurrency(currency);
@@ -1262,7 +1263,7 @@ export function allocateMany(
   const allocations = rawAllocations.map((a) => ({ ...a, amount: fundMoney(state, a.fundId, a.amount, a.currency) }));
   if (allocations.length === 0) fail('NOTHING_SELECTED');
   for (const { fundId, amount, currency } of allocations) {
-    requireById(state.funds, fundId, 'fund');
+    assertOpen(requireById(state.funds, fundId, 'fund'));
     assertPositive(amount, 'amount');
     assertCurrency(currency);
   }
@@ -1320,7 +1321,8 @@ export interface Reallocation {
 
 export function reallocate(state: State, input: Reallocation, ctx: OpContext): Patch {
   const from = requireById(state.funds, input.fromFundId, 'fund');
-  requireById(state.funds, input.toFundId, 'fund');
+  // An achieved goal may give its leftover to another fund (AC-4), never receive (INV-13).
+  assertOpen(requireById(state.funds, input.toFundId, 'fund'));
   if (input.fromFundId === input.toFundId) fail('DUPLICATE_ENTRY');
   const currency = input.currency ?? from.currency;
   assertCurrency(input.currency);
@@ -1353,6 +1355,40 @@ export function reReserveCovers(state: State, covers: CoverSelection[], sourceTr
   }
   if (moves.length === 0) fail('RESERVE_EXCEEDS_AVAILABLE');
   return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...moves] };
+}
+
+// --- Goals achieved (FUND_SPEND_AND_GOALS_DESIGN.md §3.4) ---------------------------------------------------------
+
+// INV-13 at the write boundary: an achieved goal receives no new money (reserve, reallocate in, a larger allocation).
+function assertOpen(fund: Fund) {
+  if (fund.achievedAt) fail('FUND_ACHIEVED', { id: fund.id });
+}
+
+// «تم الهدف 🎉»: the user's explicit confirmation (AC-2: reaching the target never does this). Goals only. With
+// `releaseLeftover` the fund's remaining reservations go back to free money in the SAME patch ('release' movements,
+// every account); without it they stay reserved and visible (AC-4). Never released by itself. Twice = once.
+export function achieveFund(state: State, fundId: string, options: { releaseLeftover: boolean }, ctx: OpContext): Patch {
+  const fund = requireById(state.funds, fundId, 'fund');
+  if (fund.type !== 'goal') fail('FUND_NOT_A_GOAL', { id: fundId });
+  if (fund.achievedAt) return {};
+  const funds = replaceById(state.funds, stamp({ ...fund, achievedAt: ctx.now().toISOString() }, ctx), 'fund');
+  if (!options.releaseLeftover) return { funds };
+  const use = snapshotForNow(state, ctx.now());
+  const released = state.accounts
+    .map((a) => ({ account: a, held: reservation(state, fundId, a.id) }))
+    .filter(({ held }) => held > 0.005)
+    .map(({ account, held }) => newReservation(use.id, fundId, account.id, -money(held, account.currency), 'release', 'تم الهدف', ctx));
+  return released.length > 0
+    ? { funds, ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...released] }
+    : { funds };
+}
+
+// «رجّعه هدف مفتوح» (AC-3): clears achievedAt. Released money is not taken back. Twice = once.
+export function reopenFund(state: State, fundId: string, ctx: OpContext): Patch {
+  const fund = requireById(state.funds, fundId, 'fund');
+  if (!fund.achievedAt) return {};
+  const { achievedAt: _done, ...rest } = fund;
+  return { funds: replaceById(state.funds, stamp(rest, ctx) as Fund, 'fund') };
 }
 
 // Gives a group of migrated movements ("محجوز ومش محدد حسابه") an account: every unresolved movement of this fund in
@@ -1421,6 +1457,8 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
 
   const use = snapshotForNow(state, ctx.now());
   const change = money(cashAllocation - fundAllocated(state, fundId), fund.currency);
+  // An achieved goal: details and its leftover's release may change, never more money in, never another type (INV-13).
+  if (fund.achievedAt && (change >= 0.005 || updated.type !== 'goal')) fail('FUND_ACHIEVED', { id: fundId });
   let moves: ReservationMovement[] = [];
   if (change >= 0.005) {
     moves = reserveFor(state, fundId, change, fund.currency, 'تعديل الرصيد', ctx, use.id);
