@@ -112,6 +112,7 @@ const MESSAGES: Record<FinanceErrorCode, (d: Details) => string> = {
   RECEIVABLE_PAYMENT_NOT_INCOME: () => 'دي تحصيل لفلوس ليّا، لازم تفضل دخل',
   RECEIVABLE_LINK_REQUIRED: () => '«عن شهر» بيتسجّل مع تحصيل فلوس ليّا بس',
   INVALID_KIND: () => 'النوع غير صالح',
+  SPEND_INVALID: () => 'المبلغ من الصندوق أكبر من اللي فيه في الحساب ده أو من المصروف',
   OCCURRENCE_NOT_DUE: () => 'المستحق ده اتسجل أو اتخطى بالفعل',
   CATEGORY_NAME_TAKEN: () => 'فيه بند بنفس الاسم بالفعل',
   CATEGORY_KIND_LOCKED: () => 'مينفعش تغيّر بند من مصروف لدخل أو العكس',

@@ -23,6 +23,11 @@ export interface CoverSelection {
 export interface OpOptions {
   // Reservations released to cover the shortfall of each account (exactly the shortfall).
   cover?: CoverSelection[];
+  // Fund money SPENT on the expense this operation records or edits (FUND_SPEND_AND_GOALS_DESIGN.md §3.1): the purchase
+  // was what the fund was for. Applied before the gate measures anything, so the fund's own money is used first and
+  // free money only for what is left. Only expenses take it (else SPEND_INVALID); on an edit, `[]` removes the link and
+  // leaving it out keeps the expense's current fund(s). Distinct from `cover` (borrowing for something else, AC-6).
+  spend?: CoverSelection[];
   // Reserved money that travels with a transfer or exchange: per fund, in the SOURCE account's currency, adding up
   // to what must leave. Default: proportional to each fund's reservation on the source account.
   follow?: { fundId: string; amount: number }[];
@@ -271,6 +276,20 @@ export function followPreview(
 
 // What covering a transaction took from the funds (Q4): per fund and account, net of any re-reservation of it.
 // After that transaction is deleted this is what the one-tap "رجّع للصناديق" offer gives back.
+// What «من صندوق» takes from `fundId` for an expense of `amount` on `accountId`: all of it if the fund holds that much
+// there, else what it holds (the rest comes from free money). Shared by the expense sheet and the operations, so the
+// sheet shows what is saved.
+export function planSpend(
+  state: Pick<FinanceState, 'accounts' | 'reservationMovements'>,
+  fundId: string,
+  accountId: string,
+  amount: number
+): number {
+  const currency = state.accounts.find((a) => a.id === accountId)?.currency;
+  if (!currency || !(amount > 0)) return 0;
+  return roundIn(Math.max(0, Math.min(amount, reservation(state, fundId, accountId))), currency);
+}
+
 export function coversOf(
   state: Pick<FinanceState, 'reservationMovements'>,
   sourceTransactionId: string

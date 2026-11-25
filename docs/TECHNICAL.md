@@ -198,7 +198,7 @@ utils/
   prices/fetchPrices.ts     fetchLivePrices (timeout, fallback, never throws), throttle helpers
 
 constants/                  theme.ts (design tokens), currencyRegistry.ts, countries.ts, currencies.ts (names, v7-shaped DEFAULT_RATES for the seeds), market.ts
-tests/logic.test.ts         497 tests over store/*, utils/* and the pure UI helpers
+tests/logic.test.ts         510 tests over store/*, utils/* and the pure UI helpers
 tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
@@ -1179,6 +1179,22 @@ Recurring operations:
   pending. `setDueNotifications(enabled)` stores the Settings toggle.
 - `TransactionSheet` edits keep `recurringRuleId`/`occurrenceDate` on every type.
 
+Spending from a fund (FUND_SPEND_AND_GOALS_DESIGN.md step 1; data unchanged, still v9):
+- `OpOptions.spend: { fundId, accountId, amount }[]` — fund money SPENT on the expense the operation records or edits
+  (the purchase was the fund's purpose). `addTransaction`, `updateTransaction` and `confirmOccurrence` apply it as `'spend'`
+  movements (`sourceTransactionId` = the expense, the expense's rate snapshot) **before** `settle` measures anything, so
+  the fund's own money pays first and free money only the rest; a cover is asked only beyond that. `SPEND_INVALID` when
+  the transaction is not an expense, the account differs, an amount is not > 0, a fund would spend more than it holds on
+  that account, or the spends add up to more than the expense. Operations that record no income / expense ignore it.
+  `planSpend(fund, account, amount)` (cover.ts) = min(amount, the fund's reservation there): what «من صندوق» takes.
+- The link is derived (`selectors.spendOf(txId)`), never stored on the transaction. **Edit:** the old spend movements are
+  removed (tombstoned) and re-applied — an explicit `options.spend` wins (`[]` = none); otherwise the same fund(s) at
+  min(new amount, what the fund holds on the possibly new account); a non-expense spends nothing. **Delete:** the spend
+  movements are removed with the expense (tombstones), so the money goes back to the fund automatically — sinking
+  payments included; their `nextDueDate` is not moved back. `cover` movements are untouched by delete (the Q4 offer).
+- `paySinkingFund` uses the same spend stage (same movement: min(payment, the fund's reservation on the paying account),
+  note «اتدفعت: …»).
+
 Receivables (data v9; none of them touches an account, a balance or a reservation, except `collectReceivable`):
 - `addReceivable({ label, kind, forMonth?, amount, currency, dueDate?, note? })`: label trimmed and required; kind
   salary|other (`INVALID_KIND`); known currency; amount > 0, rounded to its currency; a salary needs `forMonth`
@@ -1214,7 +1230,7 @@ SINKING_SCHEDULE_REQUIRED, NOT_A_SINKING_FUND, HOLDING_HAS_PURCHASE, ASSET_PURCH
 DUPLICATE_ENTRY, PLAN_EXISTS, OCCURRENCE_NOT_DUE, CATEGORY_NAME_TAKEN, CATEGORY_KIND_LOCKED,
 DEFAULT_CATEGORY_DELETE, PLAN_NOT_FOUND, RECEIVABLE_FOR_MONTH_REQUIRED, RECEIVABLE_AMOUNT_BELOW_COLLECTED,
 RECEIVABLE_CURRENCY_LOCKED, RECEIVABLE_IN_USE, RECEIVABLE_SETTLED, RECEIVABLE_OVER_COLLECTED, RECEIVABLE_WRITTEN_OFF,
-RECEIVABLE_PAYMENT_NOT_INCOME, RECEIVABLE_LINK_REQUIRED, INVALID_KIND`. `FinanceErrorDetails` may carry `amount` +
+RECEIVABLE_PAYMENT_NOT_INCOME, RECEIVABLE_LINK_REQUIRED, INVALID_KIND, SPEND_INVALID`. `FinanceErrorDetails` may carry `amount` +
 `currency`, which the message shows (e.g. «ده أكتر من الباقي (ج.م 600)…»). Backup errors (`store/backup.ts → BackupError`):
 `INVALID_FILE, UNSUPPORTED_VERSION, PASSWORD_REQUIRED, WRONG_PASSWORD`.
 
@@ -1295,6 +1311,9 @@ All of these take an optional `to` (default the reporting currency) and round ea
 - «غير محصّل»: `openReceivablesByCurrency` (open + partial remaining per currency) and `openReceivablesValue(to)` (the same at **today's** rates; informational, never added to money).
 - `duplicateSalaryReceivable` (Q5 warning: same trimmed label + month), `receivableRefillSuggestion(accountId, collected)` (Q8: `suggestAllocationIn` over min(collected, the account's available) — funds below target only, by priority, each capped by its suggested monthly amount).
 - No money selector reads `receivables` (tested: net worth, liquid, unassigned, month summary, safe-to-spend, the v8 report).
+
+### Spend invariant (INV-12, `store/invariants.ts`)
+- For every expense, its `spend` movements are < 0, all on the expense's account, and together ≤ the expense (`spendViolations`: `SPEND_NOT_EXPENSE`, `SPEND_WRONG_ACCOUNT`, `SPEND_NOT_NEGATIVE`, `SPEND_EXCEEDS_EXPENSE`); a fund never going negative is INV-5. A spend whose source transaction no longer exists (a sinking payment deleted before deletes gave spends back) is legacy and not checked. `assertInvariants` checks INV-5, INV-9…11 and INV-12; it runs in tests and the v7 → v8 migration, not on every load.
 
 ### Receivable invariants (`store/invariants.ts`, data v9)
 - **INV-9:** per receivable, `0 ≤ collected ≤ amount` (+0.005), collected = Σ its incomes in its currency.
@@ -1467,6 +1486,8 @@ rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previ
 series by location and estimated points, money map, runway, fund projections, every insight trigger and the
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
+
+Fund-spending suites (step 1): the tablet case (spend first; without a choice today's 2,000 question; answering «من صندوق» vs today's cover gives different numbers), partial spend, overdraft beyond fund + free, `planSpend`, every `SPEND_INVALID` case with the state unchanged, edits (amount down / up, date / category, another account with and without the fund, explicit «بدون» and fund switch, type change), AC-7 full reversal (all fund, fund + free, free + cover with the Q4 offer, spend + cover + free, sinking payment), the sinking movement unchanged and its delete, a transfer after the purchase, a confirmed recurring expense with a spend and processDue never spending, AC-10 atomicity, INV-12 itself; the D4 fuzz adds expenses «من صندوق» (valid and refused) and edits of them, asserting INV-12 after every step.
 
 v9 suites (receivables step 3): the Q9 Next Best Action (one per overdue receivable, partial shows what is left, gone when settled / written off / not yet due, snoozed through `dismissAction` for 24 h per receivable) and the UI helpers (status chips, subtitles, open / closed split, the account helper per currency, Q2 / Q3 notes, the amount hint, new-receivable defaults, the Q8 offer rule).
 

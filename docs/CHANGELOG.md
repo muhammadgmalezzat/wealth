@@ -6,6 +6,22 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
+## Unreleased — branch `goals-upgrade` · 1.2.0 · data v9 (no migration) — spending from a fund, step 1 of 5
+
+> Not released. Step 1 of FUND_SPEND_AND_GOALS_DESIGN.md (the spend core); no new screen yet.
+
+*For users*
+- حذف مصروف اتدفع من فلوس صندوق (زي «اتدفعت» لمصاريف دورية) بقى بيرجّع الفلوس للصندوق لوحده، والموعد الجاي مش بيرجع لورا. وتعديل مبلغه بيظبط اللي اتاخد من الصندوق.
+
+*Technical*
+- `OpOptions.spend` (fund money spent on the expense, applied before the cover gate), `planSpend`, `selectors.spendOf`;
+  `addTransaction` / `updateTransaction` / `confirmOccurrence` apply it; edit re-applies the expense's fund(s), delete
+  removes its spend movements (money back to the fund, tombstoned); `paySinkingFund` on the same stage (same movement).
+- INV-12 (`spendViolations`, in `assertInvariants`); new code `SPEND_INVALID`.
+- Tests 497 → 510 (+ the D4 fuzz with fund spending). Frozen oracle unchanged.
+
+---
+
 ## Unreleased (ready to ship) — branch `stage-1` · 1.2.0 (OTA, no new build) · data v9 — «فلوس ليّا» (money owed to me)
 
 > **This release ships two things:** data **v9** (receivables, below) **and the stage-1 restore-safety fixes** (the

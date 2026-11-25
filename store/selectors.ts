@@ -15,6 +15,7 @@ import type {
   FinanceState,
   Fund,
   ReservationKind,
+  ReservationMovement,
   GoldKarat,
   Holding,
   IncomeExpenseTransaction,
@@ -399,6 +400,13 @@ export function fundMovementRows(state: MovementRowState): FundMovementRow[] {
 // (reallocate, a transfer or exchange carrying it) saves nothing new.
 export const countsAsSaving = (kind: ReservationKind): boolean =>
   kind !== 'reallocate' && kind !== 'follow_transfer' && kind !== 'follow_exchange';
+
+// The fund money an expense SPENT (its 'spend' movements, FUND_SPEND_AND_GOALS_DESIGN.md §3.3): the link between a
+// purchase and its fund(s) is derived from these, never stored on the transaction. Amounts are ≤ 0, in the account's
+// currency.
+export function spendOf(state: Pick<State, 'reservationMovements'>, transactionId: string): ReservationMovement[] {
+  return state.reservationMovements.filter((m) => m.kind === 'spend' && m.sourceTransactionId === transactionId);
+}
 
 // What fund `fundId` has reserved on `accountId`, in the account's currency.
 export function reservation(state: Pick<State, 'reservationMovements' | 'accounts'>, fundId: string, accountId: string): number {

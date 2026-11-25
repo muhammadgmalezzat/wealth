@@ -1,6 +1,6 @@
 # Spending from a fund, goals achieved, and the cover-sheet order — design
 
-Status: **approved (2026-11-24), not built.** Decisions: §6 (Q1, Q6, Q8 and §3.3, marked **Decided**). Additional
+Status: **approved (2026-11-24); step 1 of §9 implemented** (the spend core; see the step report). Steps 2–5 not built. Decisions: §6 (Q1, Q6, Q8 and §3.3, marked **Decided**). Additional
 acceptance criteria: §10 (AC-1 … AC-10). Builds on data v9 (`CURRENCY_AND_FUNDS_DESIGN.md`: account-backed
 reservations, INV-5, the cover gate; `RECEIVABLES_DESIGN.md`: the refill offer). All numbers here are made up.
 
