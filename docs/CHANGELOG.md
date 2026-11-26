@@ -6,9 +6,100 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased — 2026-11-26 · branch `analytics` · 1.2.0 (OTA, no new build) · **data v10** — daily snapshot history (analytics Phase 1a)
+## Unreleased — 2026-11-26 · branch `analytics` · 1.2.0 (OTA) · data v10 (no migration) — the «الإنفاق» tab redesigned (analytics Phase 3)
 
-Not released. Design: `docs/architecture/PROFESSIONAL_ANALYTICS_AND_COMPARISON_DESIGN.md` (Phase 1a).
+Not released.
+
+*For users*
+- «الإنفاق» بقى بنفس اختيار الفترة بتاع «نظرة عامة». فيه: دايرة «فلوسك راحت فين» وتحتها كل البنود مترتبة، المصروف يوم
+  بيوم بخط المتوسط، «قارن بند» بين فترتين، المصروف حسب الحساب والعملة، و«اتدفع منين» (صناديق / فلوس حرة / لمرة واحدة).
+  الملاحظات وخريطة فلوسك وفلوسك تكفي لحد إمتى والصناديق زي ما هي.
+- «صافي الثروة عبر الوقت» بقى زرار **شهري** في كارت صافي الثروة (كل نقطة تقديرية).
+- «Spending» now uses the shared period selector, with a category donut and ranked list, a daily trend, a category
+  comparison, spending by account / currency and where it was paid from. Net worth over time is the hero's «شهري» view.
+
+*Technical*
+- New `store/spending.ts` (`spendingView`, `legacyPeriodOf`, `compareCategory`), `store/shares.ts` (`categoryShares`,
+  `largestRemainder`; the footprint now builds on them), `components/analytics/{SpendingSection.tsx,spendingUi.ts}`;
+  `store/analytics.ts` gains `spendingByDay`, `spendingByAccount`, `spendingByCurrency` (same scan rows);
+  `seriesLayout.ts` gains `donutSlices`, `sliceAt`, `singleBars`; `overview().monthly`; `NetWorthChart` generalized.
+- Removed `AnalyticsControls`, `SankeyChart`, `TrendSection`, `BreakdownSection`, `NetWorthSection`.
+- No number changes against the old screen (tested for every preset × three currencies × the one-time toggle), except
+  rows dated after today, which the measured period (Phase 1b) leaves out.
+- Tests: `tests/spending.test.ts` (14); `richWorld` moved to `tests/fixtures/synthetic.ts`; 697 pass.
+
+---
+
+## Unreleased — 2026-11-26 · branch `analytics` · 1.2.0 (OTA) · data v10 (no migration) — Overview charts (analytics Phase 2b)
+
+Not released.
+
+*For users*
+- «نظرة عامة» بقى فيها **التدفق الشهري** (أعمدة الدخل والمصروف لكل شهر أو أسبوع، بالمتوسطات وعدد شهور الفايض والعجز)،
+  و**بصمة الإنفاق** (أكبر ٤ بنود والباقي، بالنسب والمبالغ والتغيّر)، وخطوط صغيرة جوه كروت الدخل والمصروف والصافي.
+  كل ده من المعاملات المتسجّلة، فبيبقى دقيق من أول يوم.
+- Overview now has income-vs-spending bars, a spending footprint and sparklines, all from recorded transactions.
+
+*Technical*
+- New `store/cashflowCharts.ts` (`cashflowChart`, `spendingFootprint`), `components/analytics/{CashflowBars,
+  SpendingFootprintCard,Sparkline}.tsx`, `categoryIcons.ts`; `seriesLayout.ts` gains `groupedBars`, `slotAt`,
+  `sparkLayout`; `overview()` gains `cashflow`, `sparkline`, `footprint`, `pointSparks`; `SeriesPoint.metrics`.
+- Theme token `chartLime`; reserved money drawn in `primary900` (gold stays for gold).
+- A card whose previous side is missing now says so («مفيش دخل في الفترة اللي فاتت»).
+- Tests: `tests/charts.test.ts` (17); 683 pass. `tsc`, `expo lint` clean.
+
+---
+
+## Unreleased — 2026-11-26 · branch `analytics` · 1.2.0 (OTA) · data v10 (no migration) — Overview tab and Compare screen (analytics Phase 2)
+
+Not released.
+
+*For users*
+- التحليلات بقت فيها **نظرة عامة**: اختيار الفترة من فوق («الشهر ده ▾») بكل الفترات ومنها **دورة الراتب**، صافي ثروتك
+  وتغيّره ورسم يوم بيوم من السجل اليومي (الأيام الفاضية بتفضل فاضية)، ٦ كروت (الدخل، المصروف، الصافي، معدل التحويش،
+  الفلوس الحرة، المحجوز) كل واحد بمقارنته، و«فلوسك فين».
+- شاشة جديدة **قارن وضعك المالي**: فترة بفترة أو تاريخ بتاريخ، مع زرار تبديل.
+- التحليلات القديمة كلها زي ما هي تحت **الإنفاق**.
+- Analytics now opens on **Overview** (period pill incl. pay cycle, net worth with a daily chart that keeps gaps, six cards
+  with comparisons, the money position) and has a **Compare** screen (period vs period, date vs date, swap). The existing
+  sections are unchanged under «الإنفاق».
+
+*Technical*
+- New `store/overview.ts`, `components/analytics/{OverviewSection,NetWorthChart,PeriodSheet,CompareRow}.tsx`,
+  `overviewUi.ts`, `seriesLayout.ts`, routes `app/compare.tsx`, `app/analytics-metric.tsx` (placeholder). Engine:
+  `netWorthDailySeries`, `pointValues`, point metric `nonLiquid`, `resolvePeriodChoice`, `selectors.transactionAccountEffects`
+  (shared by `accountNetFlow`, no output change). Chart drawn with `react-native-svg` (no new dependency).
+- Decision 3: the threshold only sets the arrow / colour («مستقر»); the change amount is always shown.
+- Tests: `tests/overview.test.ts` (23) + `tests/fixtures/synthetic.ts`; 666 pass. `tsc`, `expo lint` clean; web walkthrough
+  of a production export (synthetic seed) without console errors.
+
+---
+
+## Unreleased — 2026-11-26 · branch `analytics` · 1.2.0 · data v10 (no migration) — analytics engine (Phase 1b)
+
+Not released. Engine only: **no visible change** (nothing on screen uses it until Phase 2), no data version change.
+
+*For users*
+- Nothing changes on screen.
+
+*Technical*
+- New `store/periods.ts` (all presets incl. Saturday weeks and the pay cycle from salary receipts with 20-day grouping
+  and a manual cycle-start preference; previous periods; coverage; D10 elapsed-days alignment), `store/comparison.ts`
+  (change rules without NaN / ∞ on zero, negative and sign-flipped bases, percentage points for rates; Mode A period
+  side and period comparison with the «من صندوق» split, the D4 savings rate, notes and categories), `store/history.ts`
+  (Mode B positions from daily snapshots / today / labelled ledger reconstruction, valuation equal to the live
+  selectors, historical vs constant prices), `store/memo.ts` (identity-keyed memoization).
+- New optional settings `analyticsPeriod` (D6) and `payCycleStartOverride` (D1) with op / action
+  `setAnalyticsPreferences`; optional fields, round-trip through backups, **no data version change**.
+- `selectors.isContribution` exported (the existing Q6 rule of `fundContributed`; no output change).
+- Tests: new `tests/analyticsEngine.test.ts` (60), added to `npm run test:logic`; 643 tests pass, every existing test
+  unchanged. `tsc` and `expo lint` clean.
+
+---
+
+## 1.2.0 · data v10 · released (OTA) — daily snapshot history (analytics Phase 1a)
+
+Released after on-device verification. Design: `docs/architecture/PROFESSIONAL_ANALYTICS_AND_COMPARISON_DESIGN.md` (Phase 1a).
 
 ### Release notes
 

@@ -453,6 +453,12 @@ export interface Settings {
   priceSource?: PriceSource;
   // "فرق السوق المحلي %": added to the world gold price (missing = 0).
   localPremiumPct?: number;
+  // Analytics preferences (optional, no migration; set by setAnalyticsPreferences). The remembered period preset
+  // only, never custom dates (D6; a PeriodPreset other than 'custom', store/periods.ts). And the manual pay-cycle
+  // start (D1): a date key the current cycle starts on instead of the detected salary receipt. A preference only,
+  // never a ledger change.
+  analyticsPeriod?: string;
+  payCycleStartOverride?: string;
   // Last time auto mode applied fetched prices (ISO), and what went wrong on the last attempt
   // (cleared by a fully successful one).
   lastPriceFetchAt?: string;

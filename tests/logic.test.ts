@@ -5210,7 +5210,7 @@ describe('dark theme contrast', () => {
 
   it('chart colours stand out from the card (3:1) and from each other in the legend', () => {
     const card = over(c.glassStrong, c.surface);
-    const chart = [c.primary700, c.chartSky, c.chartViolet, c.chartRose, c.gold, c.textMuted, c.warning, c.primary900];
+    const chart = [c.primary700, c.chartSky, c.chartViolet, c.chartRose, c.chartLime, c.gold, c.textMuted, c.warning, c.primary900];
     for (const colour of chart) assert.ok(contrast(colour, card) >= 3, `${colour} on card: ${contrast(colour, card).toFixed(2)}`);
     assert.equal(new Set(chart).size, chart.length);
     // Axis labels and gridlines on the card.

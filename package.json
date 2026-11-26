@@ -8,7 +8,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test:logic": "tsx --test tests/logic.test.ts tests/dailySnapshots.test.ts",
+    "test:logic": "tsx --test tests/logic.test.ts tests/dailySnapshots.test.ts tests/analyticsEngine.test.ts tests/overview.test.ts tests/charts.test.ts tests/spending.test.ts",
     "check:release": "node scripts/check-release.mjs",
     "brand": "node scripts/brand.mjs"
   },

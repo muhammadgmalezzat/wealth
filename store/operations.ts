@@ -12,6 +12,7 @@ import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } fro
 import { coversOf, expenseContext, followPreview, NeedsCoverError, planRelease, planReserve, planSpend, shortfallsBetween, type CoverSelection, type OpOptions, type Shortfall } from './cover';
 import { invariantViolations } from './invariants';
 import { CATEGORY_IDS, feeCategoryId } from './defaultCategories';
+import { isRememberablePreset } from './periods';
 import { snapshotForNow } from './rateSnapshots';
 import { syncSnapshots } from './snapshots';
 import {
@@ -2368,6 +2369,32 @@ export function setPricePreferences(state: State, prefs: PricePreferences, ctx: 
       goldPricesEGP(settings.lastGoldUsdPerOunce, settings.rates.perUsd.EGP, settings.localPremiumPct),
       { goldPriceUpdatedAt: ctx.now().toISOString() }
     );
+  }
+  return { settings };
+}
+
+export interface AnalyticsPreferences {
+  // The period preset to remember (D6: never 'custom'); null forgets it (back to the default, this month).
+  period?: string | null;
+  // D1: the manual pay-cycle start, a date key not in the future; null clears it.
+  payCycleStart?: string | null;
+}
+
+// Analytics preferences: settings only, no ledger record changes.
+export function setAnalyticsPreferences(state: State, prefs: AnalyticsPreferences, ctx: OpContext): Patch {
+  const settings = { ...state.settings };
+  if (prefs.period !== undefined) {
+    if (prefs.period === null) delete settings.analyticsPeriod;
+    else if (!isRememberablePreset(prefs.period)) fail('INVALID_KIND');
+    else settings.analyticsPeriod = prefs.period;
+  }
+  if (prefs.payCycleStart !== undefined) {
+    if (prefs.payCycleStart === null) delete settings.payCycleStartOverride;
+    else {
+      assertDate(prefs.payCycleStart, 'date');
+      if (prefs.payCycleStart > toDateKey(ctx.now())) fail('INVALID_DATE', { field: 'date' });
+      settings.payCycleStartOverride = prefs.payCycleStart;
+    }
   }
   return { settings };
 }

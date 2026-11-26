@@ -176,6 +176,8 @@ interface FinanceActions {
   updateSettings: (update: ops.SettingsUpdate) => void;
   setPricePreferences: (prefs: ops.PricePreferences) => void;
   setCurrencyPreferences: (prefs: ops.CurrencyPreferences) => void;
+  // Analytics: the remembered period preset (D6) and the manual pay-cycle start (D1). Settings only.
+  setAnalyticsPreferences: (prefs: ops.AnalyticsPreferences) => void;
   // Fetches live prices and applies them (auto mode only; manual mode resolves without a
   // request). `force` skips the 6-hour throttle ("تحديث الأسعار الآن"). Never throws; the
   // outcome is in settings.lastPriceFetchAt / lastPriceFetchError.
@@ -336,6 +338,7 @@ export const useFinanceStore = create<FinanceStore>()(
       updateSettings: (update) => set(ops.updateSettings(get(), update, ctx)),
       setPricePreferences: (prefs) => set(ops.setPricePreferences(get(), prefs, ctx)),
       setCurrencyPreferences: (prefs) => set(ops.setCurrencyPreferences(get(), prefs, ctx)),
+      setAnalyticsPreferences: (prefs) => set(ops.setAnalyticsPreferences(get(), prefs, ctx)),
       refreshPrices: async ({ force = false } = {}) => {
         const { settings } = get();
         if (priceSourceOf(settings) !== 'auto') return;

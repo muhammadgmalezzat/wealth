@@ -83,22 +83,29 @@ type LiquidByCurrencyState = LiquidState & Pick<State, 'funds' | 'holdings' | 'u
 
 // Net effect of all transactions on the account, in its own currency. Added in integer minor units, so
 // a thousand 0.01s are exactly 10.00.
+// What one transaction does to account balances: signed amounts per account, each in that account's currency. The
+// single rule balances are made of (accountNetFlow, and the daily series in store/history.ts).
+export function transactionAccountEffects(tx: Transaction): { accountId: string; amount: number }[] {
+  if (tx.type === 'transfer' || tx.type === 'exchange') {
+    const sent = tx.type === 'transfer' ? tx.amount : tx.sentAmount;
+    const received = tx.type === 'transfer' ? tx.amount : tx.receivedAmount;
+    return [
+      { accountId: tx.fromAccountId, amount: -sent },
+      { accountId: tx.toAccountId, amount: received },
+      // Fees leave the account they are charged to, on top of the move itself.
+      ...tx.fees.map((fee) => ({ accountId: fee.accountId, amount: -fee.amount })),
+    ];
+  }
+  // Expenses and asset purchases both take money out of the account.
+  return [{ accountId: tx.accountId, amount: tx.type === 'income' ? tx.amount : -tx.amount }];
+}
+
 export function accountNetFlow(state: Pick<State, 'accounts' | 'transactions'>, accountId: string): number {
   const account = state.accounts.find((a) => a.id === accountId);
   if (!account) return 0;
   const effects: number[] = [];
   for (const tx of state.transactions) {
-    if (tx.type === 'transfer' || tx.type === 'exchange') {
-      const sent = tx.type === 'transfer' ? tx.amount : tx.sentAmount;
-      const received = tx.type === 'transfer' ? tx.amount : tx.receivedAmount;
-      if (tx.fromAccountId === accountId) effects.push(-sent);
-      if (tx.toAccountId === accountId) effects.push(received);
-      // Fees leave the account they are charged to, on top of the move itself.
-      for (const fee of tx.fees) if (fee.accountId === accountId) effects.push(-fee.amount);
-    } else if (tx.accountId === accountId) {
-      // Expenses and asset purchases both take money out of the account.
-      effects.push(tx.type === 'income' ? tx.amount : -tx.amount);
-    }
+    for (const effect of transactionAccountEffects(tx)) if (effect.accountId === accountId) effects.push(effect.amount);
   }
   return sumTo(effects, decimalsFor(account.currency));
 }
@@ -676,9 +683,12 @@ export function fundSpent(state: State, fundId: string, month?: string): number 
   return 0 - fundMetric(state, fundId, (m) => m.kind === 'spend', month);
 }
 
+// A movement that PUTS money into a fund (Q6 contributions): a reservation, or a positive migrated adjustment.
+export const isContribution = (m: Pick<FundMovementRow, 'kind' | 'amount'>): boolean => m.kind === 'reserve' || (m.kind === 'adjust' && m.amount > 0);
+
 // What was put into the fund (positive), optionally in one month.
 export function fundContributed(state: State, fundId: string, month?: string): number {
-  return fundMetric(state, fundId, (m) => m.kind === 'reserve' || (m.kind === 'adjust' && m.amount > 0), month);
+  return fundMetric(state, fundId, isContribution, month);
 }
 
 // The expenses the fund's money paid for (its 'spend' movements' sources that still exist), newest first.

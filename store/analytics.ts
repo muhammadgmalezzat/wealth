@@ -160,6 +160,10 @@ interface Rec {
   categoryId?: string;
   bucket?: ExpenseBucket;
   oneTime: boolean;
+  // Income / expense rows: the account and the native amount in its currency.
+  accountId?: string;
+  currency?: CurrencyCode;
+  native?: number;
 }
 
 function bucketLookup(state: State) {
@@ -181,9 +185,18 @@ function scan(state: State, period: Pick<Period, 'from' | 'to'>, currency: Displ
     if (tx.type === 'asset_purchase') {
       result.push({ ...base, kind: 'gold', oneTime: false });
     } else if (tx.type === 'income') {
-      result.push({ ...base, kind: 'income', categoryId: tx.categoryId, oneTime: false });
+      result.push({ ...base, kind: 'income', categoryId: tx.categoryId, oneTime: false, accountId: tx.accountId, currency: tx.currency, native: tx.amount });
     } else if (includeOneTime || !tx.oneTime) {
-      result.push({ ...base, kind: 'expense', categoryId: tx.categoryId, bucket: bucketFor(tx.categoryId), oneTime: !!tx.oneTime });
+      result.push({
+        ...base,
+        kind: 'expense',
+        categoryId: tx.categoryId,
+        bucket: bucketFor(tx.categoryId),
+        oneTime: !!tx.oneTime,
+        accountId: tx.accountId,
+        currency: tx.currency,
+        native: tx.amount,
+      });
     }
   }
   return result;
@@ -249,6 +262,50 @@ function totalsOf(state: State, query: AnalyticsQuery, period: Pick<Period, 'fro
 export function periodTotals(state: State, query: AnalyticsQuery): PeriodTotals {
   return totalsOf(state, query, query.period);
 }
+
+// --- Spending by day / account / currency (Phase 3) -----------------------------------------------------------------
+//
+// From the same rows as periodTotals (fees included, transfers / exchanges / gold excluded, the one-time toggle), so
+// each breakdown adds up to periodTotals(...).expense exactly.
+
+export function spendingByDay(state: State, query: AnalyticsQuery): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of scan(state, query.period, query.currency, query.includeOneTime)) {
+    if (r.kind === 'expense') out.set(r.date, addIn(out.get(r.date) ?? 0, r.amount, query.currency));
+  }
+  return out;
+}
+
+export interface NativeSpend {
+  // An account id, or a currency code.
+  key: string;
+  currency: CurrencyCode;
+  // In its own currency (never converted).
+  native: number;
+  // In the display currency, as recorded.
+  value: number;
+}
+
+function spendingBy(state: State, query: AnalyticsQuery, keyOf: (r: Rec) => string): NativeSpend[] {
+  const groups = new Map<string, { currency: CurrencyCode; native: number[]; value: number }>();
+  for (const r of scan(state, query.period, query.currency, query.includeOneTime)) {
+    if (r.kind !== 'expense') continue;
+    const key = keyOf(r);
+    const g = groups.get(key) ?? { currency: r.currency ?? '', native: [], value: 0 };
+    g.native.push(r.native ?? 0);
+    g.value = addIn(g.value, r.amount, query.currency);
+    groups.set(key, g);
+  }
+  return [...groups.entries()]
+    .map(([key, g]) => ({ key, currency: g.currency, native: sumIn(g.native, g.currency), value: g.value }))
+    .sort((a, b) => b.value - a.value || (a.key < b.key ? -1 : 1));
+}
+
+// Spending per account (fees count on the account they were charged to).
+export const spendingByAccount = (state: State, query: AnalyticsQuery): NativeSpend[] => spendingBy(state, query, (r) => r.accountId ?? '');
+
+// Spending per currency: the native total of that currency, and its value as recorded.
+export const spendingByCurrency = (state: State, query: AnalyticsQuery): NativeSpend[] => spendingBy(state, query, (r) => r.currency ?? '');
 
 // One-time expenses in the period, whatever the toggle says.
 export function oneTimeSpend(state: State, query: AnalyticsQuery): number {

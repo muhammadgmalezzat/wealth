@@ -51,6 +51,8 @@ export default function RootLayout() {
         <Stack.Screen name="assets" options={{ title: 'الأصول', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="review" options={{ title: 'مراجعة الشهر', headerBackTitle: 'رجوع' }} />
         <Stack.Screen name="period-transactions" options={{ title: 'المعاملات', headerBackTitle: 'رجوع' }} />
+        <Stack.Screen name="compare" options={{ title: 'قارن وضعك المالي', headerBackTitle: 'رجوع' }} />
+        <Stack.Screen name="analytics-metric" options={{ title: 'التفاصيل', headerBackTitle: 'رجوع' }} />
       </Stack>
       <RecurringRunner />
       <PriceRunner />

@@ -678,6 +678,166 @@ Exchange rates and gold prices come from free, key-less APIs called straight fro
 - `netWorthChange(state, now)`: live net worth − last month's snapshot (`pct` = change ÷
   |start|, null from 0); null without the snapshot.
 
+### «الإنفاق» tab (Phase 3: `store/spending.ts`, `store/shares.ts`, `components/analytics/SpendingSection.tsx`, `spendingUi.ts`)
+
+- **One period system:** the old controls are gone; both chips share the pill, the sheet (D6 remembered preset), the
+  currency segment and the screen state. «الإنفاق» adds the switch «اشمل المصاريف اللي لمرة واحدة» (default on) and its
+  own period A.
+- **`spendingView(state, { period, alignment, currency, includeOneTime, previous? })`** (memoized): `comparePeriods`
+  (flows; `previous` = a chosen period A), `categoryShares` (every category, largest first, tenths of a percent by
+  largest remainder over ALL categories = 1000), the footprint (top 4 + rest, built on the same shares, so a category
+  shows the same % on both tabs), the trend (`spendingByDay`: each tracked, measured day; a day without spending is a
+  real 0; weeks from Saturday beyond `MAX_DAILY_BARS` = 92 days; `average` = spending ÷ bars = the card's average daily
+  spending), `spendingByAccount` / `spendingByCurrency` (native totals + value as recorded), `oneTimeSpend` (whatever
+  the toggle says) and its share, «من صندوق» / free money (Phase 1b metrics). All from `store/analytics.ts`' `scan`
+  (rows now carry account, currency and native amount), so every breakdown adds up to `periodTotals(...).expense`.
+- **Screen:** «فلوسك راحت فين» (own SVG donut `donutSlices` / `sliceAt`, total in the centre, a tapped slice shows its
+  amount, share and change; the ranked list with icon, bar, amount, share and change; taps open the category's
+  transactions), «المصروف يوم بيوم» (`singleBars` with a dashed average line, tap for a day), «قارن بند» (a category
+  across A and B, `compareCategory`), «اتصرف من فين» (by account / currency), «اتدفع منين» (funds vs free, one-time).
+  Then the sections kept from the old tab — «ملاحظات», «خريطة فلوسك», «فلوسك تكفي لحد إمتى», «الصناديق» — on
+  `legacyPeriodOf(period)` (the old preset for this month / 3 / 6 / 12 months / since start, a custom range otherwise),
+  so their numbers are exactly the old ones.
+- **Removed** (replaced): `AnalyticsControls`, `SankeyChart` (→ the donut), `TrendSection` (→ «التدفق الشهري» on the
+  Overview), `BreakdownSection` (→ the ranked list), `NetWorthSection` (→ the hero's «شهري» view). The pure helpers
+  they used (`spendingFlow`, `monthlyTrend`, `sankeyLayout`, `stackedFlowSegments`) stay, still tested.
+- **Overview hero «يومي / شهري»:** the monthly view is `overview().monthly`: the old `netWorthSeries` (all locations,
+  estimated included) per month, gaps for months without a snapshot, at most 24 months ending with the period's last
+  month; every point is labelled «تقديري» with «كل نقطة تقديرية: آخر قيمة شافها التطبيق في الشهر، مش آخر يوم فيه
+  بالظبط». Same `NetWorthChart` (now with `labelOf`, `tag`, `gapText`, `hint`).
+- A pill of a "previous" period reads «الفترة اللي فاتت ▾» (`PeriodPill previous`), never its preset's name.
+- **The one difference from the old screen** (approved definition, Phase 1b): figures are measured up to today while
+  a period runs, so a row dated after today no longer counts in this month's spending (tested).
+
+### Overview charts (Phase 2b: `store/cashflowCharts.ts`, `components/analytics/{CashflowBars,SpendingFootprintCard,Sparkline}.tsx`, `categoryIcons.ts`)
+
+Transaction-based, so exact from day one (no daily snapshots). Below the six cards, in this order:
+
+- **«التدفق الشهري»** (`cashflowChart(state, period, { currency })`): income vs spending bars from `periodTotals` per
+  bucket (transfers, exchanges, fund allocations, gold purchases never count; fees are spending; one-time included like
+  the cards). Periods of 31 days or less → **Saturday weeks** clipped to the period; longer → **calendar months**, at
+  least the last 6 up to the period's last month, the period's own months when longer. A month the period starts
+  inside is split at that day, so the bars inside the period (`inPeriod`) add up **exactly** to the income and spending
+  cards (tested for every preset × EGP / SAR / USD). Buckets before the tracking start are not drawn (no zero bars);
+  `dataStart` says where the data starts. The running bar is faded with a dashed outline («العمود الباهت لسه شغال»).
+  Touch / drag shows a bar's income, spending, net and savings rate (defaults to the running or last bar). Under it:
+  average income and spending per **complete** bar (not running, not partial) and «شهور بفايض / بعجز». Own SVG
+  (`groupedBars`: zero stays zero, round axis from 0, time left → right like every chart).
+- **«بصمة الإنفاق»** (`spendingFootprint(comparison)`): the period's spending by category (the comparison's own
+  category totals): top 4 + «باقي الفئات (n)»; one stacked bar (largest on the right) and a tile per part with its icon,
+  share, amount and change (`changeLine`, decision 3). Shares in tenths of a percent by largest remainder, so they add
+  up to exactly 100.0 %; amounts add up to the spending card exactly. «باقي الفئات»'s change compares the same categories
+  before. A tile opens its transactions (`/period-transactions`; the rest = every category but the top ones). A period
+  with no data says so (total `null`), one with no spending says «مفيش مصروف».
+- **Sparklines** (`Sparkline`, `sparkLayout`): income, spending and net cards always show the **last 6 calendar months**
+  up to the period's end (`cashflowChart(..., { unit: 'month', minMonths: 6, followPeriod: false })`), the running month
+  as a hollow dot not joined to the line; the free-money and reserved cards only once the period has at least 7
+  recorded days (`MIN_SPARK_DAYS`, from the daily series, gaps kept).
+- **Colours** (`categoryIcons.ts`): income `primary` (emerald), spending `chartSky`, reserved `primary900`, everywhere;
+  footprint hues `chartSky`, `chartViolet`, `chartRose`, new token **`chartLime`** (in the contrast test), rest
+  `textMuted`; never emerald or gold for a category. Icons: the default categories by id, any other by its bucket.
+- The daily series now carries every point metric per day (`SeriesPoint.metrics`).
+
+### Overview tab and Compare screen (Phase 2: `store/overview.ts`, `components/analytics/{OverviewSection,NetWorthChart,PeriodSheet,CompareRow}.tsx`, `overviewUi.ts`, `seriesLayout.ts`, `app/compare.tsx`, `app/analytics-metric.tsx`)
+
+- **Section chips** on the Analytics tab: «نظرة عامة» (new, default) and «الإنفاق» = the existing Analytics screen,
+  **unchanged**, with its own controls, until Phase 3 replaces it.
+- **Overview header:** the period pill «الشهر ده ▾» + the dates measured («… · لسه شغال», pay-cycle length, «الدورة دي
+  فيها راتبين», «بداية اخترتها بنفسك») → `PeriodSheet`: every preset, custom range, the pay-cycle start (preview through
+  `resolvePeriodChoice`, saved with `setAnalyticsPreferences`), and while the period is running the switch «قارن بالفترة
+  اللي فاتت كلها» (D10 option). The chosen preset is remembered (D6); custom dates, the alignment and the currency are
+  screen state. A currency segment, and «قارن وضعك المالي ⇄» → `/compare`.
+- **`overview(state, { period, alignment, currency, now, dailyStore })`** composes the engine only: `comparePeriods`
+  (flows), `pointValues` at the current side's measured end (today while running) and the previous side's measured end
+  (aligned: same day of the previous period), `compareValues` between them for every point metric, the daily series,
+  the first recorded day, and the open receivables (only when the end date is today; informational, never added).
+- **Hero:** net worth now (or at the period's end), its quality chip, the change line, "عن <date>" + quality, the daily
+  chart (`NetWorthChart`, own SVG on `react-native-svg`: one path per run of recorded days, gaps never bridged or
+  zero-filled, a lone day is a dot, straight segments, time left → right; touch / drag shows the day's value or «مفيش
+  تسجيل اليوم ده»; under 2 recorded days a sentence explains the history starts with the daily record), the prices'
+  freshness and the receivables line.
+- **Six cards:** income, spending, net (flows, `comparison.metrics`), savings rate (+ «من غير مصاريف الصناديق: x%» only
+  when some spending came from funds, D4), free money and reserved (point metrics). Each: value or the reason it has
+  none, a quality chip when not recorded, the change line and «عن الفترة اللي فاتت» / «لحد نفس اليوم…» / «عن <date>». Tap:
+  income / spending open `/period-transactions` for the measured range; the others open the placeholder
+  `/analytics-metric`.
+- **«فلوسك فين»:** liquid with reserved and free money under it (a bar: reserved in gold, free in emerald), non-liquid
+  (gold + currency holdings: point metric `nonLiquid`), liabilities when any, net worth, and «المحجوز جزء من السيولة، مش
+  فلوس زيادة عليها».
+- **Change lines (`changeLine`, decision 3):** the arrow and colour follow the direction, «مستقر» under the threshold, but
+  the absolute change is **always shown with its real value**; a percentage only when valid; «جديد» on a zero base,
+  «اتحوّل من سالب لموجب / من موجب لسالب» on a sign flip; rates in points (small ones keep their digits, «أقل من 0.01
+  نقطة»). A missing side shows its reason (`reasonText`) instead. Never NaN / Infinity (fuzz-tested).
+- **Compare (`/compare`, «قارن وضعك المالي»):** «فترة بفترة» / «تاريخ بتاريخ» and the currency. Mode A: pills for A and
+  B (B = the remembered preset, A = the period before B unless chosen), «بدّل أ و ب ⇄» (B becomes A's dates as a custom
+  range), «أ = الفترة اللي قبل ب», «لحد نفس اليوم» / «أ كلها» while B runs, the measured A dates, notes (partial / missing
+  history, A still running), then every flow metric and the 5 categories that changed most as rows (A, B, change,
+  quality). Without a period A the reason is said once and rows show «—». Mode B: dates A and B (default: the first
+  daily record, or 30 days ago; today), swap, «بأسعار كل يوم» / «بأسعار ثابتة» with what it means, a banner when a date is
+  before the daily history («السجل اليومي بيبدأ من …»), a banner when a recorded day's balances were edited later, and
+  the point metrics as rows. Always from A to B.
+- `selectors.transactionAccountEffects(tx)`: the per-transaction balance rule, now shared by `accountNetFlow` (unchanged
+  output) and `netWorthDailySeries` (`store/history.ts`: one point per day up to today; recorded days valued with D3
+  ledger balances in one pass over the date-sorted ledger, equal to `pointValues`; gaps `null`; memoized).
+
+### Analytics engine (`store/periods.ts`, `store/comparison.ts`, `store/history.ts`, `store/memo.ts`, Phase 1b)
+
+Used by the Overview tab and the Compare screen (Phase 2). The «الإنفاق» section still runs on `store/analytics.ts`'s own
+`resolvePeriod` / `previousPeriod`, unchanged. Pure, read-only, memoized. Design:
+`docs/architecture/PROFESSIONAL_ANALYTICS_AND_COMPARISON_DESIGN.md` §7–9.
+
+- **Periods** (`store/periods.ts`): presets `thisWeek` · `lastWeek` · `month` (default) · `lastMonth` · `3m` · `6m` ·
+  `12m` · `thisYear` · `lastYear` · `sinceStart` · `payCycle` · `custom`. `AnalyticsPeriod { preset, from, to,
+  nominalFrom, nominalTo, inProgress, today, cycle?, notes }`; notes `clamped_to_tracking` (starts at
+  `trackingStartDate` instead), `before_tracking` (ends before it: no data, never zeros), `in_progress`, `no_salary`,
+  `cycle_override`, `multiple_salaries`. Weeks start on **Saturday** (D5: `weekStart`). `previousAnalyticsPeriod` = the
+  same span right before (calendar month before, the N months before, the year before, same number of days for
+  custom, the cycle before; `null` for since-start and the first cycle). `coverageOf` → `{ trackedFrom, elapsedDays,
+  totalDays, complete }`. `alignToElapsed` (D10) cuts the previous period to the current one's elapsed days, never past
+  its own end (31 Mar → end of Feb). Only the local calendar date of `now` counts (tested under six time zones and
+  DST days).
+- **Pay cycle (D1):** salary receipts = incomes in «راتب» + collections of a `salary` receivable (any category), on
+  their receipt date, not after today (`salaryReceipts`, memoized). A new cycle starts at a receipt ≥ `MIN_CYCLE_DAYS`
+  (20) after the current cycle's start; closer receipts join it (`multiple_salaries`). A cycle runs to the day before
+  the next; the last is open (to today, in progress). No receipt → the calendar month (`no_salary`). **Manual
+  override** `settings.payCycleStartOverride` (a preference, never a ledger change): opens a cycle on its date and
+  absorbs every detected receipt less than 20 days from it (either side); ignored when in the future.
+- **Preferences** (op `setAnalyticsPreferences`, store action of the same name; settings only, optional fields, **no
+  data version change**): `settings.analyticsPeriod` = the remembered preset (D6; never `custom` → `INVALID_KIND`;
+  `null` forgets it; `preferredPreset` falls back to `month`), `settings.payCycleStartOverride` (a date key not after
+  today, else `INVALID_DATE`; `null` clears). Both round-trip through backups.
+- **Change rules** (`compareValues`, `store/comparison.ts`): `Change { previous, current, delta, pct, pp, direction,
+  reason?, tone, quality }`. Amounts: `delta` rounded in the currency; `pct = delta ÷ |previous|`, **null** on a zero
+  base (`zero_base`) or a sign flip (`sign_flip`), so never ±∞; flat below max(0.005, 1 % of |previous|). Ratios
+  (savings rates): `pp` in points, never a % of a %; flat below 0.1 point. A side without a value → everything null,
+  `reason: 'unavailable'`. `tone` from the metric's `goodWhen` (spending, reservations: always neutral). `quality` = the
+  weaker side (`recorded` > `reconstructed` > `estimated` > `unavailable`).
+- **Mode A** (`periodSide`, `comparePeriods`): flows from the existing `periodTotals` (so transfers, exchanges, gold
+  purchases and fund allocations are never income or spending; fees are spending), measured from the (clamped) start
+  to the end, or to today while in progress. Metrics: `income`, `expense`, `net`, `savingsRate`, **D4**
+  `savingsRateExFundSpending` = (income − spending from free money) ÷ income, `avgDailySpending` (÷ tracked days
+  measured), `expenseFromFunds` («من صندوق»: each expense's `spend` movements at the expense's own rates, same one-time
+  rule), `expenseFromFreeMoney`, `fundContributions` (`isContribution`, the Q6 rule now exported from selectors). A
+  side `before_tracking` is all `unavailable`. `comparePeriods` defaults to the preset's previous period and, while the
+  current one is in progress, to **elapsed-days alignment** (`alignment: 'full'` = the whole previous period, noted
+  `current_in_progress`); notes `previous_partly_untracked` / `previous_untracked` add `earliestReliable` (the tracking
+  start). Category changes: union of both sides; a tracked side that spent nothing has a real 0, an untracked side is
+  unavailable.
+- **Mode B** (`store/history.ts`): `positionAt(state, dailyStore, date, now)` → `live` (today: the current state),
+  `daily` (a daily snapshot of that date: recorded; per D3 account balances come from the current ledger as of that
+  date and `ledgerDiverged` flags a difference; reservations, holdings, liabilities and prices from the snapshot; a
+  missing rate snapshot → its historical value is `rates_missing`), `ledger` (no snapshot: balances, holdings by
+  purchase date and liabilities from the ledger; **reserved / free money unavailable**) or `none` (`before_tracking`,
+  `future`). `valuePosition(position, prices, to)` values a native position exactly like the live selectors (tested
+  equal to `netWorth`, `liquidTotal`, `holdingsTotal`, `liabilitiesTotal`, `totalAssets` and the runway's free money).
+  `compareDates(..., { method })`: `historical` (each date at its own recorded prices; a ledger date at today's prices,
+  labelled `estimated`) or `constant` (both at the later date's recorded prices; ledger balances `reconstructed`,
+  holding-based figures never better than `estimated`; no recorded prices for the later date → unavailable).
+  Metrics: `netWorth`, `totalAssets`, `liquid`, `reserved`, `freeMoney`, `goldValue`, `currencyHoldings`,
+  `liabilities` (reservations never add to assets, INV-A4). Monthly net worth snapshots are not used here.
+- **Memoization** (`store/memo.ts`, `memoOn`): caches keyed on the identity of every collection read (the store
+  replaces an array on any change, so a backdated insert or an edit always recomputes), at most 64 entries per key.
+
 ### Daily snapshot history (`store/dailySnapshots.ts`, `store/useDailySnapshots.ts`, data v10)
 
 Phase 1a of `docs/architecture/PROFESSIONAL_ANALYTICS_AND_COMPARISON_DESIGN.md`. A read-only **observation** of the
@@ -1594,7 +1754,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts tests/dailySnapshots.test.ts` (583 tests on 2026-11-26, ~20 s; the encrypted round
+`npm run test:logic` → `tsx --test tests/logic.test.ts tests/dailySnapshots.test.ts tests/analyticsEngine.test.ts tests/overview.test.ts tests/charts.test.ts tests/spending.test.ts` (697 tests on 2026-11-26, ~20 s; the encrypted round
 trip uses the real 200k-iteration KDF). Suites: migrations (v0–v7), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,
@@ -1622,6 +1782,14 @@ rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previ
 series by location and estimated points, money map, runway, fund projections, every insight trigger and the
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
+
+Spending suites (Phase 3, `tests/spending.test.ts`): the kept sections get exactly the old period; for every preset × three currencies × the one-time toggle the total, every category, one-time and income equal the old functions; every breakdown (days, accounts, currencies, sources, categories) adds up to the card; the documented future-dated difference; shares = 1000 tenths, the donut is the footprint, the same % on both tabs; largest remainder; the daily / weekly trend and its average; A vs B incl. a chosen A; the one-time toggle; the monthly view equals the old net worth points with gaps; donut and bar geometry; copy. A web walkthrough (production export, the synthetic test world) checked the tab and the monthly view.
+
+Chart suites (Phase 2b, `tests/charts.test.ts`): the bars inside the period equal the income and spending cards for every preset × three currencies (none for a period before tracking), excluded movements, no bars before tracking and `dataStart`, the 6-month / longer / weekly windows, running bar, averages and counts over complete bars, a mid-month period split, the sparkline window, memoization; footprint shares = 1000 tenths and amounts = the spending card for every preset × currency, top 4 + rest with the rest's change, no spending, largest remainder; no NaN in the overview for every preset × currency; bar and sparkline geometry; copy; colours and icons. A web walkthrough (production export, the synthetic test world loaded into a throwaway browser profile) checked the bars, tooltip, sparklines and footprint.
+
+Overview suites (Phase 2, `tests/overview.test.ts`, fixtures in `tests/fixtures/synthetic.ts`): decision 3 (a stable change keeps its delta and shows it), change-line copy for every case and a NaN / Infinity fuzz, points, reasons, quality labels, the pill and period line (presets, custom, pay cycle with two salaries, no salary), notes; chart geometry (a gap splits the line and nothing is drawn across it, lone-day dot, no values → nothing, flat and negative series, touch index); the daily series (dense days, gaps null, today live, each recorded day equal to `pointValues` incl. a backdated insert and its D3 flag, memoized, clamped, no history); `overview()` (equals `comparePeriods`, measured end dates, live figures equal the selectors, reserved + free = liquid, assets = liquid + non-liquid, estimated / unavailable previous ends, a recorded previous end, receivables only as a current separate line, no NaN for every preset × currency × history, empty data), `resolvePeriodChoice` previews. A web walkthrough of a production export (synthetic seed) covered the Overview, the period sheet, Compare Mode A with swap and Mode B, with no console errors.
+
+Analytics engine suites (Phase 1b, `tests/analyticsEngine.test.ts`): every preset and its previous period (Saturday weeks across month / year ends, January, 12 months, years), D6 remembering, custom, leap years and 31 March alignment, midnight and DST, tracking-start clamping and before-tracking, in progress; pay cycles (no salary, on time, late, two receipts in a week, the 20-day boundary, salary-receivable collections vs other receivables and future receipts, the manual override and its absorption window, the first cycle, cycle alignment, memoization); the preference op (remember / forget / refuse custom, override dates, backup round trip); the change rules (ordinary, the 60,000 → 84,250 example, zero base, negative bases and sign flips, flat, percentage points, unavailable sides, a NaN / Infinity fuzz); Mode A (transfers / exchanges / gold / allocations excluded, fees included, equal to `periodTotals` and `monthSummary`, the «من صندوق» split and D4 rate, the one-time rule on the split, daily average, no income, read-only, SAR, elapsed vs full alignment, categories, partial and missing history, since-start, memoization and a backdated insert, pay-cycle comparison); Mode B (live valuation equals the selectors in three currencies, INV-A4, the design example recorded on both sides, ledger reconstruction labels, before tracking / future, FX and gold moves under historical vs constant prices, reporting currency, D3 divergence, a missing rate snapshot, 18k pricing); and the period rules re-run under six time zones.
 
 Daily history suites (data v10, `tests/dailySnapshots.test.ts`): the v9 → v10 migration on the oracle fixtures
 (marker only, v9 report diff 0, twice = once, v1 / v7 / v8 chains end at v10, an inline history refused), hydration

@@ -66,6 +66,8 @@ export const palette = {
     chartSky: '#6BAED6',
     chartViolet: '#A99BD8',
     chartRose: '#D79AB5',
+    // A fourth category hue for the spending footprint (yellow-green: apart from emerald income and gold).
+    chartLime: '#A8C66C',
   },
 } as const;
 

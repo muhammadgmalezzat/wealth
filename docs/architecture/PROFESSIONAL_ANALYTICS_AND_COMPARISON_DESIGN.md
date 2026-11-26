@@ -4,7 +4,9 @@ Status: **approved (2026-11-26). Phase 1a (daily snapshot history, data v10) is 
 two changes from the proposal, both requested at approval: the history lives under its **own AsyncStorage key**, not
 inside the ledger value (§16), and its records are compact (interned ids, tuples, "same as the previous record"
 sections). Decisions D1–D13 are approved as recommended, D1 with a manual cycle-start override (a preference only), and
-D14 was added (§B). Phases 1b onward are not built. All numbers in this document are made up.
+D14 was added (§B). **Phase 1a is released; Phase 1b (the engine) is approved; Phase 2 (Overview tab + Compare screen) is built**
+(§15b), Phase 2b (Overview charts) is built (§15c), and Phase 3 («الإنفاق» redesign) is built (§15d). Phases 4 onward are not built. Decision 3 (as approved): the flat threshold only sets the arrow and colour
+(«مستقر»); the absolute change is always shown with its real value. All numbers in this document are made up.
 
 Branch: `analytics` (created by the owner from `main` at `4525885`, the goals-upgrade merge; working tree clean). No
 other work in progress was found: the goals upgrade (`FUND_SPEND_AND_GOALS_DESIGN.md`) and receivables
@@ -575,6 +577,71 @@ Rules: every module above is pure (no React Native), unit-tested in Node, and re
 The screen subscribes with selectors (not the whole store) and memoises on `[transactions, reservationMovements,
 dailySnapshots, settings.rates, query]`.
 
+## 15a. Phase 1b as built (engine only)
+
+| Module | What it does |
+|---|---|
+| `store/periods.ts` | presets (§7.1) incl. Saturday weeks (D5), D6 remembered preset, pay cycle (D1) from salary receipts with 20-day grouping and the manual override, previous periods, coverage, D10 alignment |
+| `store/comparison.ts` | `compareValues` (§7.2), Mode A `periodSide` / `comparePeriods` on top of `periodTotals`, the «من صندوق» split and the D4 second savings rate |
+| `store/history.ts` | Mode B `positionAt` / `valuePosition` / `compareDates` (§8–9) |
+| `store/memo.ts` | identity-keyed memoization |
+
+Choices made while building (listed for review):
+
+| Choice | As built |
+|---|---|
+| Manual cycle-start override | `settings.payCycleStartOverride`; opens a cycle on its date and absorbs detected receipts less than 20 days from it, either side (so a salary that arrives a few days before or after the chosen day doesn't open a second, tiny cycle); ignored when in the future; the op refuses future dates |
+| Flat thresholds | amounts: below max(0.005, 1 % of the base); rates: below 0.1 point |
+| Mode B without a daily snapshot | a ledger reconstruction, never `recorded`: historical method → today's prices, `estimated`; constant method → `reconstructed` balances, holding-based figures `estimated`; reserved and free money `unavailable` |
+| Mode B with a daily snapshot (D3) | balances from the ledger as of that date for accounts that still exist (deleted accounts keep the snapshot's value; accounts created later are not added); `ledgerDiverged` flags a difference |
+| Monthly net worth snapshots in Mode B | not used (they hold the last value seen in a month, not a date's) |
+| Constant prices | the later date's recorded prices; none recorded → unavailable (never mixed with today's) |
+
+## 15b. Phase 2 as built (Overview + Compare)
+
+See TECHNICAL "Overview tab and Compare screen". Choices made while building (for review):
+
+| Choice | As built |
+|---|---|
+| «الإنفاق» chip | the existing Analytics screen, unchanged, with its own period chips / currency / one-time toggle, until Phase 3 |
+| Point metrics on Overview cards | compared at the two sides' measured end dates (today vs the same day of the previous period; with «كلها», the previous period's last day) |
+| Hero for a past period | net worth at the period's last day (a daily record if any, else a labelled ledger estimate) |
+| Chart | own SVG on react-native-svg (gifted-charts can't leave a gap without a value at that point); time left → right like the other charts; shown from 2 recorded days |
+| Card taps | income / spending → the existing transaction list for the measured range; the others → a placeholder screen |
+| D4 second line | only when some spending in the period came from funds (otherwise identical) |
+| Compare A running while B is over | a note («الأيام في الفترتين مش متساوية»), no alignment |
+| Compare Mode B defaults | A = the first daily record (else 30 days ago), B = today, historical prices |
+| Repeated reasons | a card or row without a value shows its reason once; no duplicate change line |
+
+## 15c. Phase 2b as built (Overview charts)
+
+| Choice | As built |
+|---|---|
+| Bucket unit | weeks (from Saturday) for periods of 31 days or less (so the default «الشهر ده» shows weeks); months otherwise |
+| Monthly window | at least the last 6 months up to the period's last month; the period's own months when longer; months before tracking not drawn |
+| Reconciliation | only the bars inside the period (`inPeriod`) add up to the cards; bars before it are context; a month the period starts inside is split into two bars |
+| Averages and counts | over complete bars only (not running, not cut short) |
+| Time direction | left → right in every chart (bars, line, sparklines), as before |
+| Sparklines | flow cards: always the last 6 calendar months; snapshot cards: from 7 recorded days in the period |
+| Colours | income emerald, spending sky, reserved dark emerald; a new token `chartLime` for the 4th category; gold only for gold |
+| Icons | default categories by id; user categories by bucket |
+
+## 15d. Phase 3 as built («الإنفاق»)
+
+| Old component | Plan | As built |
+|---|---|---|
+| `AnalyticsControls` (old period chips, currency, one-time) | remove | the shared pill / sheet / currency; the one-time switch kept on «الإنفاق» |
+| `SankeyChart` «فلوسك راحت فين» | redesign | donut (top 4 + rest, footprint colours) + ranked list of all categories |
+| `BreakdownSection` «المصروف على إيه» | merge | into the ranked list (same amounts) |
+| `TrendSection` «الاتجاه الشهري» | remove | already on the Overview as «التدفق الشهري» (same periodTotals) |
+| `NetWorthSection` «صافي الثروة عبر الوقت» | move | the hero's «شهري» view (all locations; the location filter and the hide-estimates switch are dropped) |
+| `MoneyMapSection`, `RunwaySection`, `FundsSection`, `InsightsSection` | keep | unchanged components (already Dark Glassy tokens, no charts) on `legacyPeriodOf`; candidates for الثروة / الأهداف in Phases 4–5 |
+
+Choices: shares by largest remainder over ALL categories (the footprint's top-4 / rest shares now come from them; on the
+Overview a share can differ by 0.1 point from Phase 2b); trend weekly beyond 92 days; the average line neutral (not
+amber); a chosen period A applies to the whole tab's changes; the monthly view shows at most 24 months up to the
+period's end; time left → right everywhere.
+
 ## 16. Data schema and migration (data v10) — as built in Phase 1a
 
 The proposal kept the history inside the ledger value. At approval it was moved to its **own AsyncStorage key**, and
@@ -780,10 +847,10 @@ The full existing suite (`npm run test:logic`), `npx tsc --noEmit` and `npx expo
 
 | Phase | Content | Depends on | Ships as |
 |---|---|---|---|
-| **1a** ✅ built | Daily snapshots (own storage key): type, `migrateV10`, `syncDailySnapshot`, runner wiring, backup/restore, compatibility gate, size test, docs (TECHNICAL, USER_GUIDE line, CHANGELOG with data v10 and the rollback note), D13 fix | approval of D2, D3, D11 | **its own OTA, as early as possible** (no visible UI except a line in Settings → البيانات «سجل يومي من …») |
-| **1b** | Periods (all presets + pay cycle), coverage, ledger index, `history.ts`, `valuation.ts`, `comparison.ts`, metric registry, tests 1–14, 17–20, 22, 24 | 1a merged; D1, D5, D10 | no UI change (engine only) |
-| **2** | Section chips, period pill + sheet, Overview (hero, 6 cards, receivables line), existing sections moved under chips, /compare Mode A, Mode B limited to recorded dates, persisted preset (D6) | 1b | OTA |
-| **3** | Spending tab: footprint bar, ranked bars, «من صندوق» split, one-time / recurring split, by account / currency, category comparison sheet, drill-down filters | 1b (parallel to 2 after its header work) | OTA |
+| **1a** ✅ released | Daily snapshots (own storage key): type, `migrateV10`, `syncDailySnapshot`, runner wiring, backup/restore, compatibility gate, size test, docs (TECHNICAL, USER_GUIDE line, CHANGELOG with data v10 and the rollback note), D13 fix | approval of D2, D3, D11 | **its own OTA, as early as possible** (no visible UI except a line in Settings → البيانات «سجل يومي من …») |
+| **1b** ✅ built | Periods (all presets + pay cycle), coverage, `history.ts` (incl. valuation), `comparison.ts`, `memo.ts`; the ledger index / downsampling of §18 left for Phase 2 if profiling needs them; tests 1–14, 17–20, 22 | 1a merged; D1, D5, D10 | no UI change (engine only) |
+| **2** ✅ built | Section chips, period pill + sheet, Overview (hero, 6 cards, receivables line), existing sections moved under chips, /compare Mode A, Mode B limited to recorded dates, persisted preset (D6) | 1b | OTA |
+| **3** ✅ built | Spending tab: footprint bar, ranked bars, «من صندوق» split, one-time / recurring split, by account / currency, category comparison sheet, drill-down filters | 1b (parallel to 2 after its header work) | OTA |
 | 4 | Wealth: historical net worth (daily line once ≥ 14 days are recorded), allocation donut, currency exposure, liquid vs non-liquid, gold analytics (weight by karat, cost, unrealised P&L, share), constant-rate view | 1a history accumulating | later |
 | 5 | Goals & intelligence: fund analytics (contributions, spending, releases per period; goal progress over time from snapshots), transparent individual health indicators (savings rate, emergency coverage = free money ÷ average essentials, liquidity), insights rewritten on the comparison engine, monthly report (extending `review.ts`), fixed vs variable (D9) | 1b, 2, 3 | later |
 | 6 | Polish: glass refinement, accessibility (labels, contrast tested like `dark theme contrast`), chart tooltips / drag-inspect, performance on a physical Android device, full regression, docs | all | later |
