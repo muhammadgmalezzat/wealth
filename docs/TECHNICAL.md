@@ -85,8 +85,8 @@ Notes:
 - Expo Go limitations: Face ID is not available in Expo Go on iOS (fingerprint / device PIN
   work); `expo-updates` values are `null` in Expo Go. Local notifications (due reminders) work in
   Expo Go; only remote push would need a development build.
-- First launch seeds data from `store/seed.local.ts` if present (git-ignored), otherwise from
-  `store/seed.example.ts`.
+- First launch seeds data from `store/seed.local.ts` **in development only** (`__DEV__`; git-ignored, never bundled
+  into a production build or OTA), otherwise — and always in production — from `store/seed.example.ts`.
 
 ---
 
@@ -176,7 +176,7 @@ store/                      ALL business logic lives here (pure, no React)
   defaultCategories.ts      20 default categories (stable ids), FIXED_CATEGORY_IDS
   useFinanceStore.ts        Zustand store + persist config (the only RN-aware store file)
   seed.example.ts           Committed fake seed
-  seed.local.ts             Owner's real opening position (git-ignored, EAS-uploaded)
+  seed.local.ts             Owner's real opening position (git-ignored, NOT EAS-uploaded, development only)
 
 utils/
   currency.ts               convertCurrency / toEGP / fromEGP / rateToEGP (current table), projectAmount (past amounts)
@@ -202,7 +202,8 @@ tests/logic.test.ts         538 tests over store/*, utils/* and the pure UI help
 tests/legacy/               fixtures.v7.ts, oracle.v7.ts (frozen-v7 report), report.v8.ts (the same report from live code)
 docs/                       This file, USER_GUIDE.md, CHANGELOG.md
 app.json / eas.json         Expo + EAS config
-.easignore                  EAS upload filter (keeps store/seed.local.ts)
+.easignore                  EAS upload filter (excludes store/seed.local.ts and real backups)
+scripts/check-release.mjs   Release guard: no private seed data in production bundles (npm run check:release)
 ```
 
 ---
@@ -1057,8 +1058,14 @@ erDiagram
 - **Hydration:** screens render `<LoadingView/>` until `hasHydrated`. On success (`onSuccess`, called by the
   rehydrate handler in `createPersistOptions`) the store sets `hasHydrated` and calls `ensureDeviceId`
   (creates `settings.deviceId` on first launch) and `ensurePriceSource`.
-- **Seed:** `loadSeed()` → `require('./seed.local')` in try/catch, falling back to
-  `seed.example` (Expo's Metro enables optional dependencies). Seeds are written in the v3
+- **Seed:** `loadSeed()` → `if (__DEV__)` `require('./seed.local')` in try/catch, then `seed.example` (Expo's Metro
+  enables optional dependencies). **Privacy:** Metro inlines `__DEV__` as `false` in production bundles and drops the
+  dead branch before collecting dependencies, so `seed.local` never reaches a production build or OTA (verified by
+  `npm run check:release`; before this change it was in every bundle built on the owner's machine). Production starts
+  from the synthetic `seed.example`. **«استيراد البيانات الافتتاحية» is development-only too:** Settings renders the row only
+  when `settingsUi.canImportOpeningData(__DEV__)`, and the store's `importOpeningData` throws when `!__DEV__` (before any
+  write), so production can never import sample data over real data. Tested: the rule, and both gates pinned in the
+  source (the call sites import React Native). Seeds are written in the v3
   shape and passed through `migratePersistedState(seed, 3, …)`.
 - **AsyncStorage keys**
 
@@ -1514,9 +1521,18 @@ File (`wealth-backup-YYYY-MM-DD.json`):
   native module, changing native config in `app.json` (plugins, permissions, package, icons,
   splash, scheme) or upgrading the SDK. **Version bump rule:** bump `version` in `app.json` with
   every new native build (runtime = app version), so updates never reach incompatible binaries.
-- `.easignore` replaces `.gitignore` for EAS uploads; it intentionally does **not** list
-  `store/seed.local.ts` so the real opening data ships in builds. Hermes stores non-ASCII
-  strings as UTF-16 (search bundles accordingly).
+- `.easignore` replaces `.gitignore` for EAS uploads; it **excludes** `store/seed.local.ts` and real backups
+  (`.local/`, `wealth-backup-*.json`, `*.backup.json`) — changed 2026-11-25: production can no longer use the local seed,
+  so uploading it would only expose it. Hermes stores non-ASCII strings as UTF-16 (search bundles accordingly).
+- **Release guard — run `npm run check:release` before every `eas update` / `eas build`** (`scripts/check-release.mjs`).
+  It takes the string literals that only `store/seed.local.ts` contains (absent from every other source file; Arabic ≥ 3
+  characters, Latin ≥ 8), runs a fresh `npx expo export` (web JS + iOS / Android Hermes bytecode) into a temp dir and
+  searches every bundle for each one as UTF-8, `\uXXXX` escapes and UTF-16LE. It never prints a marker (counts and a
+  SHA-256 prefix only). A control (the app's Arabic error messages and the example seed's strings, certainly bundled)
+  must be visible, or it fails rather than pass blindly. Exit 0 = PASS; 1 = private data found (do not publish); 2 = the
+  scan could not be trusted. Without a local seed it passes (nothing to leak). `node scripts/check-release.mjs <dir>`
+  scans an existing export. Result on 2026-11-25: before the fix FAIL (20 of 23 markers in all three bundles), after
+  PASS (0 of 23; control 22/22).
 
 ---
 

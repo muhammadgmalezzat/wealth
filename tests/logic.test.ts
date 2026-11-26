@@ -3,6 +3,8 @@
 /// <reference types="node" />
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 
 import { create } from 'zustand';
@@ -8751,5 +8753,38 @@ describe('fund spending (step 4): UI helpers for «من صندوق», «تدفع
     assert.match(plain(goalsUi.achievedLine(s, t)), /^اتحقق .* · اتصرف .*5,500 من .*6,000$/);
     assert.equal(fundsUi.fundsSummary(s, NOW).reservedEGP, 500 + 1000, 'leftover 500 + O 1,000');
     assert.equal(fundsUi.fundsSummary(s, NOW).count, 1, 'only active funds are counted');
+  });
+});
+
+// --- Privacy: the private seed and the opening-data import are development-only ---------------------------------------
+
+describe('privacy: seed.local and «استيراد البيانات الافتتاحية» are development-only', () => {
+  const read = (file: string) => fs.readFileSync(path.join(process.cwd(), file), 'utf8');
+
+  it('the import is allowed in development builds only', () => {
+    assert.equal(settingsUi.canImportOpeningData(true), true);
+    assert.equal(settingsUi.canImportOpeningData(false), false);
+  });
+
+  // The two call sites import React Native, so they can't run here: these pin the gates in the source instead (removing
+  // a gate fails this test).
+  it('Settings renders the import row only behind canImportOpeningData(__DEV__)', () => {
+    const settings = read('app/settings.tsx');
+    const row = settings.indexOf("'استيراد البيانات الافتتاحية'}");
+    const gate = settings.lastIndexOf('{canImportOpeningData(__DEV__) && (', row);
+    assert.ok(row > 0 && gate > 0 && row - gate < 400, 'the row sits inside the gate');
+  });
+
+  it('the store refuses the import in production and loads the private seed only in development', () => {
+    const store = read('store/useFinanceStore.ts');
+    const action = store.slice(store.indexOf('importOpeningData: async () => {'));
+    assert.match(action.slice(0, 400), /if \(!__DEV__\) throw new Error/);
+    // The statement (the comment above loadSeed also names it, in backticks).
+    const statement = "return require('./seed.local')";
+    const seed = store.indexOf(statement);
+    const devOnly = store.lastIndexOf('if (__DEV__) {', seed);
+    assert.ok(seed > 0 && devOnly > 0 && seed - devOnly < 200, "require('./seed.local') sits inside if (__DEV__)");
+    assert.equal(store.split(statement).length - 1, 1, 'no other import of the private seed');
+    assert.equal(store.split(/(?<!`)require\('\.\/seed\.local'\)/).length - 1, 1, 'no other require of it outside comments');
   });
 });

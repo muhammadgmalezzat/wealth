@@ -42,4 +42,9 @@ export function priceStatusLine(settings: Pick<Settings, 'fxSource' | 'lastPrice
 }
 
 // Same sentence as Home's backup nudge, so both say the same thing.
+// «استيراد البيانات الافتتاحية» replaces ALL data with the seed. In production the seed is the synthetic example
+// (store/seed.local.ts is development-only), so importing it would put sample data over real data: the entry point
+// exists in development builds only. Settings hides it and the store action refuses it when this is false.
+export const canImportOpeningData = (isDev: boolean): boolean => isDev;
+
 export const BACKUP_NUDGE = 'يفضل تعمل نسخة احتياطية عشان بياناتك تفضل آمنة.';

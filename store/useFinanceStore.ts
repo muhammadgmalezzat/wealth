@@ -36,14 +36,22 @@ const persistMigration: PersistMigrationSetup = {
   newId,
 };
 
-// Prefer the git-ignored personal seed; fall back to the committed example.
-// Expo's Metro config enables optional dependencies, so a missing file is fine here.
+// The opening data a fresh install starts from (and «استيراد البيانات الافتتاحية» imports).
+//
+// PRIVACY: store/seed.local.ts holds real data (git-ignored). It is loaded ONLY in development. Metro inlines `__DEV__`
+// as `false` in every production bundle (`expo export`, `eas update`, `eas build`) and drops the dead branch before
+// it collects dependencies, so the `require('./seed.local')` below never reaches a production or OTA bundle; production
+// always starts from the committed, synthetic seed.example. `npm run check:release` verifies this on a fresh export
+// before every release. Expo's Metro config enables optional dependencies, so a missing file is fine in development.
 function loadSeed(): FinanceState {
-  try {
-    return require('./seed.local').SEED_STATE as FinanceState;
-  } catch {
-    return require('./seed.example').SEED_STATE as FinanceState;
+  if (__DEV__) {
+    try {
+      return require('./seed.local').SEED_STATE as FinanceState;
+    } catch {
+      // No personal seed on this machine: the example below.
+    }
   }
+  return require('./seed.example').SEED_STATE as FinanceState;
 }
 
 const SEED_STATE = loadSeed();
@@ -347,6 +355,9 @@ export const useFinanceStore = create<FinanceStore>()(
       // Snapshots are written before anything changes, so a mistaken import or restore can
       // always be undone by hand.
       importOpeningData: async () => {
+        // Development only (settingsUi.canImportOpeningData): production's seed is sample data, never imported over
+        // real data. Refused before anything is written.
+        if (!__DEV__) throw new Error('importOpeningData is available in development builds only');
         await saveSnapshot(IMPORT_BACKUP_KEY, get());
         set(ops.replaceWithSeed(get(), SEED_STATE, ctx));
       },

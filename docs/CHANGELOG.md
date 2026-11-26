@@ -6,10 +6,48 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased — branch `goals-upgrade` · 1.2.0 · data v9 (no migration) — spending from a fund, steps 1–4 of 5
+## Unreleased (ready to ship) — branch `goals-upgrade` · 1.2.0 (OTA, no new build) · data v9 (no migration) — spending from a fund, goals achieved
 
-> Not released. Steps 1–4 of FUND_SPEND_AND_GOALS_DESIGN.md (the spend core; what the cover sheet gets for an
-> expense; goals achieved and the fund metrics; the screens). Step 5 (docs pass + release notes) is next.
+### Release notes
+
+**بالعربي**
+- **اصرف من صندوق:** لما تشتري الحاجة اللي كنت محوّش لها، اختار «من صندوق» في شاشة المصروف؛ الفلوس بتتاخد من الصندوق وفلوسك الحرة مش بتتلمس. لو حذفت المصروف، الفلوس بترجع للصندوق لوحدها.
+- **تدفعه منين؟** لما المصروف أكبر من فلوسك الحرة، التطبيق بيسألك: من صندوق، ولا من الفلوس الحرة الأول وسلفة من صندوق. مفيش اختيار جاهز.
+- **تم الهدف 🎉:** لما توصل لهدفك علّمه «تم الهدف»، وقرّر الباقي ترجّعه ولا تسيبه. الأهداف اللي اتحققت في «أهداف اتحققت»، وتقدر ترجّعها مفتوحة. التطبيق عمره ما بيقفل هدف لوحده.
+- الهدف اللي اشتريت منه بيفضل «وصل» ومش بيطلب فلوس زيادة. والصرف من صندوق على اللي كان بيتحوّش له مبقاش بيقلّل «اللي اتحوّش» الشهر ده.
+
+**In English**
+- **Spend from a fund:** when you buy what you saved for, pick «من صندوق» on the expense sheet; the money comes from the fund and your free money is untouched. Deleting the expense gives it back to the fund automatically.
+- **«تدفعه منين؟»:** when an expense is bigger than your free money, the app asks: from a fund, or free money first with the rest borrowed from a fund. Nothing is preselected.
+- **«تم الهدف 🎉»:** mark a goal done when you reach it and choose whether to release or keep what is left. Achieved goals move to «أهداف اتحققت» and can be reopened. The app never closes a goal by itself.
+- A goal you bought from keeps its progress and asks for nothing more; spending a fund on its purpose no longer lowers the month's «اتحوّش».
+
+### Release checklist (every OTA)
+1. Merge into `main`; `npm run test:logic`, `npx tsc --noEmit`, `npx expo lint`.
+2. **`npm run check:release` — must print PASS.** It fails if anything from the private `store/seed.local.ts` is in the
+   production bundles. Never run `eas update` after a FAIL.
+3. On the phone: an encrypted backup (Settings → البيانات → تصدير نسخة), kept off the phone.
+4. `eas update` (preview environment), then the post-update checks.
+
+### Privacy fix (ships with this release)
+- `store/seed.local.ts` (real opening data, git-ignored) was bundled into every build / OTA made on the owner's machine.
+  It is now loaded only in development (`if (__DEV__)`), so production bundles never contain it; production starts from
+  the synthetic example seed. `.easignore` now also excludes it and real backups from EAS uploads. New guard
+  `npm run check:release` (before the fix: FAIL, 20 of 23 private markers in all three bundles; after: PASS).
+- «استيراد البيانات الافتتاحية» is **hidden in production** (and the store action refuses it there), so sample data can
+  never be imported over real data; it stays in development builds. A fresh install starts from the sample data; real
+  data comes back only from a backup.
+
+### Data, compatibility and rollback
+- **Data version unchanged: v9, no migration.** The only stored addition is an optional `Fund.achievedAt`; fund spending uses
+  the existing v9 `spend` movements.
+- **AC-9 compatibility gate (passed):** the released v9 code (`1c8f5b8`) was run, read-only, on a goal carrying `achievedAt`
+  and kept it on all 11 write paths (rename, edit, delete another fund, allocate, withdraw, reallocate, transfer,
+  sinking payment, restore, seed import, encrypted backup round trip); today's code passes the same test.
+- **Rollback path:** an OTA back to `1c8f5b8` reads everything correctly: no data is lost and nothing needs clearing. What
+  goes back to the old behaviour there: deleting an expense paid from a fund no longer returns the money to the fund
+  automatically; achieved goals look like active goals again (suggestions, nudges) until a forward update; goal progress
+  and the month's saving pace use the old figures; the new screens are gone. Re-publishing this release restores all of it.
 
 *For users*
 - حذف مصروف اتدفع من فلوس صندوق (زي «اتدفعت» لمصاريف دورية) بقى بيرجّع الفلوس للصندوق لوحده، والموعد الجاي مش بيرجع لورا. وتعديل مبلغه بيظبط اللي اتاخد من الصندوق.
@@ -37,6 +75,8 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
   UI: «من صندوق» picker, «تدفعه منين؟», `AchieveSheet`, achieved state on the fund screen, «أهداف اتحققت», the fund-spend
   chip, purchases list, Q6 figures; `fundsSummary` keeps achieved leftovers in «إجمالي المحجوز»; helpers in
   `components/funds/goalsUi.ts`. Tests 529 → 538. Web export builds.
+- Step 5 (release prep): release notes, the compatibility and rollback notes above; final full run 538 tests, tsc, lint,
+  web export.
 
 ---
 

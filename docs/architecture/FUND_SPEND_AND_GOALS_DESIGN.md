@@ -1,6 +1,7 @@
 # Spending from a fund, goals achieved, and the cover-sheet order — design
 
-Status: **approved (2026-11-24); steps 1–4 of §9 implemented** (step 4: the screens, and the goal progress basis decided
+Status: **approved (2026-11-24); steps 1–5 of §9 done — ready to ship** (step 5: release notes and rollback path in
+CHANGELOG). Earlier: steps 1–4 of §9 implemented (step 4: the screens, and the goal progress basis decided
 2026-11-25: goals count reserved + spent toward the target, covers lower it, emergency / sinking keep holdings only). Earlier: steps 1–3 of §9 implemented (the spend core; the expense context for the cover sheet;
 goals achieved, INV-13, exclusions, the Q6 metrics and the Q8 nudge). Steps 4–5 not built. Step 3 deviations: two
 restorations may still add to an achieved goal (the Q4 re-reserve of a cover, resolving a migrated reservation), so INV-13
