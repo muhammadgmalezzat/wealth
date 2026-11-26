@@ -429,6 +429,8 @@ export interface Settings {
   v8Step: number;
   // Same for the v8 → v9 migration (store/migrateV9.ts). Missing on v8 data (= 0).
   v9Step?: number;
+  // Same for the v9 → v10 migration (store/migrateV10.ts). Missing on v9 data (= 0).
+  v10Step?: number;
   goldPrice24kEGP: number;
   // Market price of 21k, stored separately (it isn't exactly 24k × 21/24). 18k derives from 24k.
   goldPrice21kEGP: number;

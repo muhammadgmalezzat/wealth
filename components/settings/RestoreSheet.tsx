@@ -6,10 +6,13 @@ import { FormField } from '@/components/ui/FormField';
 import { FormInput, FormSheet } from '@/components/ui/FormSheet';
 import { formatDateAr } from '@/components/ui/formatDateAr';
 import { formatMoney } from '@/components/ui/formatMoney';
+import { dailyPreviewLabel } from '@/components/settings/settingsUi';
 import { InsightCard } from '@/components/ui/InsightCard';
 import { ListGroup, ListRow } from '@/components/ui/ListRow';
 import { colors, space } from '@/constants/theme';
 import { backupPreview, openBackup, type BackupFile, type OpenedBackup } from '@/store/backup';
+import { emptyDailyStore } from '@/store/dailySnapshots';
+import { replaceDailySnapshots } from '@/store/useDailySnapshots';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { confirmAction, showMessage } from '@/utils/dialogs';
 import { errorMessage } from '@/utils/errorMessages';
@@ -56,6 +59,8 @@ export function RestoreSheet({ file, initialOpened, onClose }: RestoreSheetProps
         setBusy(true);
         try {
           await restoreBackup(opened.state);
+          // The daily history follows the file (empty when it has none); the current one is copied aside first.
+          await replaceDailySnapshots(opened.daily.status === 'included' ? opened.daily.store : emptyDailyStore());
           showMessage('تم', 'اتستعادت النسخة الاحتياطية');
           onClose();
         } catch (error) {
@@ -113,7 +118,13 @@ export function RestoreSheet({ file, initialOpened, onClose }: RestoreSheetProps
             <Row label="الاستثمارات" value={String(preview.holdings)} />
             <Row label="الصناديق" value={String(preview.funds)} />
             <Row label="صافي الثروة" value={formatMoney(preview.netWorth, preview.currency)} />
+            <Row label="السجل اليومي" value={dailyPreviewLabel(preview.dailyDays)} />
           </ListGroup>
+          {preview.dailyDays === 'invalid' && (
+            <AppText variant="caption" color="textSecondary">
+              السجل اليومي اللي في النسخة دي مش سليم، فمش هيترجع. باقي البيانات هترجع عادي.
+            </AppText>
+          )}
           {opened && opened.schemaVersion < 4 && (
             <AppText variant="caption" color="textSecondary">
               النسخة من إصدار أقدم وهتتحدث تلقائياً.

@@ -1,4 +1,5 @@
 // Pure UI helpers for the Settings screen (no React Native; unit-tested).
+import { formatDateAr } from '@/components/ui/formatDateAr';
 import type { FxSource, PriceFetchError, PriceSource, Settings } from '@/store/types';
 import { daysAgoPhrase, timeAgoPhrase } from '@/utils/formatters';
 import { parseAmount } from '@/utils/parseAmount';
@@ -48,3 +49,36 @@ export function priceStatusLine(settings: Pick<Settings, 'fxSource' | 'lastPrice
 export const canImportOpeningData = (isDev: boolean): boolean => isDev;
 
 export const BACKUP_NUDGE = 'يفضل تعمل نسخة احتياطية عشان بياناتك تفضل آمنة.';
+
+// --- Daily history (data v10, store/useDailySnapshots.ts) ---------------------------------------------------------
+
+// "يوم واحد" · "يومين" · "3 أيام" · "11 يوم".
+export function dayCountPhrase(n: number): string {
+  if (n === 1) return 'يوم واحد';
+  if (n === 2) return 'يومين';
+  if (n >= 3 && n <= 10) return `${n} أيام`;
+  return `${n} يوم`;
+}
+
+export type DailyLogStatus = 'loading' | 'ready' | 'unreadable' | 'oversized' | 'invalid' | 'full' | 'write_failed';
+
+// Paused states: the stored history can't be used (left untouched) and «ابدأ سجل جديد» is offered.
+export const dailyLogBroken = (status: DailyLogStatus): boolean => status === 'unreadable' || status === 'oversized' || status === 'invalid';
+
+// The Settings line under «السجل اليومي». Every problem says the rest of the data is fine (it is: the ledger never
+// depends on the history).
+export function dailyLogLine(status: DailyLogStatus, summary: { days: number; firstDate: string | null }): string {
+  if (status === 'loading') return 'بيتحمّل…';
+  if (dailyLogBroken(status)) return 'السجل اليومي مش سليم، فالتسجيل واقف. باقي بياناتك سليمة.';
+  if (status === 'full') return 'السجل اليومي وصل للحد الأقصى، فالتسجيل واقف. باقي بياناتك سليمة.';
+  if (status === 'write_failed') return 'آخر تسجيل ما اتحفظش، وهيتحاول تاني.';
+  if (summary.days === 0 || !summary.firstDate) return 'هيبدأ يسجّل وضعك من النهارده.';
+  return `بيسجّل وضعك كل يوم · من ${formatDateAr(summary.firstDate)} · ${dayCountPhrase(summary.days)}`;
+}
+
+// The restore preview row: what the file carries.
+export function dailyPreviewLabel(days: number | null | 'invalid'): string {
+  if (days === 'invalid') return 'مش سليم';
+  if (days === null || days === 0) return 'مفيش';
+  return dayCountPhrase(days);
+}

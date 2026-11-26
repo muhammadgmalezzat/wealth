@@ -24,6 +24,7 @@ import * as planning from '@/store/planning';
 import { COUNTRY_REGISTRY, countryCodes, countryName, isKnownCountry } from '@/constants/countries';
 import { applyV8Steps, LATEST_V8_STEP, V8_STEPS } from '@/store/migrateV8';
 import { applyV9Steps, LATEST_V9_STEP, V9_STEPS } from '@/store/migrateV9';
+import { applyV10Steps, LATEST_V10_STEP, V10_STEPS } from '@/store/migrateV10';
 import { completeStoredPayload, migrateStoredPayload, type PersistMigrationSetup } from '@/store/persistMigration';
 import { CURRENCY_REGISTRY, decimalsOf, isKnownCurrency, UnknownCurrencyError } from '@/constants/currencyRegistry';
 import * as legacyCurrency from '@/store/legacy/currency.v7';
@@ -192,6 +193,7 @@ function emptyState(): FinanceState {
       enabledCurrencies: ['EGP', 'SAR', 'USD'],
       v8Step: LATEST_V8_STEP,
       v9Step: LATEST_V9_STEP,
+      v10Step: LATEST_V10_STEP,
       reportingCurrency: 'EGP',
       planCurrency: 'SAR',
       goldPrice24kEGP: 6000,
@@ -212,7 +214,7 @@ function emptyStateV7() {
     reservationMovements: _reservations,
     unresolvedMovements: _unresolved,
     receivables: _receivables,
-    settings: { rates: _rates, enabledCurrencies: _enabled, v8Step: _step, v9Step: _v9, ...settings },
+    settings: { rates: _rates, enabledCurrencies: _enabled, v8Step: _step, v9Step: _v9, v10Step: _v10, ...settings },
     ...rest
   } = emptyState();
   return { ...rest, fundMovements: [], settings: { ...settings, exchangeRates: RATES_V7 } };
@@ -3144,7 +3146,7 @@ describe('migration v6 → v7', () => {
   });
 
   it('runs as part of the chain', () => {
-    assert.equal(CURRENT_VERSION, 9);
+    assert.equal(CURRENT_VERSION, 10);
     const { state } = migratePersistedState(v6(), 6, MIGRATION_CTX);
     assert.equal(state.netWorthSnapshots.length, 2);
     // Tracking that starts this month has nothing to backfill.
@@ -6022,8 +6024,8 @@ describe('v7 → v8 sub-steps: any intermediate v8 shape is completed, twice is 
         assert.deepEqual(applyV8Steps(partial, ctx), full, `k=${k}, marker kept`);
         // …and without it (payloads an earlier build stored at version 8).
         assert.deepEqual(applyV8Steps(drop(partial), ctx), full, `k=${k}, marker dropped`);
-        // The same through the entry point the store and backups use (which then adds the v9 steps).
-        assert.deepEqual(migratePersistedState(partial, 8, ctx).state, applyV9Steps(full, ctx), `k=${k}, migratePersistedState`);
+        // The same through the entry point the store and backups use (which then adds the v9 and v10 steps).
+        assert.deepEqual(migratePersistedState(partial, 8, ctx).state, applyV10Steps(applyV9Steps(full, ctx), ctx), `k=${k}, migratePersistedState`);
       }
     });
 
@@ -6031,7 +6033,7 @@ describe('v7 → v8 sub-steps: any intermediate v8 shape is completed, twice is 
       const once = applyV8Steps(make(), ctx);
       assert.deepEqual(applyV8Steps(once, ctx), once);
       assert.deepEqual(applyV8Steps(applyV8Steps(once, ctx), ctx), once);
-      assert.deepEqual(migratePersistedState(make(), 7, ctx).state, applyV9Steps(once, ctx));
+      assert.deepEqual(migratePersistedState(make(), 7, ctx).state, applyV10Steps(applyV9Steps(once, ctx), ctx));
       assert.equal(applyV8Steps(once, ctx), once, 'a current state comes back as the very same object');
     });
 
@@ -7428,7 +7430,7 @@ describe('receivables (v9): the v8 → v9 migration', () => {
   const asV8 = (s: FinanceState) => {
     const {
       receivables: _r,
-      settings: { v9Step: _s, ...settings },
+      settings: { v9Step: _s, v10Step: _s10, ...settings },
       ...rest
     } = s;
     return { ...rest, settings };
@@ -7548,25 +7550,26 @@ describe('receivables (v9): the v8 → v9 migration', () => {
       assert.equal(h.store.getState().settings.v9Step, LATEST_V9_STEP);
     });
 
-    it('a v9 payload from an earlier v9 build is completed, after its untouched copy is kept', async () => {
+    it('a v9 payload from an earlier v9 build is completed (now through the v10 migration), after its untouched copy is kept', async () => {
       const v9 = migratePersistedState(richV7(), 7, ctx).state;
-      const { v9Step: _s, ...settings } = v9.settings;
+      const { v9Step: _s, v10Step: _s10, ...settings } = v9.settings;
       const stale = { ...v9, settings };
       const h = hydrate(stale, 9);
       await h.store.persist.rehydrate();
       assert.equal(h.failures.length, 0);
-      assert.deepEqual(JSON.parse(h.data.get(`${PREFIX}9_before_step_0`)!).state, JSON.parse(JSON.stringify(stale)));
+      assert.equal(h.writes[0], `${PREFIX}9`);
+      assert.deepEqual(JSON.parse(h.data.get(`${PREFIX}9`)!).state, JSON.parse(JSON.stringify(stale)));
       assert.equal(h.store.getState().settings.v9Step, LATEST_V9_STEP);
       // A complete payload is the same object: nothing is copied.
       assert.equal(completeStoredPayload(v9, { backupKeyPrefix: PREFIX, setItem: () => assert.fail('no copy'), now: () => ctx.now, newId: ctx.newId }), v9);
     });
 
-    it('a v9 payload whose completion finds a broken link fails closed: the stored payload is not touched', async () => {
+    it('a v9 payload whose migration finds a broken link fails closed: the stored payload is not touched', async () => {
       const h = hydrate({ ...unmarked(receivableWorld()), receivables: [] }, 9);
       await h.store.persist.rehydrate();
       assert.equal(h.failures[0]?.kind, 'migration_failed');
-      // Only the untouched copy (written before the completion runs); never the main key.
-      assert.deepEqual(h.writes, [`${PREFIX}9_before_step_0`]);
+      // Only the untouched copy (written before the migration runs); never the main key.
+      assert.deepEqual(h.writes, [`${PREFIX}9`]);
       assert.equal(h.data.get(KEY), h.raw);
     });
 
@@ -7586,7 +7589,7 @@ describe('receivables (v9): backups and data replacement', () => {
     const state = receivableWorld();
     for (const password of [undefined, 'pw-123']) {
       const file = await createBackup(state, { password, now: NOW_EXPORT, crypto: { ...nodeCrypto, iterations: 1000 } });
-      assert.equal(file.schemaVersion, 9);
+      assert.equal(file.schemaVersion, CURRENT_VERSION);
       const opened = await openBackup(parseBackup(serializeBackup(file)), { password, now: NOW, newId: () => 'unused' });
       assert.deepEqual(opened.state, state);
     }

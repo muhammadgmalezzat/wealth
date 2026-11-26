@@ -2232,6 +2232,13 @@ export function recordNetWorthSnapshots(state: State, ctx: OpContext): Patch {
   return syncSnapshots(state, ctx.now()) ?? {};
 }
 
+// The rate snapshot of the CURRENT rates (what a daily snapshot written now points at), added to the append-only list
+// when it isn't there yet. Changes nothing else; {} patch when it already exists.
+export function currentRateSnapshot(state: State, ctx: OpContext): { id: string; patch: Patch } {
+  const use = snapshotForNow(state, ctx.now());
+  return { id: use.id, patch: ratePatch(use) };
+}
+
 // "مش دلوقتي": hides a Next Best Action for 24 hours. Urgent ones (due items, spent fund money)
 // can't be snoozed. Snoozes that have run out are dropped on the way.
 export function dismissAction(state: State, actionId: string, ctx: OpContext): Patch {

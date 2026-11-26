@@ -9,6 +9,7 @@ import { InsightCard } from '@/components/ui/InsightCard';
 import { Segment } from '@/components/ui/Segment';
 import { colors, space } from '@/constants/theme';
 import { backupFileName, createBackup, serializeBackup } from '@/store/backup';
+import { dailySnapshotsForBackup } from '@/store/useDailySnapshots';
 import { dataOf, useFinanceStore } from '@/store/useFinanceStore';
 import { saveBackupFile } from '@/utils/backupFiles';
 import { showMessage } from '@/utils/dialogs';
@@ -49,6 +50,8 @@ export function ExportSheet({ onClose }: ExportSheetProps) {
       const now = new Date();
       const file = await createBackup(dataOf(useFinanceStore.getState()), {
         ...(encrypt ? { password } : {}),
+        // The daily history goes in the same file (left out only if it couldn't be loaded).
+        dailySnapshots: dailySnapshotsForBackup(),
         now,
         crypto: { randomBytes: getRandomBytes },
       });

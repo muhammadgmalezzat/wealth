@@ -5,6 +5,7 @@ import { holdingValueEGP, liquidTotalEGP } from './legacy/selectors.v7';
 import { missingPastSnapshots } from './legacy/snapshots.v7';
 import { applyV8Steps, migrateV7toV8 } from './migrateV8';
 import { applyV9Steps } from './migrateV9';
+import { applyV10Steps } from './migrateV10';
 import type { FinanceState as FinanceStateV8 } from './types';
 import type {
   Account,
@@ -43,10 +44,12 @@ import type {
 //       step lives in migrateV8.ts. Everything up to v7 is frozen (store/legacy).
 //   v9: + receivables (docs/architecture/RECEIVABLES_DESIGN.md); income transactions may carry receivableId and
 //       forMonth. The v8 → v9 step lives in migrateV9.ts.
+//   v10: the daily snapshot history (docs/architecture/PROFESSIONAL_ANALYTICS_AND_COMPARISON_DESIGN.md §16), kept under
+//       its own storage key; the ledger value only gains settings.v10Step. The v9 → v10 step lives in migrateV10.ts.
 
-export const CURRENT_VERSION = 9;
+export const CURRENT_VERSION = 10;
 
-// What the full chain produces: the current (v9) state.
+// What the full chain produces: the current (v10) state.
 export interface MigrationResult {
   state: FinanceStateV8;
   clampedBy: number;
@@ -476,10 +479,10 @@ export function migratePersistedState(
   version: number,
   ctx: MigrationContext
 ): MigrationResult {
-  // Data at v8 may come from an earlier build with fewer v8 sub-steps, and data at v9 from one with fewer v9
-  // sub-steps: applyV8Steps / applyV9Steps complete them (and leave a current one alone). Newer than v9 never
-  // gets here: the hydration guard and parseBackup refuse it.
-  if (version >= 8) return { state: applyV9Steps(applyV8Steps(persisted, ctx), ctx), clampedBy: 0 };
+  // Data at v8 may come from an earlier build with fewer v8 sub-steps (likewise v9, v10): applyV8Steps / applyV9Steps
+  // / applyV10Steps complete them (and leave a current one alone). Newer than v10 never gets here: the hydration
+  // guard and parseBackup refuse it.
+  if (version >= 8) return { state: applyV10Steps(applyV9Steps(applyV8Steps(persisted, ctx), ctx), ctx), clampedBy: 0 };
   const { state, clampedBy } = migrateToV7(persisted, version, ctx);
-  return { state: applyV9Steps(migrateV7toV8(state, ctx), ctx), clampedBy };
+  return { state: applyV10Steps(applyV9Steps(migrateV7toV8(state, ctx), ctx), ctx), clampedBy };
 }

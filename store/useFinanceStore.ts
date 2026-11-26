@@ -165,6 +165,9 @@ interface FinanceActions {
 
   // Upserts this month's net worth snapshot (and fills missing past months). No-op when unchanged.
   recordNetWorthSnapshots: () => void;
+  // The id of the rate snapshot of the current rates, added to rateSnapshots first if new (for the daily history,
+  // store/useDailySnapshots.ts).
+  ensureCurrentRateSnapshot: () => string;
   // Snoozes a Next Best Action for 24 hours.
   dismissAction: (actionId: string) => void;
   completeMonthlyReview: (month: string) => void;
@@ -317,6 +320,11 @@ export const useFinanceStore = create<FinanceStore>()(
       recordNetWorthSnapshots: () => {
         const patch = ops.recordNetWorthSnapshots(get(), ctx);
         if (Object.keys(patch).length > 0) set(patch);
+      },
+      ensureCurrentRateSnapshot: () => {
+        const { id, patch } = ops.currentRateSnapshot(get(), ctx);
+        if (Object.keys(patch).length > 0) set(patch);
+        return id;
       },
       dismissAction: (actionId) => set(ops.dismissAction(get(), actionId, ctx)),
       completeMonthlyReview: (month) => {

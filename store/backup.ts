@@ -3,6 +3,7 @@ import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
+import { validateDailyStore, type DailySnapshotStore } from './dailySnapshots';
 import { assertReceivableInvariants } from './invariants';
 import { CURRENT_VERSION, migratePersistedState } from './migrations';
 import { netWorth } from './selectors';
@@ -11,6 +12,10 @@ import type { FinanceState } from './types';
 // Backup files: pure (no React Native imports) so the format and crypto are testable in Node.
 //
 //   { app: 'wealth', schemaVersion, exportedAt, deviceId, encrypted, payload }
+//
+// From data v10 the payload (the data, encrypted or not) may also carry `dailySnapshots`: the daily snapshot history
+// (store/dailySnapshots.ts), which on the device lives under its own storage key. It is optional and checked on its own:
+// a damaged history never stops the ledger from being restored (the history is then left out, and the preview says so).
 //
 // Plain backups carry the data itself as `payload`. Encrypted ones carry an EncryptedPayload:
 // AES-256-GCM over the JSON data, keyed by PBKDF2-SHA256 (200k iterations, random salt). The
@@ -112,6 +117,8 @@ function associatedData(file: Pick<BackupFile, 'app' | 'schemaVersion' | 'export
 export interface ExportOptions {
   // Omit for an unencrypted backup.
   password?: string;
+  // The daily snapshot history to include (omitted when it could not be loaded).
+  dailySnapshots?: DailySnapshotStore;
   now: Date;
   crypto: BackupCrypto;
 }
@@ -123,13 +130,14 @@ export async function createBackup(data: FinanceState, options: ExportOptions): 
     exportedAt: options.now.toISOString(),
     deviceId: data.settings.deviceId,
   } as const;
-  if (!options.password) return { ...header, encrypted: false, payload: data };
+  const content = options.dailySnapshots ? { ...data, dailySnapshots: options.dailySnapshots } : data;
+  if (!options.password) return { ...header, encrypted: false, payload: content };
 
   const iterations = options.crypto.iterations ?? PBKDF2_ITERATIONS;
   const salt = options.crypto.randomBytes(SALT_BYTES);
   const nonce = options.crypto.randomBytes(NONCE_BYTES);
   const key = await deriveKey(options.password, salt, iterations);
-  const ciphertext = gcm(key, nonce, associatedData(header)).encrypt(utf8Encode(JSON.stringify(data)));
+  const ciphertext = gcm(key, nonce, associatedData(header)).encrypt(utf8Encode(JSON.stringify(content)));
   const payload: EncryptedPayload = {
     kdf: 'pbkdf2-sha256',
     iterations,
@@ -209,8 +217,16 @@ export interface OpenOptions {
   newId: () => string;
 }
 
+// The daily history a backup carried: `included` (valid), `none` (older file, or exported without one) or `invalid`
+// (present but damaged: left out, the ledger still restores).
+export type BackupDailySection =
+  | { status: 'included'; store: DailySnapshotStore }
+  | { status: 'none' }
+  | { status: 'invalid'; detail: string };
+
 export interface OpenedBackup {
   state: FinanceState;
+  daily: BackupDailySection;
   schemaVersion: number;
   exportedAt: string;
   deviceId: string;
@@ -219,7 +235,7 @@ export interface OpenedBackup {
 // Decrypts (if needed), validates and migrates a backup to the current schema. Throws
 // BackupError; never touches app state.
 export async function openBackup(file: BackupFile, options: OpenOptions): Promise<OpenedBackup> {
-  let data: unknown = file.payload;
+  let raw: unknown = file.payload;
   if (file.encrypted) {
     if (!options.password) throw new BackupError('PASSWORD_REQUIRED');
     const payload = file.payload as EncryptedPayload;
@@ -232,12 +248,22 @@ export async function openBackup(file: BackupFile, options: OpenOptions): Promis
       throw new BackupError('WRONG_PASSWORD');
     }
     try {
-      data = JSON.parse(utf8Decode(plain));
+      raw = JSON.parse(utf8Decode(plain));
     } catch {
       throw new BackupError('INVALID_FILE');
     }
   }
-  if (!isObject(data)) throw new BackupError('INVALID_FILE');
+  if (!isObject(raw)) throw new BackupError('INVALID_FILE');
+  let data: Record<string, unknown> = raw;
+
+  // v10+: the daily history is its own section, taken out before the ledger is migrated (the ledger never carries it).
+  let daily: BackupDailySection = { status: 'none' };
+  if (file.schemaVersion >= 10 && 'dailySnapshots' in data) {
+    const { dailySnapshots, ...ledger } = data;
+    const checked = validateDailyStore(dailySnapshots);
+    daily = checked.ok ? { status: 'included', store: checked.store } : { status: 'invalid', detail: checked.detail };
+    data = ledger;
+  }
 
   // v0/v1 data has assets; v2+ has accounts. Anything else isn't Wealth data.
   const looksLikeData = file.schemaVersion <= 1 ? Array.isArray(data.assets) : Array.isArray(data.accounts);
@@ -258,7 +284,7 @@ export async function openBackup(file: BackupFile, options: OpenOptions): Promis
     // Right envelope, broken data inside (e.g. a hand-edited or half-written file).
     throw new BackupError('INVALID_FILE');
   }
-  return { state, schemaVersion: file.schemaVersion, exportedAt: file.exportedAt, deviceId: file.deviceId };
+  return { state, daily, schemaVersion: file.schemaVersion, exportedAt: file.exportedAt, deviceId: file.deviceId };
 }
 
 const STATE_COLLECTIONS = [
@@ -294,6 +320,8 @@ export interface BackupPreview {
   transactions: number;
   holdings: number;
   funds: number;
+  // Days of daily history the file carries; null when it carries none, 'invalid' when it is damaged (left out).
+  dailyDays: number | null | 'invalid';
   // In the backup's own reporting currency.
   netWorth: number;
   currency: string;
@@ -307,6 +335,7 @@ export function backupPreview(opened: OpenedBackup): BackupPreview {
     transactions: state.transactions.length,
     holdings: state.holdings.length,
     funds: state.funds.length,
+    dailyDays: opened.daily.status === 'included' ? opened.daily.store.days.length : opened.daily.status === 'invalid' ? 'invalid' : null,
     netWorth: netWorth(state),
     currency: state.settings.reportingCurrency,
     exportedAt: opened.exportedAt,

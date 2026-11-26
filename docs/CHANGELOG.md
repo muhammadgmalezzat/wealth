@@ -6,7 +6,57 @@ history up to `ad66d8c`; "Unreleased" covers work not committed yet.
 
 ---
 
-## Unreleased (ready to ship) — branch `goals-upgrade` · 1.2.0 (OTA, no new build) · data v9 (no migration) — spending from a fund, goals achieved
+## Unreleased — 2026-11-26 · branch `analytics` · 1.2.0 (OTA, no new build) · **data v10** — daily snapshot history (analytics Phase 1a)
+
+Not released. Design: `docs/architecture/PROFESSIONAL_ANALYTICS_AND_COMPARISON_DESIGN.md` (Phase 1a).
+
+### Release notes
+
+**بالعربي**
+- **السجل اليومي:** التطبيق بقى بيسجّل وضعك مرة في اليوم (أرصدتك، المحجوز للصناديق، الذهب، والأسعار) عشان التحليلات الجاية تقدر تقارن وضعك بين يومين. بيبدأ من يوم التحديث، ومفيش أي يوم قبله بيتخمّن.
+- النسخة الاحتياطية بقت بتشيل السجل، والاستعادة بترجّعه.
+- مفيش أي رقم في التطبيق اتغيّر.
+
+**In English**
+- **Daily history:** the app now records your position once a day (balances, money reserved for funds, gold, prices), so the
+  coming analytics can compare two dates. It starts on the day of this update; no earlier day is guessed.
+- Backups now carry the history, and restoring brings it back.
+- No number anywhere in the app changes.
+
+### Data, compatibility and rollback
+- **Data v9 → v10**, step-tracked and fail-closed like v8/v9 (`settings.v10Step`, `store/migrateV10.ts`). The ledger value
+  only gains the marker; every v9 number is unchanged (oracle diff 0). `@wealth_finance_state_backup_v9` is written
+  before migrating.
+- The history lives under its **own key** `@wealth_daily_snapshots`, never inside the ledger, so a damaged or oversized
+  history can never stop the ledger from loading (recording just pauses; the stored value is left untouched).
+- **Backups are schemaVersion 10** and carry the history; a v10 file in a v9 app is refused (UNSUPPORTED_VERSION);
+  v0–v9 files restore with no history; a damaged history in a file is left out and the ledger still restores.
+- **OTA rollback is not a data rollback:** after this update a v9 build fails closed on the phone's v10 data (by
+  design, as for v9). Fix forward, or restore `@wealth_finance_state_backup_v9` / an exported backup on a v9 build.
+- Before updating: export an encrypted backup.
+
+*For users*
+- Settings → البيانات → «السجل اليومي»: from when it records and how many days; «ابدأ سجل جديد» only if it is damaged.
+- Backup restore preview shows «السجل اليومي» (days in the file, «مفيش», or «مش سليم»).
+
+*Technical*
+- New: `store/dailySnapshots.ts` (pure: compact record format with interned ids and `SAME` sections, build / upsert one
+  record per date, validation that never throws, size planning), `store/useDailySnapshots.ts` (own key, load after the
+  ledger hydrated, serialized writes, restore / quarantine), `store/migrateV10.ts`; op `currentRateSnapshot` + finance
+  action `ensureCurrentRateSnapshot`; `SnapshotRunner` also watches reservations, unresolved movements and funds;
+  `createBackup({ dailySnapshots })`, `OpenedBackup.daily`, `BackupPreview.dailyDays`; Settings row; settingsUi
+  helpers (`dayCountPhrase`, `dailyLogLine`, `dailyPreviewLabel`, `dailyLogBroken`).
+- Tests: new `tests/dailySnapshots.test.ts` (42 tests) added to `npm run test:logic`; existing version-specific tests
+  updated for v10. 583 tests pass; `tsc` and `expo lint` clean; a production Android export builds.
+- Storage size (synthetic heavy user, every balance and the gold price moving daily): ≈ 553 bytes/day ≈ **197 KB/year**;
+  cap 1.5 MB ≈ 7 years. Found while measuring: a 20,000-transaction ledger is ≈ 6.4 MB as one value (TECHNICAL §15).
+- Docs: TECHNICAL (daily history, persistence keys, migrations, backups, tests, limitations), USER_GUIDE («السجل اليومي»),
+  the design doc (approved decisions, D1 override, D14, P7, the separate key).
+- This entry also fixes the heading of the goals-upgrade entry below (it was released; D13).
+
+---
+
+## 1.2.0 · data v9 (no migration) · released (OTA) — spending from a fund, goals achieved (branch `goals-upgrade`, merged in `4525885`)
 
 ### Release notes
 

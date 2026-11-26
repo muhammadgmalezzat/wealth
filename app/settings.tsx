@@ -8,6 +8,8 @@ import {
   BACKUP_NUDGE,
   backupAgeLabel,
   canImportOpeningData,
+  dailyLogBroken,
+  dailyLogLine,
   parsePremiumPct,
   PRICE_SOURCE_OPTIONS,
   priceErrorMessage,
@@ -33,6 +35,8 @@ import { colors, opacity, space } from '@/constants/theme';
 import { openBackup, parseBackup, type BackupFile, type OpenedBackup } from '@/store/backup';
 import { daysSinceBackup, needsBackupReminder } from '@/store/nextActions';
 import type { PriceSource } from '@/store/types';
+import { emptyDailyStore, summarizeDailyStore } from '@/store/dailySnapshots';
+import { replaceDailySnapshots, startFreshDailySnapshots, useDailySnapshots } from '@/store/useDailySnapshots';
 import { useFinanceStore } from '@/store/useFinanceStore';
 import { appInfo } from '@/utils/appInfo';
 import { rateToEGP } from '@/utils/currency';
@@ -55,6 +59,7 @@ const rateText = (rates: RateTable, currency: string) => String(roundTo(rateToEG
 
 export default function SettingsScreen() {
   const state = useFinanceStore();
+  const daily = useDailySnapshots();
   const { settings } = state;
   // Home's backup action links here with ?export=1.
   const params = useLocalSearchParams<{ export?: string }>();
@@ -127,6 +132,17 @@ export default function SettingsScreen() {
     setRefreshing(false);
   };
 
+  const startFreshDailyLog = () => {
+    confirmAction({
+      title: 'ابدأ سجل جديد',
+      message:
+        'السجل اليومي الحالي مش سليم. هيتنقل على جنب زي ما هو (لو ينفع يتقري) وهيبدأ سجل جديد من النهارده. حساباتك ومعاملاتك مش هتتلمس.',
+      confirmText: 'ابدأ سجل جديد',
+      cancelText: 'إلغاء',
+      onConfirm: () => startFreshDailySnapshots(),
+    });
+  };
+
   const handlePickBackup = async () => {
     try {
       const text = await pickBackupFile();
@@ -178,6 +194,8 @@ export default function SettingsScreen() {
         setImporting(true);
         try {
           await state.importOpeningData();
+          // The history belonged to the replaced data (the current one is copied aside first).
+          await replaceDailySnapshots(emptyDailyStore());
           const fresh = useFinanceStore.getState();
           setTrackingStart(fresh.settings.trackingStartDate);
           showMessage('تم', 'اتستوردت البيانات الافتتاحية');
@@ -353,6 +371,12 @@ export default function SettingsScreen() {
         <View style={styles.listGap}>
           <ListGroup>
             <ListRow title="استعادة نسخة" icon="restore" chevron onPress={handlePickBackup} />
+            <ListRow
+              title="السجل اليومي"
+              subtitle={dailyLogLine(daily.status, daily.store ? summarizeDailyStore(daily.store) : { days: 0, firstDate: null })}
+              icon="history"
+              {...(dailyLogBroken(daily.status) ? { chevron: true, onPress: startFreshDailyLog } : {})}
+            />
             {/* Development builds only: production would import sample data over real data. */}
             {canImportOpeningData(__DEV__) && (
               <ListRow

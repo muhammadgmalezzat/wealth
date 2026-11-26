@@ -1,5 +1,8 @@
 # Wealth — Technical Documentation
 
+> Current persisted-state version: **10** (daily snapshot history, 2026-11-26; see "Daily snapshot history" and §8).
+> The paragraph below is the original note from when this document was written at version 8.
+>
 > Written from the code as of persisted-state **version 8** (`store/migrations.ts → CURRENT_VERSION`), on branch
 > `currency-v8` (Phase B of `docs/architecture/CURRENCY_AND_FUNDS_DESIGN.md`: currency engine and precision). `main`
 > is still data v7 until Phase D is released (see "Release" in docs/CHANGELOG.md). Phases B (currency engine), C
@@ -675,6 +678,49 @@ Exchange rates and gold prices come from free, key-less APIs called straight fro
 - `netWorthChange(state, now)`: live net worth − last month's snapshot (`pct` = change ÷
   |start|, null from 0); null without the snapshot.
 
+### Daily snapshot history (`store/dailySnapshots.ts`, `store/useDailySnapshots.ts`, data v10)
+
+Phase 1a of `docs/architecture/PROFESSIONAL_ANALYTICS_AND_COMPARISON_DESIGN.md`. A read-only **observation** of the
+money positions once per local date, recorded from data v10 on and **never backfilled**: a day the app wasn't opened
+has no record, and nothing is interpolated or carried forward. Nothing reads it yet (analytics will, from Phase 1b);
+no money figure ever does.
+
+- **What a record holds** (all native, nothing converted): every account's balance (`accountBalance`, archived ones
+  included); every non-zero reservation per (fund, account) in the account's currency (exactly `reservation()`);
+  non-zero legacy unresolved reservations per (fund, currency), never assigned to an account; gold holdings (karat,
+  grams) and currency holdings (currency, quantity); liabilities remaining; the achieved fund ids; the ledger
+  fingerprint (transaction count, latest `updatedAt`, to detect later edits of the past, D3); the **rate snapshot id**
+  of the current rates (a reference into `rateSnapshots`, never a copy) and `settings.rates.updatedAt`; the gold prices
+  (24k, 21k, local premium, source auto/manual, `goldPriceUpdatedAt`, the world USD/oz price when known); a record
+  schema version (`v: 1`) and the observation time.
+- **One record per date (D2 a):** `syncDailyStore(store, state, now, rateSnapshotId)` upserts **today's** record
+  (the last observation of the day is kept), appends on a new date, never touches a past date, does nothing when the
+  clock is behind the last recorded date, and returns `null` when nothing changed (so nothing is written).
+- **Compact format** (`DailySnapshotStore { format: 1, ids, days }`): entity ids are interned once in `ids` and records
+  refer to them by index; entries are tuples; a section equal to the previous record's is stored as `0` (`SAME`) and
+  resolved by `resolveDailyRecord` / `expandDailyRecord` / `dailySnapshotOn` (the first record is always complete).
+  Measured (test "storage size"): a heavy synthetic user (14 accounts, 25 funds, ~40 reservations, 12 holdings, every
+  balance and the gold price moving daily) ≈ 553 bytes/day ≈ **197 KB/year**; a full record ≈ 1.36 KB.
+- **Its own storage key** `@wealth_daily_snapshots`, never inside the ledger value: the ledger never reads it, so a
+  damaged, unreadable or oversized history can never stop the ledger from loading. `useDailySnapshots` (a separate,
+  non-persisted zustand store) holds `status` and the store. `loadDailySnapshots()` runs only **after** the ledger
+  hydrated; `parseDailyStore` never throws: nothing stored → empty; > `MAX_DAILY_READ_BYTES` (3 MB) → `oversized`
+  (not parsed); bad JSON / shape / indices / dates not increasing → `invalid`; a failing read → `unreadable`. In
+  those states recording **pauses** and the stored value is left exactly as it is. Settings → البيانات → «السجل
+  اليومي» shows the state; only while it is broken it offers «ابدأ سجل جديد» (confirmation), which copies the old value
+  to `@wealth_daily_snapshots_quarantine_<ISO>` and starts empty (a value that can't even be read back is removed).
+- **Writing:** `recordDailySnapshot()` (serialized; no-op unless the history is ready and the ledger hydrated) calls the
+  finance action `ensureCurrentRateSnapshot()` (op `currentRateSnapshot`: appends the current table to `rateSnapshots`
+  only if new, nothing else), then `planDailyWrite` → `none` / `write` / `full`. A write that would pass
+  `MAX_DAILY_STORE_BYTES` (1.5 MB, ≈ 7 years for the heavy user) is refused (`full`: recording pauses, nothing lost). A
+  failed `setItem` → `write_failed`, retried on the next change.
+- **Triggers** (`SnapshotRunner`): after the ledger hydrated (load, then record), on foreground, and 1.5 s after the
+  last change to accounts, transactions, holdings, liabilities, **reservations, unresolved movements, funds** or
+  settings.
+- **Backups:** the history goes into the same file (§12). **Restore** replaces it with the file's (empty for a file
+  without one) after copying the current value to `@wealth_daily_snapshots_backup_before_restore`; the dev-only
+  opening-data import empties it the same way.
+
 ### Analytics (`app/(tabs)/analytics.tsx`, `store/analytics.ts`, `components/analytics/`)
 
 The "التحليلات" tab (between الخطة and الصناديق). **Every number comes from pure, unit-tested selectors
@@ -1029,7 +1075,7 @@ erDiagram
   Every action calls a pure function from `operations.ts` with `get()` and the context
   `{ newId: expo-crypto randomUUID, now: () => new Date() }`, then `set(patch)`. Actions throw
   `FinanceValidationError`; UI wraps them with `runAction` (Arabic alert).
-- `persist` middleware: key **`@wealth_finance_state`**, `version: CURRENT_VERSION` (8),
+- `persist` middleware: key **`@wealth_finance_state`**, `version: CURRENT_VERSION` (10),
   `partialize` = `dataOf()` (data only; no actions or `hasHydrated`).
 - Storage: `deviceStorage` wraps AsyncStorage (and records whether the read found nothing = a fresh
   install). The persist options come from `createPersistOptions` in `store/hydration.ts` (pure, no React
@@ -1051,7 +1097,7 @@ erDiagram
   `.catch`, the old `onRehydrateStorage` callback ignored the error and called `setState`, and zustand
   persisted the seed over the real data at launch (reproduced in a scratch script). The pre-migration copy
   `@wealth_finance_state_backup_v<N>` is still written before each migration (not for refused newer data).
-- **A version-8 payload from an earlier build.** Data v8 was built over several commits, so a device can hold a payload stored at version 8 that lacks later parts (`settings.v8Step` says how far it got). `createPersistOptions` takes a `normalize` hook (zustand's `merge`) that runs `applyV8Steps` on every hydration: a complete payload comes back unchanged, an older one is completed, and a step that throws fails closed like a failed migration. Before completing it the store copies the raw payload to `@wealth_finance_state_backup_v8_before_step_{N}`. Data v9 works the same way: `normalize` runs `applyV9Steps(applyV8Steps(…))`, and a version-9 payload with `settings.v9Step` below `LATEST_V9_STEP` is first copied to `@wealth_finance_state_backup_v9_before_step_{N}`. A version-8 payload goes through `migrate` instead, which writes `@wealth_finance_state_backup_v8` before anything else.
+- **A version-8 payload from an earlier build.** Data v8 was built over several commits, so a device can hold a payload stored at version 8 that lacks later parts (`settings.v8Step` says how far it got). `createPersistOptions` takes a `normalize` hook (zustand's `merge`) that runs `applyV8Steps` on every hydration: a complete payload comes back unchanged, an older one is completed, and a step that throws fails closed like a failed migration. Before completing it the store copies the raw payload to `@wealth_finance_state_backup_v8_before_step_{N}`. Data v9 works the same way: `normalize` runs `applyV9Steps(applyV8Steps(…))`, and a version-9 payload with `settings.v9Step` below `LATEST_V9_STEP` is first copied to `@wealth_finance_state_backup_v9_before_step_{N}`. A version-8 payload goes through `migrate` instead, which writes `@wealth_finance_state_backup_v8` before anything else. Data v10 likewise: `normalize` runs `applyV10Steps(applyV9Steps(applyV8Steps(…)))`, a version-10 payload with `settings.v10Step` below `LATEST_V10_STEP` is first copied to `@wealth_finance_state_backup_v10_before_step_{N}`, and a version-9 payload goes through `migrate` (copy `@wealth_finance_state_backup_v9` first).
 - **SSR guard:** `isServer = Platform.OS === 'web' && typeof window === 'undefined'` → a no-op
   storage and `skipHydration: true`, so nothing touches AsyncStorage during web server rendering.
   (`web.output` is `"single"` today, so there is no server rendering, but the guard stays.)
@@ -1074,6 +1120,10 @@ erDiagram
 | `@wealth_finance_state` | Every state change (persist) |
 | `@wealth_finance_state_backup_v{N}` | Before migrating persisted data from version N (raw payload) |
 | `@wealth_finance_state_backup_v8_before_step_{N}` | Before a version-8 payload that had only N of the v7 → v8 sub-steps is completed (raw payload) |
+| `@wealth_finance_state_backup_v9_before_step_{N}` / `…_v10_before_step_{N}` | Same for v9 / v10 sub-steps |
+| `@wealth_daily_snapshots` | The daily snapshot history (data v10): its own key, written by `recordDailySnapshot` / restore |
+| `@wealth_daily_snapshots_backup_before_restore` | Before a restore (or the dev opening-data import) replaces the history |
+| `@wealth_daily_snapshots_quarantine_{ISO}` | «ابدأ سجل جديد»: the unusable history, moved aside untouched |
 | `@wealth_finance_state_backup_before_import` | Before "استيراد البيانات الافتتاحية" |
 | `@wealth_finance_state_backup_before_restore` | Before restoring a backup file |
 
@@ -1095,6 +1145,7 @@ greater than the stored one. Used by `persist.migrate` **and** by backup restore
 | v6 → v7 | `netWorthSnapshots ??= []`, `actionDismissals ??= []`, `monthlyReviews ??= []`; then every past month from `trackingStartDate`'s month (at most 36) up to the month before `now` that has no snapshot gets an `estimated` one from `netWorthAsOf(month end)` at the current rates/prices, `takenAt = now`. The current month is left to the SnapshotRunner. Existing snapshots are never changed. |
 
 | v7 → v8 | `applyV8Steps`: eight ordered, idempotent sub-steps (below). v0 → v7 are frozen in `migrateToV7` and run first for older data. |
+| v9 → v10 | `applyV10Steps` (`store/migrateV10.ts`, `settings.v10Step`, `LATEST_V10_STEP = 1`): step 1 `separateDailyHistory` only marks the data; a ledger value that carries `dailySnapshots` inline **throws** (the history lives under its own key). Nothing else changes (v9 oracle report diff 0). The bump exists so that older builds refuse v10 data and v10 backup files (which carry the history) instead of silently restoring or saving without it. No backfill. |
 | v8 → v9 | `applyV9Steps` (`store/migrateV9.ts`, `settings.v9Step`, `LATEST_V9_STEP = 1`): step 1 `receivables` adds `receivables: []` when missing. A list that is not a list of records, or any receivable link that breaks INV-9…11, **throws** (fail-closed: the store refuses the data untouched). No amount, transaction or reservation changes: the v8 oracle report is identical (diff 0). `migratePersistedState` runs `applyV9Steps` after every chain (v0 → v7 → v8, and version 8 / 9 payloads). |
 
 Idempotence rules: v2→v3 … v6→v7 only fill missing values and keep existing ones, so
@@ -1463,7 +1514,12 @@ File (`wealth-backup-YYYY-MM-DD.json`):
   "payload": { "kdf": "pbkdf2-sha256", "iterations": 200000,
                "salt": "hex(16B)", "nonce": "hex(12B)", "ciphertext": "hex" } }
 ```
-- Plain exports carry the data object as `payload` (`dataOf(state)`).
+- Plain exports carry the data object as `payload` (`dataOf(state)`). From v10 the payload (plain or inside the
+  ciphertext) also carries `dailySnapshots` (the daily history, when it could be loaded). `openBackup` takes it out
+  **before** migrating the ledger and validates it on its own (`validateDailyStore`): `OpenedBackup.daily` is
+  `included` / `none` (older file or exported without one) / `invalid` (left out — the ledger still restores, and the
+  preview row «السجل اليومي» says «مش سليم»). A pre-v10 file carrying `dailySnapshots` is `INVALID_FILE`. A v10 file in
+  a v9 app is `UNSUPPORTED_VERSION`.
 - Encryption: AES-256-GCM (`@noble/ciphers`), key = PBKDF2-SHA256(password, salt, 200 000 iters, 32 B)
   (`pbkdf2Async`, yields to the UI). AAD = `app|schemaVersion|exportedAt|deviceId`, so header
   tampering fails decryption. Salt/nonce from `expo-crypto getRandomBytes`. The password is never stored.
@@ -1538,7 +1594,7 @@ File (`wealth-backup-YYYY-MM-DD.json`):
 
 ## 14. Testing
 
-`npm run test:logic` → `tsx --test tests/logic.test.ts` (362 tests, ~20 s; the encrypted round
+`npm run test:logic` → `tsx --test tests/logic.test.ts tests/dailySnapshots.test.ts` (583 tests on 2026-11-26, ~20 s; the encrypted round
 trip uses the real 200k-iteration KDF). Suites: migrations (v0–v7), net worth, funds, unassigned,
 month summary, transfers, validation, one fund per holding, set current balance, editFund,
 parseAmount, transaction lists, editing transactions, day labels, allocation/cover/sinking,
@@ -1566,6 +1622,20 @@ rate changes, Sankey balance / top-5 / drill totals, trend, breakdown with previ
 series by location and estimated points, money map, runway, fund projections, every insight trigger and the
 limit of 5, drill params), snapshot breakdowns, and the Analytics UI helpers (compact numbers, axis, phrases,
 stacked fallback, Sankey layout), and dark theme contrast (text, emerald, gold, warning, danger and chart colours on every ground; dark-on-emerald for primary buttons).
+
+Daily history suites (data v10, `tests/dailySnapshots.test.ts`): the v9 → v10 migration on the oracle fixtures
+(marker only, v9 report diff 0, twice = once, v1 / v7 / v8 chains end at v10, an inline history refused), hydration
+through the real `persist` (`backup_v9` first; an unmarked v10 payload completed after its `10_before_step_0` copy; a
+corrupted / 4 MB / wrong-format history under its key never affects the ledger and is never written; newer refused);
+what a record holds (equal to the selectors; reference to the current rate snapshot; gold source / premium / world
+price), INV-A7 (deep-frozen state unchanged), `currentRateSnapshot` only appends, INV-A2 (reporting / plan currency
+change nothing), determinism; one record per date (no-op, same-day replace keeps the last observation, next day
+appends, past untouched, gaps stay gaps, clock back, ledger fingerprint after a past edit, local midnight); `SAME`
+compaction resolves exactly what was observed and survives save / load; validation refuses every bad shape, never
+throws (fuzz), oversized not parsed, a write past the cap refused; backups (round trip plain + encrypted at v10, none
+for older files, a damaged history left out while the ledger restores, pre-v10 inline refused, v10 newer than v9);
+the Settings copy; and the **storage-size projection** (3 years of daily records for a heavy user plus a 20,000-transaction
+ledger; prints bytes per record and per year, years under the cap, the ledger size and the build time).
 
 Fund-spending suites (step 4): the goal progress basis (a purchase keeps progress, a partial purchase changes nothing, a cover lowers it and raises the requirement, emergency and sinking unchanged, the nudge / analytics / next-step sentence on the same basis) and the UI helpers (picker choices and live lines, edits measured without their own spending, chip and delete names, problem texts, cover picks, goal figures and spent line, the achieve summary, the achieved row, the reserved total keeping leftovers). A web walkthrough on synthetic data covered the tablet case, both cards of «تدفعه منين؟», delete giving the money back, «تم الهدف» from the nudge, keep / release, «أهداف اتحققت» and reopen at 360 px.
 
@@ -1595,6 +1665,20 @@ state with `emptyState()`, `account()`, `fund()` helpers, apply operations with
 ---
 
 ## 15. Known limitations & tech debt
+
+- **Ledger value size (found while sizing the daily history, 2026-11-26).** The whole ledger is ONE AsyncStorage value.
+  A synthetic 20,000-transaction ledger serializes to ≈ 6.4 MB (≈ 330 bytes per transaction with UUID ids). On Android,
+  AsyncStorage's default database limit is 6 MB and a single value above ≈ 2 MB may fail to read back (SQLite
+  CursorWindow); the pre-migration copies (`…_backup_v{N}`, `…_before_restore`) are full copies too. A real ledger
+  passes 2 MB at roughly 6,000 transactions. Not changed in Phase 1a (out of scope); to be measured on the device and
+  planned (e.g. splitting the ledger value, or raising `AsyncStorage_db_size_in_MB`). The daily history is kept apart
+  precisely so it never adds to that value.
+- **Daily history:** starts on the day data v10 first runs (nothing before it exists); only days the app was opened have
+  a record; balances in a record are what the ledger said that day (a later edit of the past makes the ledger and the
+  record differ: the fingerprint lets analytics flag it, D3); recording pauses at 1.5 MB (≈ 7 years for a heavy user)
+  or while the stored history is unusable. Nothing reads it yet.
+- **OTA rollback is not a data rollback (v10):** after this update a phone holds data v10; a v9 build fails closed on it
+  (by design). Fix forward, or restore `@wealth_finance_state_backup_v9` / an exported backup on a v9 build.
 
 - **v8 is built but not released**: unassigned money totals, fund suggestions, the emergency target, next-action amounts, Goals totals and the fund screens still show EGP (or the fund's own currency) whatever the reporting currency is — a display choice deferred, no data impact. There is one gold price, in EGP (per-country gold pricing is a product-phase item). Net worth snapshots are stored in EGP (their field names say so). Records the migration found without their own rates point at an `estimated` rate snapshot frozen at the migration's rates.
 - Gold is priced from the world spot price plus a manual local premium, not from an Egyptian
