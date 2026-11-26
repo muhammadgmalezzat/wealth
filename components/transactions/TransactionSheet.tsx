@@ -14,10 +14,12 @@ import { Segment } from '@/components/ui/Segment';
 import { StatusChip } from '@/components/ui/StatusChip';
 import { colors, space } from '@/constants/theme';
 import type { NewRecurringRule } from '@/store/operations';
-import { coversOf, followPreview, mergeOptions, type OpOptions } from '@/store/cover';
+import { coversOf, followPreview, mergeOptions, planSpend, type OpOptions } from '@/store/cover';
 import { feeCategoryId } from '@/store/defaultCategories';
 import { feeSpendImpact, planFor, spendImpact } from '@/store/planning';
-import { pickerCategories } from '@/store/selectors';
+import { pickerCategories, reservation, spendOf } from '@/store/selectors';
+import { spendChoices, spendLine, spendNames, spendTotal, withoutSpends } from '@/components/funds/goalsUi';
+import { Chip, ChipRow } from '@/components/ui/Chip';
 import { DEFAULT_COUNTRY } from '@/components/ui/countryOptions';
 import type { CountryCode, GoldKarat, Transaction } from '@/store/types';
 import { useFinanceStore } from '@/store/useFinanceStore';
@@ -135,6 +137,11 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   );
   const [date, setDate] = useState(transaction?.date ?? toDateKey(new Date()));
   const [note, setNote] = useState(transaction?.note ?? '');
+  // «من صندوق» (FUND_SPEND §5.1, AC-1): the fund this expense is paid from, for a purchase that was the fund's purpose.
+  // An edit starts from the expense's current fund (its spend movements); a new expense from «بدون».
+  const originalSpend = transaction && transaction.type === 'expense' ? spendOf(state, transaction.id) : [];
+  const originalSpendFund = originalSpend[0]?.fundId ?? null;
+  const [spendFund, setSpendFund] = useState<string | null>(originalSpendFund);
   const [oneTime, setOneTime] = useState(transaction?.type === 'expense' && !!transaction.oneTime);
   // Gold purchase fields.
   const [weightText, setWeightText] = useState(editedGold ? String(editedGold.weightGrams) : '');
@@ -153,6 +160,11 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
   const crossCurrency = isTransfer && !!fromAccount && !!toAccount && fromAccount.currency !== toAccount.currency;
 
   const amount = parseAmount(amountText);
+  // What «من صندوق» is measured against: for an edit, the state with this expense's own spending given back.
+  const spendBase = withoutSpends(state, transaction?.id);
+  const spendOptions = type === 'expense' && flowAccount ? spendChoices(spendBase, flowAccount.id) : [];
+  const spendHeld = spendFund && flowAccount ? reservation(spendBase, spendFund, flowAccount.id) > 0.005 : false;
+  const showSpendPicker = type === 'expense' && !!flowAccount && (spendOptions.length > 0 || (!!transaction && !!originalSpendFund));
 
   // Live budget hint for new expenses, and for the fees of a new transfer or exchange (never blocks saving).
   const typedFees = fees.flatMap((fee) => {
@@ -303,7 +315,18 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
       ...noteField,
       ...(type === 'expense' && oneTime ? { oneTime: true } : {}),
     };
-    const saved = runAction('تعذّر الحفظ', (options) => {
+    // The «من صندوق» choice as the operation takes it. A new expense: the chosen fund at planSpend (or nothing). An
+    // edit that keeps the same fund on the same account: left to the store (it re-applies the expense's funds as they
+    // are); any change: explicit ([] = none).
+    const unchangedSpend = !!transaction && spendFund === originalSpendFund && transaction.type === 'expense' && accountId === transaction.accountId;
+    const chosenSpend =
+      type === 'expense' && spendFund && spendHeld && amount !== null
+        ? [{ fundId: spendFund, accountId, amount: planSpend(spendBase, spendFund, accountId, amount) }].filter((x) => x.amount > 0)
+        : [];
+    const spendOption: OpOptions | undefined =
+      type !== 'expense' || unchangedSpend ? undefined : chosenSpend.length > 0 || originalSpend.length > 0 ? { spend: chosenSpend } : undefined;
+    const saved = runAction('تعذّر الحفظ', (decided) => {
+      const options = spendOption ? mergeOptions(spendOption, decided) : decided;
       if (!transaction) {
         state.addTransaction(fields, options);
         return;
@@ -377,7 +400,13 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
           ? 'هيتحذف الذهب المرتبط بالمعاملة كمان، والفلوس هترجع للحساب.'
           : collectionOf
             ? `هل تريد حذف هذه المعاملة؟ فلوسك عند «${collectionOf.label}» هترجع مفتوحة بالمبلغ ده.`
-            : 'هل تريد حذف هذه المعاملة؟',
+            : spendTotal(state, transaction) > 0.005
+              ? `هل تريد حذف هذه المعاملة؟ الـ ${formatMoney(spendTotal(state, transaction), transaction.type === 'expense' ? transaction.currency : 'EGP')} هيرجعوا لصندوق «${spendNames(state, transaction).join('»، «')}».${
+                  originalSpend.some((m) => state.funds.find((f) => f.id === m.fundId)?.achievedAt)
+                    ? ' الهدف هيفضل متحقق؛ تقدر ترجّعه هدف مفتوح من صفحته.'
+                    : ''
+                }`
+              : 'هل تريد حذف هذه المعاملة؟',
       confirmText: 'حذف',
       cancelText: 'إلغاء',
       onConfirm: () => {
@@ -582,6 +611,30 @@ export function TransactionSheet({ transaction, initialType, onClose }: Transact
         />
       )}
 
+      {showSpendPicker && flowAccount && (
+        <View style={styles.spend}>
+          <AppText variant="caption" color="textSecondary">
+            من صندوق:
+          </AppText>
+          <ChipRow>
+            <Chip label="بدون" selected={!spendFund || !spendHeld} onPress={() => setSpendFund(null)} />
+            {spendOptions.map((f) => (
+              <Chip
+                key={f.fundId}
+                label={`${f.name} · ${formatMoney(f.amount, flowAccount.currency)}`}
+                selected={spendFund === f.fundId}
+                onPress={() => setSpendFund(f.fundId)}
+              />
+            ))}
+          </ChipRow>
+          {spendFund && (
+            <AppText variant="caption" color={spendHeld ? 'textSecondary' : 'warning'}>
+              {spendLine(spendBase, spendFund, flowAccount.id, amount, flowAccount.currency)}
+            </AppText>
+          )}
+        </View>
+      )}
+
       <View style={styles.date}>
         <AppText variant="caption" color="textSecondary">
           التاريخ
@@ -649,6 +702,7 @@ const styles = StyleSheet.create({
   follow: { gap: space.xs, marginTop: space.sm },
   lockedType: { gap: space.xs, alignItems: 'flex-end' },
   collectionChips: { flexDirection: 'row-reverse', flexWrap: 'wrap', gap: space.xs },
+  spend: { marginTop: space.md, gap: space.xs },
   hint: { marginTop: space.sm },
   date: { marginTop: space.lg, gap: space.sm },
   note: { minHeight: 72, textAlignVertical: 'top' },

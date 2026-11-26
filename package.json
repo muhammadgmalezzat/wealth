@@ -9,6 +9,7 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "test:logic": "tsx --test tests/logic.test.ts",
+    "check:release": "node scripts/check-release.mjs",
     "brand": "node scripts/brand.mjs"
   },
   "dependencies": {

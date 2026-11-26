@@ -152,6 +152,10 @@ export interface Fund extends Synced {
   // Sinking funds only. Optional so funds saved before these fields existed stay valid.
   frequency?: SinkingFrequency;
   nextDueDate?: string;
+  // Goals only (FUND_SPEND_AND_GOALS_DESIGN.md §3.4): ISO time the user confirmed «تم الهدف 🎉». Present = achieved
+  // (out of suggestions, pickers and Next Best Actions; kept in history and backups); absent = active. Never set by
+  // reaching the target (AC-2); cleared by reopening. Optional, so data v9 needs no migration.
+  achievedAt?: string;
 }
 
 // Why a reservation changed. 'reserve' / 'release': the user put money aside / gave it back; 'reallocate': one

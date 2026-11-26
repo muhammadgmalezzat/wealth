@@ -7,6 +7,7 @@ import { RestoreSheet } from '@/components/settings/RestoreSheet';
 import {
   BACKUP_NUDGE,
   backupAgeLabel,
+  canImportOpeningData,
   parsePremiumPct,
   PRICE_SOURCE_OPTIONS,
   priceErrorMessage,
@@ -352,13 +353,16 @@ export default function SettingsScreen() {
         <View style={styles.listGap}>
           <ListGroup>
             <ListRow title="استعادة نسخة" icon="restore" chevron onPress={handlePickBackup} />
-            <ListRow
-              title={importing ? 'جاري الاستيراد…' : 'استيراد البيانات الافتتاحية'}
-              subtitle="استبدال كل البيانات بالوضع الافتتاحي (الحسابات والذهب والمعاملات الأولى)."
-              icon="download"
-              chevron
-              onPress={importing ? undefined : handleImport}
-            />
+            {/* Development builds only: production would import sample data over real data. */}
+            {canImportOpeningData(__DEV__) && (
+              <ListRow
+                title={importing ? 'جاري الاستيراد…' : 'استيراد البيانات الافتتاحية'}
+                subtitle="استبدال كل البيانات بالوضع الافتتاحي (الحسابات والذهب والمعاملات الأولى)."
+                icon="download"
+                chevron
+                onPress={importing ? undefined : handleImport}
+              />
+            )}
           </ListGroup>
         </View>
       </View>

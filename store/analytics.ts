@@ -15,6 +15,7 @@ import {
   fundLinkedValue,
   fundMovementRows,
   fundProgress,
+  fundProgressAmount,
   fundsByPriority,
   feeExpenses,
   fundStatus,
@@ -906,7 +907,8 @@ export function fundsProjection(state: State, now: Date): FundProjection[] {
     const paced = observed.length > 0 ? observed : [month];
     const pace = sumIn(moves.filter((m) => paced.includes(monthOf(m.date))).map((m) => movementValueInFund(state, m)), fund.currency) / paced.length;
     const current = fundCurrent(state, fund.id);
-    const remaining = Math.max(0, fund.targetAmount - current);
+    // Goals count what they already spent on their purpose toward the target (fundProgressAmount).
+    const remaining = Math.max(0, fund.targetAmount - fundProgressAmount(state, fund.id));
     const dueDate = fundDueDate(fund) ?? null;
     let status: FundProjection['status'] = 'stalled';
     let projectedDate: string | null = null;

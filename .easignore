@@ -1,6 +1,13 @@
 # EAS uses this file INSTEAD of .gitignore when uploading a build.
-# store/seed.local.ts is git-ignored but deliberately NOT listed here: the build must include
-# the real opening data. Never add it to this file.
+
+# PRIVATE real data — never uploaded (changed 2026-11-25). store/seed.local.ts is loaded only in development
+# (`if (__DEV__)` in store/useFinanceStore.ts), so no production build can use it; uploading it would only expose it.
+# Production builds and OTAs start from the synthetic store/seed.example.ts. `npm run check:release` verifies the
+# bundles. Real backups (.local/, wealth-backup-*.json) are excluded for the same reason.
+store/seed.local.ts
+.local/
+wealth-backup-*.json
+*.backup.json
 
 # dependencies (installed on the build server)
 node_modules/

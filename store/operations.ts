@@ -9,7 +9,7 @@ import { priceSourceOf, type PriceFetchResult } from '@/utils/prices/fetchPrices
 import { planIdFor } from './migrations';
 import { NON_DISMISSIBLE_ACTION_IDS, SNOOZE_MS } from './nextActions';
 import { dueOccurrences, isOccurrence, nextOccurrence, recordedOccurrences } from './recurring';
-import { coversOf, followPreview, NeedsCoverError, planRelease, planReserve, shortfallsBetween, type CoverSelection, type OpOptions, type Shortfall } from './cover';
+import { coversOf, expenseContext, followPreview, NeedsCoverError, planRelease, planReserve, planSpend, shortfallsBetween, type CoverSelection, type OpOptions, type Shortfall } from './cover';
 import { invariantViolations } from './invariants';
 import { CATEGORY_IDS, feeCategoryId } from './defaultCategories';
 import { snapshotForNow } from './rateSnapshots';
@@ -29,6 +29,7 @@ import {
   receivableCollected,
   receivableStatus,
   reservation,
+  spendOf,
   SINKING_CYCLE_MONTHS,
   withdrawalPlan,
   type FundAmount,
@@ -459,9 +460,27 @@ function addTransactionCore(state: State, raw: NewIncomeExpense, ctx: OpContext)
 // released in the same patch), or it throws NeedsCoverError and applies nothing. Going below zero on an account that
 // does not allow it needs an explicit confirmation too.
 
-function settle(state: State, patch: Patch, ctx: OpContext, options?: OpOptions, sourceTransactionId?: string): Patch {
+// `expense`: the operation records (or edits) an expense of `amount` on `accountId`; `base` is the state without it.
+// A cover shortfall on that account then carries the ExpenseContext, so the sheet can offer «من صندوق» as well as
+// «من الفلوس الحرة الأول» (FUND_SPEND §3.2). Nothing else about the gate changes.
+interface GateContext {
+  expense?: { accountId: string; amount: number; base: State };
+}
+
+function settle(
+  state: State,
+  patch: Patch,
+  ctx: OpContext,
+  options?: OpOptions,
+  sourceTransactionId?: string,
+  context?: GateContext
+): Patch {
   const next: State = { ...state, ...patch };
-  const shortfalls = shortfallsBetween(state, next);
+  const shortfalls = shortfallsBetween(state, next).map((s) =>
+    s.kind === 'cover' && context?.expense && s.accountId === context.expense.accountId
+      ? { ...s, expense: expenseContext(context.expense.base, s.accountId, context.expense.amount) }
+      : s
+  );
   if (shortfalls.length === 0) return patch;
 
   const unmet: Shortfall[] = [];
@@ -595,7 +614,79 @@ function reversalMovements(state: State, tx: TransferTransaction | ExchangeTrans
 
 export function addTransaction(state: State, raw: NewIncomeExpense, ctx: OpContext, options?: OpOptions): Patch {
   const patch = addTransactionCore(state, raw, ctx);
-  return settle(state, patch, ctx, options, patch.transactions![0].id);
+  const tx = patch.transactions![0];
+  const spent = withSpend(state, patch, tx, options?.spend, ctx);
+  return settle(state, spent, ctx, options, tx.id, expenseGate(tx, state));
+}
+
+// The gate context of an expense (undefined for anything else). `base` = the state without it.
+const expenseGate = (tx: Transaction, base: State): GateContext | undefined =>
+  tx.type === 'expense' ? { expense: { accountId: tx.accountId, amount: tx.amount, base } } : undefined;
+
+// --- Spending from a fund (FUND_SPEND_AND_GOALS_DESIGN.md §3.1–3.3) ---------------------------------------------
+//
+// The first stage of the gate for an expense: the fund money the user chose to SPEND on it becomes 'spend' movements
+// (sourceTransactionId = the expense) BEFORE the gate measures anything. So the fund's own money pays first and free
+// money only for what is left; a cover is asked only if even that is not enough. INV-12: every spend is ≤ 0, on the
+// expense's account, never more than the fund holds there, and together never more than the expense.
+
+// Validates `spends` against `movements` (what is reserved now) and returns the movements with the spends appended.
+// `note` keeps a movement's own note when an edit re-applies it (e.g. «اتدفعت: …» of a sinking payment).
+function spendMovements(
+  state: State,
+  movements: ReservationMovement[],
+  tx: Transaction,
+  spends: { fundId: string; accountId: string; amount: number; note?: string }[],
+  ctx: OpContext
+): ReservationMovement[] {
+  if (spends.length === 0) return movements;
+  if (tx.type !== 'expense') fail('SPEND_INVALID', { id: tx.id });
+  const account = requireById(state.accounts, tx.accountId, 'account');
+  const draft = { accounts: state.accounts, reservationMovements: movements };
+  const perFund = new Map<string, number>();
+  let total = 0;
+  const added: ReservationMovement[] = [];
+  for (const s of spends) {
+    requireById(state.funds, s.fundId, 'fund');
+    const amount = Number.isFinite(s.amount) ? money(s.amount, account.currency) : NaN;
+    if (s.accountId !== tx.accountId || !(amount > 0)) fail('SPEND_INVALID', { id: tx.id });
+    const fundTotal = roundIn((perFund.get(s.fundId) ?? 0) + amount, account.currency);
+    if (fundTotal > reservation(draft, s.fundId, account.id) + 0.005) fail('SPEND_INVALID', { id: tx.id });
+    perFund.set(s.fundId, fundTotal);
+    total = roundIn(total + amount, account.currency);
+    added.push(newReservation(tx.rateSnapshotId, s.fundId, account.id, -amount, 'spend', s.note, ctx, { sourceTransactionId: tx.id }));
+  }
+  if (total > tx.amount + 0.005) fail('SPEND_INVALID', { id: tx.id });
+  return [...movements, ...added];
+}
+
+// `patch` (which records `tx`) with the chosen spends applied on top of the movements it already carries.
+function withSpend(state: State, patch: Patch, tx: Transaction, spends: OpOptions['spend'], ctx: OpContext): Patch {
+  if (!spends || spends.length === 0) return patch;
+  const movements = spendMovements({ ...state, ...patch }, patch.reservationMovements ?? state.reservationMovements, tx, spends, ctx);
+  return { ...patch, reservationMovements: movements };
+}
+
+// An edited expense keeps its fund(s): each re-applied as min(what is left of the new amount, what the fund holds on
+// the (possibly new) account). A fund with nothing there drops out (the sheet says so before saving).
+function respend(
+  reserved: Pick<State, 'accounts' | 'reservationMovements'>,
+  old: ReservationMovement[],
+  tx: Transaction
+): { fundId: string; accountId: string; amount: number; note?: string }[] {
+  if (tx.type !== 'expense') return [];
+  const out: { fundId: string; accountId: string; amount: number; note?: string }[] = [];
+  let left = tx.amount;
+  const seen = new Set<string>();
+  for (const m of old) {
+    if (seen.has(m.fundId)) continue;
+    seen.add(m.fundId);
+    const amount = planSpend(reserved, m.fundId, tx.accountId, left);
+    if (amount <= 0.005) continue;
+    out.push({ fundId: m.fundId, accountId: tx.accountId, amount, ...(m.note ? { note: m.note } : {}) });
+    left = roundIn(left - amount, tx.currency);
+  }
+  return out;
 }
 
 // Same-currency only (a transfer between currencies is addExchange). Fees are spending; the move itself is not.
@@ -720,10 +811,13 @@ function syncPurchaseCost(
 // changes, e.g. when the transaction moves to an account in another currency.
 export function updateTransaction(state: State, raw: Editable<Transaction>, ctx: OpContext, options?: OpOptions): Patch {
   const existing = requireById(state.transactions, raw.id, 'transaction');
-  // Reverse what the old record carried (reservations of a transfer / exchange), then apply the new values with the
-  // same rules; the gate compares the final state with the original one. All or nothing.
+  // Reverse what the old record carried (reservations of a transfer / exchange; the fund money an expense spent), then
+  // apply the new values with the same rules; the gate compares the final state with the original one. All or nothing.
   const reversal = isMove(existing) ? reversalMovements(state, existing, ctx, existing.rateSnapshotId) : [];
-  const reversed: State = { ...state, reservationMovements: [...state.reservationMovements, ...reversal] };
+  const oldSpends = spendOf(state, existing.id);
+  const oldSpendIds = new Set(oldSpends.map((m) => m.id));
+  const kept = oldSpends.length > 0 ? state.reservationMovements.filter((m) => !oldSpendIds.has(m.id)) : state.reservationMovements;
+  const reversed: State = { ...state, reservationMovements: [...kept, ...reversal] };
   const patch = updateTransactionCore(reversed, raw, ctx);
   const updated = patch.transactions!.find((x) => x.id === raw.id)!;
   const follows = isMove(updated)
@@ -737,12 +831,22 @@ export function updateTransaction(state: State, raw: Editable<Transaction>, ctx:
         options
       )
     : [];
+  // §3.3: an explicit choice (options.spend, `[]` = none) wins; otherwise the expense keeps its fund(s), re-applied to
+  // the new amount / account; a non-expense spends nothing.
+  const spends = options?.spend !== undefined ? options.spend : respend(reversed, oldSpends, updated);
+  const movements = spendMovements({ ...reversed, ...patch }, [...reversed.reservationMovements, ...follows], updated, spends, ctx);
   return settle(
     state,
-    { ...patch, reservationMovements: [...reversed.reservationMovements, ...follows] },
+    {
+      ...patch,
+      reservationMovements: movements,
+      ...(oldSpends.length > 0 ? { tombstones: logDeletes(state, 'reservationMovement', [...oldSpendIds], ctx) } : {}),
+    },
     ctx,
     options,
-    raw.id
+    raw.id,
+    // An edited expense is presented as a whole, from the state without it (its old fund spending given back).
+    expenseGate(updated, { ...reversed, transactions: reversed.transactions.filter((x) => x.id !== raw.id) })
   );
 }
 
@@ -793,10 +897,22 @@ function updateTransactionCore(state: State, raw: Editable<Transaction>, ctx: Op
 export function deleteTransaction(state: State, id: string, ctx: OpContext, options?: OpOptions): Patch {
   const tx = requireById(state.transactions, id, 'transaction');
   const reversal = isMove(tx) ? reversalMovements(state, tx, ctx, tx.rateSnapshotId) : [];
+  // §3.3 (decided): the fund money the expense SPENT goes back to its fund(s) with it, automatically (sinking payments
+  // included). Its COVER movements are not touched: giving those back stays the user's choice (the Q4 offer, AC-6).
+  const spends = spendOf(state, id);
+  const spendIds = new Set(spends.map((m) => m.id));
   const patch = deleteTransactionCore(state, id, ctx);
+  const movements =
+    spends.length > 0 || reversal.length > 0
+      ? [...state.reservationMovements.filter((m) => !spendIds.has(m.id)), ...reversal]
+      : undefined;
   return settle(
     state,
-    reversal.length > 0 ? { ...patch, reservationMovements: [...state.reservationMovements, ...reversal] } : patch,
+    {
+      ...patch,
+      ...(movements ? { reservationMovements: movements } : {}),
+      ...(spends.length > 0 ? { tombstones: [...patch.tombstones!, ...spends.map((m) => tombstone('reservationMovement', m.id, ctx))] } : {}),
+    },
     ctx,
     options,
     id
@@ -1108,6 +1224,7 @@ export function allocateToFund(
   accountId?: string
 ): Patch {
   const fund = requireById(state.funds, fundId, 'fund');
+  assertOpen(fund);
   const value = fundMoney(state, fundId, amount, currency);
   assertPositive(value, 'amount');
   assertCurrency(currency);
@@ -1146,7 +1263,7 @@ export function allocateMany(
   const allocations = rawAllocations.map((a) => ({ ...a, amount: fundMoney(state, a.fundId, a.amount, a.currency) }));
   if (allocations.length === 0) fail('NOTHING_SELECTED');
   for (const { fundId, amount, currency } of allocations) {
-    requireById(state.funds, fundId, 'fund');
+    assertOpen(requireById(state.funds, fundId, 'fund'));
     assertPositive(amount, 'amount');
     assertCurrency(currency);
   }
@@ -1204,7 +1321,8 @@ export interface Reallocation {
 
 export function reallocate(state: State, input: Reallocation, ctx: OpContext): Patch {
   const from = requireById(state.funds, input.fromFundId, 'fund');
-  requireById(state.funds, input.toFundId, 'fund');
+  // An achieved goal may give its leftover to another fund (AC-4), never receive (INV-13).
+  assertOpen(requireById(state.funds, input.toFundId, 'fund'));
   if (input.fromFundId === input.toFundId) fail('DUPLICATE_ENTRY');
   const currency = input.currency ?? from.currency;
   assertCurrency(input.currency);
@@ -1237,6 +1355,40 @@ export function reReserveCovers(state: State, covers: CoverSelection[], sourceTr
   }
   if (moves.length === 0) fail('RESERVE_EXCEEDS_AVAILABLE');
   return { ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...moves] };
+}
+
+// --- Goals achieved (FUND_SPEND_AND_GOALS_DESIGN.md §3.4) ---------------------------------------------------------
+
+// INV-13 at the write boundary: an achieved goal receives no new money (reserve, reallocate in, a larger allocation).
+function assertOpen(fund: Fund) {
+  if (fund.achievedAt) fail('FUND_ACHIEVED', { id: fund.id });
+}
+
+// «تم الهدف 🎉»: the user's explicit confirmation (AC-2: reaching the target never does this). Goals only. With
+// `releaseLeftover` the fund's remaining reservations go back to free money in the SAME patch ('release' movements,
+// every account); without it they stay reserved and visible (AC-4). Never released by itself. Twice = once.
+export function achieveFund(state: State, fundId: string, options: { releaseLeftover: boolean }, ctx: OpContext): Patch {
+  const fund = requireById(state.funds, fundId, 'fund');
+  if (fund.type !== 'goal') fail('FUND_NOT_A_GOAL', { id: fundId });
+  if (fund.achievedAt) return {};
+  const funds = replaceById(state.funds, stamp({ ...fund, achievedAt: ctx.now().toISOString() }, ctx), 'fund');
+  if (!options.releaseLeftover) return { funds };
+  const use = snapshotForNow(state, ctx.now());
+  const released = state.accounts
+    .map((a) => ({ account: a, held: reservation(state, fundId, a.id) }))
+    .filter(({ held }) => held > 0.005)
+    .map(({ account, held }) => newReservation(use.id, fundId, account.id, -money(held, account.currency), 'release', 'تم الهدف', ctx));
+  return released.length > 0
+    ? { funds, ...ratePatch(use), reservationMovements: [...state.reservationMovements, ...released] }
+    : { funds };
+}
+
+// «رجّعه هدف مفتوح» (AC-3): clears achievedAt. Released money is not taken back. Twice = once.
+export function reopenFund(state: State, fundId: string, ctx: OpContext): Patch {
+  const fund = requireById(state.funds, fundId, 'fund');
+  if (!fund.achievedAt) return {};
+  const { achievedAt: _done, ...rest } = fund;
+  return { funds: replaceById(state.funds, stamp(rest, ctx) as Fund, 'fund') };
 }
 
 // Gives a group of migrated movements ("محجوز ومش محدد حسابه") an account: every unresolved movement of this fund in
@@ -1305,6 +1457,8 @@ export function editFund(state: State, fundId: string, edit: FundEdit, ctx: OpCo
 
   const use = snapshotForNow(state, ctx.now());
   const change = money(cashAllocation - fundAllocated(state, fundId), fund.currency);
+  // An achieved goal: details and its leftover's release may change, never more money in, never another type (INV-13).
+  if (fund.achievedAt && (change >= 0.005 || updated.type !== 'goal')) fail('FUND_ACHIEVED', { id: fundId });
   let moves: ReservationMovement[] = [];
   if (change >= 0.005) {
     moves = reserveFor(state, fundId, change, fund.currency, 'تعديل الرصيد', ctx, use.id);
@@ -1369,14 +1523,19 @@ export function paySinkingFund(state: State, payment: SinkingPayment, ctx: OpCon
   );
   const paid = draft.transactions[0];
   const use = snapshotForNow(draft, ctx.now());
-  const spent = Math.min(money(payment.amount, account.currency), reservation(draft, fund.id, account.id));
+  // The shared spend stage (FUND_SPEND §3.1): the fund's own reservation on the paying account, up to the payment.
+  // Same movement as before (amount, kind, note, source); deleting the payment now gives it back (§3.3, decided).
+  const spent = planSpend(draft, fund.id, account.id, paid.type === 'expense' ? paid.amount : 0);
   if (spent > 0) {
     apply({
       ...ratePatch(use),
-      reservationMovements: [
-        ...draft.reservationMovements,
-        newReservation(use.id, fund.id, account.id, -spent, 'spend', `اتدفعت: ${fund.name}`, ctx, { sourceTransactionId: paid.id }),
-      ],
+      reservationMovements: spendMovements(
+        draft,
+        draft.reservationMovements,
+        paid,
+        [{ fundId: fund.id, accountId: account.id, amount: spent, note: `اتدفعت: ${fund.name}` }],
+        ctx
+      ),
     });
   }
 
@@ -1935,15 +2094,18 @@ export function confirmOccurrence(
     ),
   };
   const follows = isMove(tx) ? followOrAsk(state, base, state.reservationMovements, state, tx, ctx, options) : [];
+  // A confirmed expense may spend fund money too (chosen in the cover sheet, FUND_SPEND §4 / AC-8).
+  const movements = spendMovements({ ...state, ...base }, [...state.reservationMovements, ...follows], tx, options?.spend ?? [], ctx);
   return settle(
     state,
     {
       ...base,
-      reservationMovements: [...state.reservationMovements, ...follows],
+      reservationMovements: movements,
     },
     ctx,
     options,
-    tx.id
+    tx.id,
+    expenseGate(tx, state)
   );
 }
 

@@ -15,6 +15,7 @@ import type {
   FinanceState,
   Fund,
   ReservationKind,
+  ReservationMovement,
   GoldKarat,
   Holding,
   IncomeExpenseTransaction,
@@ -397,8 +398,17 @@ export function fundMovementRows(state: MovementRowState): FundMovementRow[] {
 
 // Whether a movement adds to or takes from what is saved. Moving a reservation between funds or accounts
 // (reallocate, a transfer or exchange carrying it) saves nothing new.
+// Q6 (decided, FUND_SPEND_AND_GOALS_DESIGN.md §3.5): spending a fund on its purpose is NOT un-saving, so 'spend' is out
+// of the saving pace too (like moves between funds and accounts). Spending has its own metric (fundSpent).
 export const countsAsSaving = (kind: ReservationKind): boolean =>
-  kind !== 'reallocate' && kind !== 'follow_transfer' && kind !== 'follow_exchange';
+  kind !== 'reallocate' && kind !== 'follow_transfer' && kind !== 'follow_exchange' && kind !== 'spend';
+
+// The fund money an expense SPENT (its 'spend' movements, FUND_SPEND_AND_GOALS_DESIGN.md §3.3): the link between a
+// purchase and its fund(s) is derived from these, never stored on the transaction. Amounts are ≤ 0, in the account's
+// currency.
+export function spendOf(state: Pick<State, 'reservationMovements'>, transactionId: string): ReservationMovement[] {
+  return state.reservationMovements.filter((m) => m.kind === 'spend' && m.sourceTransactionId === transactionId);
+}
 
 // What fund `fundId` has reserved on `accountId`, in the account's currency.
 export function reservation(state: Pick<State, 'reservationMovements' | 'accounts'>, fundId: string, accountId: string): number {
@@ -508,12 +518,24 @@ export function fundCurrent(state: State, fundId: string): number {
   return roundIn(fundAllocated(state, fundId) + fundLinkedValue(state, fundId), fund?.currency ?? 'EGP');
 }
 
+// What counts toward the target (decided 2026-11-25, FUND_SPEND §3.5): for a GOAL, what it still holds + what it already
+// spent on its purpose ('spend', «من صندوق»), so buying the thing never makes the goal look unstarted; money taken from
+// it for something else ('cover') or released does not count and lowers it. Emergency and sinking funds: what they hold
+// now (a sinking payment starts a new cycle). Fund currency. Progress, the monthly requirement, the month's pace (status)
+// and the suggestion all read this; the Q8 nudge uses the same basis.
+export function fundProgressAmount(state: State, fundId: string): number {
+  const fund = findFund(state, fundId);
+  if (!fund) return 0;
+  const current = fundCurrent(state, fundId);
+  return fund.type === 'goal' ? roundIn(current + fundSpent(state, fundId), fund.currency) : current;
+}
+
 // 0..∞ (can exceed 1 when over-funded). A non-positive target counts as complete.
 export function fundProgress(state: State, fundId: string): number {
   const fund = findFund(state, fundId);
   if (!fund) return 0;
   if (fund.targetAmount <= 0) return 1;
-  return Math.max(0, fundCurrent(state, fundId) / fund.targetAmount);
+  return Math.max(0, fundProgressAmount(state, fundId) / fund.targetAmount);
 }
 
 // A fund movement in `currency` as it was worth when made (for history: plan progress, the
@@ -551,7 +573,7 @@ export function fundRequiredMonthly(state: State, fundId: string, now: Date = ne
   const fund = findFund(state, fundId);
   const due = fund && fundDueDate(fund);
   if (!fund || !due) return null;
-  const remaining = Math.max(0, fund.targetAmount - fundCurrent(state, fundId));
+  const remaining = Math.max(0, fund.targetAmount - fundProgressAmount(state, fundId));
   return remaining / monthsUntil(due, now);
 }
 
@@ -607,7 +629,7 @@ function monthPace(state: State, fundId: string, now: Date): MonthPace | null {
       .map((m) => movementValueInFund(state, m)),
     fund.currency
   );
-  const currentAtMonthStart = fundCurrent(state, fundId) - allocatedThisMonth;
+  const currentAtMonthStart = fundProgressAmount(state, fundId) - allocatedThisMonth;
   const remainingAtMonthStart = Math.max(0, fund.targetAmount - currentAtMonthStart);
   return { required: remainingAtMonthStart / monthsUntil(due, now), allocatedThisMonth };
 }
@@ -620,8 +642,51 @@ export function fundMonthShortfall(state: State, fundId: string, now: Date = new
 }
 
 // Active funds, highest priority (lowest number) first.
+// Active funds by priority: not archived and NOT ACHIEVED. Every suggestion, picker, plan line suggestion, refill offer
+// (receivables Q8), fund status nudge and Next Best Action reads this list, so an achieved goal leaves all of them at
+// once (rule 4). History, backups, totals and cover candidates read state.funds.
 export function fundsByPriority(state: Pick<State, 'funds'>): Fund[] {
-  return state.funds.filter((f) => !f.archived).sort((a, b) => a.priority - b.priority);
+  return state.funds.filter((f) => !f.archived && !f.achievedAt).sort((a, b) => a.priority - b.priority);
+}
+
+export const isAchieved = (fund: Pick<Fund, 'achievedAt'>): boolean => !!fund.achievedAt;
+
+// «أهداف اتحققت»: newest first.
+export function achievedFunds(state: Pick<State, 'funds'>): Fund[] {
+  return state.funds.filter(isAchieved).sort((a, b) => (b.achievedAt! < a.achievedAt! ? -1 : b.achievedAt! > a.achievedAt! ? 1 : 0));
+}
+
+// The three fund metrics are kept apart (Q6): CONTRIBUTIONS (money put in: 'reserve' and positive 'adjust'),
+// SPENDING ('spend', money used for the fund's purpose) and what is still RESERVED (fundAllocated / fundCurrent). Covers
+// and releases are neither: money taken back. Each movement counts in the fund's currency at its own rates.
+const fundMetric = (state: State, fundId: string, pick: (m: FundMovementRow) => boolean, month?: string): number => {
+  const fund = findFund(state, fundId);
+  if (!fund) return 0;
+  return sumIn(
+    fundMovementRows(state)
+      .filter((m) => m.fundId === fundId && pick(m) && (!month || monthOf(m.date) === month))
+      .map((m) => movementAmountIn(state, m, fund.currency)),
+    fund.currency
+  );
+};
+
+// What the fund spent on its purpose (positive), optionally in one month.
+export function fundSpent(state: State, fundId: string, month?: string): number {
+  // `0 - x`, not `-x`: nothing spent is 0, never −0 (which a screen could print as «−0»).
+  return 0 - fundMetric(state, fundId, (m) => m.kind === 'spend', month);
+}
+
+// What was put into the fund (positive), optionally in one month.
+export function fundContributed(state: State, fundId: string, month?: string): number {
+  return fundMetric(state, fundId, (m) => m.kind === 'reserve' || (m.kind === 'adjust' && m.amount > 0), month);
+}
+
+// The expenses the fund's money paid for (its 'spend' movements' sources that still exist), newest first.
+export function fundPurchases(state: Pick<State, 'reservationMovements' | 'transactions'>, fundId: string): IncomeExpenseTransaction[] {
+  const ids = new Set(state.reservationMovements.filter((m) => m.kind === 'spend' && m.fundId === fundId && m.sourceTransactionId).map((m) => m.sourceTransactionId!));
+  return state.transactions
+    .filter((t): t is IncomeExpenseTransaction => t.type === 'expense' && ids.has(t.id))
+    .sort(compareNewestFirst);
 }
 
 // Gold/currency holdings that `fundId` may link: unlinked ones plus its own.
@@ -795,7 +860,7 @@ export function withdrawalPlan(
 export function fundSuggestedMonthly(state: State, fundId: string, now: Date = new Date()): number {
   const fund = findFund(state, fundId);
   if (!fund) return 0;
-  const remaining = Math.max(0, fund.targetAmount - fundCurrent(state, fundId));
+  const remaining = Math.max(0, fund.targetAmount - fundProgressAmount(state, fundId));
   const monthly = fundRequiredMonthly(state, fundId, now) ?? fund.monthlyContribution ?? 0;
   return Math.min(monthly, remaining);
 }

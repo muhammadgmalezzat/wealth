@@ -36,14 +36,22 @@ const persistMigration: PersistMigrationSetup = {
   newId,
 };
 
-// Prefer the git-ignored personal seed; fall back to the committed example.
-// Expo's Metro config enables optional dependencies, so a missing file is fine here.
+// The opening data a fresh install starts from (and «استيراد البيانات الافتتاحية» imports).
+//
+// PRIVACY: store/seed.local.ts holds real data (git-ignored). It is loaded ONLY in development. Metro inlines `__DEV__`
+// as `false` in every production bundle (`expo export`, `eas update`, `eas build`) and drops the dead branch before
+// it collects dependencies, so the `require('./seed.local')` below never reaches a production or OTA bundle; production
+// always starts from the committed, synthetic seed.example. `npm run check:release` verifies this on a fresh export
+// before every release. Expo's Metro config enables optional dependencies, so a missing file is fine in development.
 function loadSeed(): FinanceState {
-  try {
-    return require('./seed.local').SEED_STATE as FinanceState;
-  } catch {
-    return require('./seed.example').SEED_STATE as FinanceState;
+  if (__DEV__) {
+    try {
+      return require('./seed.local').SEED_STATE as FinanceState;
+    } catch {
+      // No personal seed on this machine: the example below.
+    }
   }
+  return require('./seed.example').SEED_STATE as FinanceState;
 }
 
 const SEED_STATE = loadSeed();
@@ -114,6 +122,9 @@ interface FinanceActions {
   editFund: (fundId: string, edit: ops.FundEdit) => void;
   allocateMany: (allocations: FundAmount[], note?: string) => void;
   withdrawMany: (withdrawals: FundAmount[], note?: string) => void;
+  // «تم الهدف 🎉» (goals): keep or release the leftover, chosen by the user; and reopening.
+  achieveFund: (fundId: string, options: { releaseLeftover: boolean }) => void;
+  reopenFund: (fundId: string) => void;
   paySinkingFund: (payment: ops.SinkingPayment, options?: OpOptions) => void;
   // `currency`: the currency of `amount` (the fund's when omitted).
   allocateToFund: (fundId: string, amount: number, note?: string, currency?: CurrencyCode) => void;
@@ -261,6 +272,8 @@ export const useFinanceStore = create<FinanceStore>()(
       editFund: (fundId, edit) => set(ops.editFund(get(), fundId, edit, ctx)),
       allocateMany: (allocations, note) => set(ops.allocateMany(get(), allocations, note, ctx)),
       withdrawMany: (withdrawals, note) => set(ops.withdrawMany(get(), withdrawals, note, ctx)),
+      achieveFund: (fundId, options) => set(ops.achieveFund(get(), fundId, options, ctx)),
+      reopenFund: (fundId) => set(ops.reopenFund(get(), fundId, ctx)),
       paySinkingFund: (payment, options) => set(ops.paySinkingFund(get(), payment, ctx, options)),
       allocateToFund: (fundId, amount, note, currency) =>
         set(ops.allocateToFund(get(), fundId, amount, note, ctx, currency)),
@@ -342,6 +355,9 @@ export const useFinanceStore = create<FinanceStore>()(
       // Snapshots are written before anything changes, so a mistaken import or restore can
       // always be undone by hand.
       importOpeningData: async () => {
+        // Development only (settingsUi.canImportOpeningData): production's seed is sample data, never imported over
+        // real data. Refused before anything is written.
+        if (!__DEV__) throw new Error('importOpeningData is available in development builds only');
         await saveSnapshot(IMPORT_BACKUP_KEY, get());
         set(ops.replaceWithSeed(get(), SEED_STATE, ctx));
       },
